@@ -29,7 +29,9 @@ storage_class	nvme
 skip-log-bin	1
 query_cache_type	1
 query_cache_size	128M
-backup_enabled	1
+backup.status	verified
+backup.source	unit-test
+backup.last_success	2026-07-23T02:00:00Z
 backup_interval_hours	6
 bind_address	127.0.0.1
 wildcard_grants	0
@@ -43,11 +45,12 @@ make_samples() {
     local count=$4
     local log_waits=${5:-0}
     local mem_available_kb=${6:-12582912}
+    local connected=${7:-50}
 
-    awk -v hit="$hit" -v threads="$threads" -v count="$count" -v waits="$log_waits" -v available="$mem_available_kb" 'BEGIN {
+    awk -v hit="$hit" -v threads="$threads" -v count="$count" -v waits="$log_waits" -v available="$mem_available_kb" -v connected="$connected" 'BEGIN {
         OFS="\t"
         print "timestamp","uptime","bp_hit_pct","bp_misses_s","data_read_s","rnd_next_s","tmp_disk_pct","threads_running","threads_connected","qcache_hit_pct","log_waits_delta","wait_free_delta","cpu_pct","mem_available_kb","swap_used_kb","load1","restart_flag"
-        for (i=1; i<=count; i++) print "2026-07-24T00:00:00Z",i*300,99.9,1,1024,100,20,threads,50,hit,(i==1 ? waits : 0),0,5,available,0,1,0
+        for (i=1; i<=count; i++) print "2026-07-24T00:00:00Z",i*300,99.9,1,1024,100,20,threads,connected,hit,(i==1 ? waits : 0),0,5,available,0,1,0
     }' >"$file"
 }
 
@@ -83,6 +86,19 @@ analysis_value() {
     [ "$(analysis_value "$BATS_TEST_TMPDIR/analysis.tsv" R-MAXCONN max_connections)" = 220 ]
     [ "$(analysis_value "$BATS_TEST_TMPDIR/analysis.tsv" R-IO-CAP innodb_io_capacity)" = 2000 ]
     [ "$(analysis_value "$BATS_TEST_TMPDIR/analysis.tsv" R-LOG-BUF innodb_log_buffer_size)" = 64M ]
+}
+
+@test "max connections requires an authoritative non-OLS worker limit" {
+    make_audit "$BATS_TEST_TMPDIR/audit.tsv"
+    make_samples "$BATS_TEST_TMPDIR/samples.tsv" 30 1 10 0 12582912 2
+    awk -F '\t' '$1 != "pm_max_children_sum" && $1 != "max_used_connections" {print} END {print "max_used_connections\t3"}' OFS='\t' "$BATS_TEST_TMPDIR/audit.tsv" >"$BATS_TEST_TMPDIR/missing.tsv"
+    awk -F '\t' '$1 == "pm_max_children_sum" {$2=0} $1 == "max_used_connections" {$2=3} {print}' OFS='\t' "$BATS_TEST_TMPDIR/audit.tsv" >"$BATS_TEST_TMPDIR/zero.tsv"
+    awk -F '\t' '$1 == "max_used_connections" {$2=3} {print} END {print "php_fpm.ols_stack\t1"}' OFS='\t' "$BATS_TEST_TMPDIR/audit.tsv" >"$BATS_TEST_TMPDIR/ols.tsv"
+
+    for audit in missing zero ols; do
+        dbtune_rules_analyze "$BATS_TEST_TMPDIR/$audit.tsv" "$BATS_TEST_TMPDIR/samples.tsv" "" "" "" 10 >"$BATS_TEST_TMPDIR/$audit-analysis.tsv"
+        [ "$(awk -F '\t' '$1=="R-MAXCONN" {print ($4=="UNKNOWN" && $5=="" && $6=="") ? "yes" : "no"}' "$BATS_TEST_TMPDIR/$audit-analysis.tsv")" = yes ]
+    done
 }
 
 @test "query cache matrix keeps exact 20 percent and 8 threads boundary" {
@@ -134,6 +150,85 @@ EOF
     dbtune_rules_analyze "$BATS_TEST_TMPDIR/audit.tsv" "$BATS_TEST_TMPDIR/samples.tsv" "$BATS_TEST_TMPDIR/dbsize-5.tsv" "" "" 10 >"$BATS_TEST_TMPDIR/five.tsv"
     [ "$(analysis_value "$BATS_TEST_TMPDIR/four.tsv" R-BP-SIZE innodb_buffer_pool_size)" = 7G ]
     [ "$(analysis_value "$BATS_TEST_TMPDIR/five.tsv" R-BP-SIZE innodb_buffer_pool_size)" = 31232M ]
+}
+
+@test "dbsize growth uses elapsed calendar days rather than point count" {
+    make_audit "$BATS_TEST_TMPDIR/audit.tsv" 10.11.13 5368709120 67108864 128M
+    make_samples "$BATS_TEST_TMPDIR/samples.tsv" 30 2 10 0 62914560
+    cat >"$BATS_TEST_TMPDIR/dbsize-4d.tsv" <<'EOF'
+timestamp	database	size_bytes
+2026-07-01T00:00:00Z	shop	5368709120
+2026-07-02T00:00:00Z	shop	5476083302
+2026-07-03T00:00:00Z	shop	5583457484
+2026-07-04T00:00:00Z	shop	5690831666
+2026-07-05T00:00:00Z	shop	5798205848
+EOF
+    cat >"$BATS_TEST_TMPDIR/dbsize-28d.tsv" <<'EOF'
+timestamp	database	size_bytes
+2026-07-01T00:00:00Z	shop	5368709120
+2026-07-08T00:00:00Z	shop	5476083302
+2026-07-15T00:00:00Z	shop	5583457484
+2026-07-22T00:00:00Z	shop	5690831666
+2026-07-29T00:00:00Z	shop	5798205848
+EOF
+
+    dbtune_rules_analyze "$BATS_TEST_TMPDIR/audit.tsv" "$BATS_TEST_TMPDIR/samples.tsv" "$BATS_TEST_TMPDIR/dbsize-4d.tsv" "" "" 10 >"$BATS_TEST_TMPDIR/4d.tsv"
+    dbtune_rules_analyze "$BATS_TEST_TMPDIR/audit.tsv" "$BATS_TEST_TMPDIR/samples.tsv" "$BATS_TEST_TMPDIR/dbsize-28d.tsv" "" "" 10 >"$BATS_TEST_TMPDIR/28d.tsv"
+
+    run awk -F '\t' '$1=="R-BP-SIZE" {print $7}' "$BATS_TEST_TMPDIR/4d.tsv"
+    [[ "$output" == *'growth_elapsed_days=4'* ]]
+    [[ "$output" == *'growth_180d=18.00G'* ]]
+    run awk -F '\t' '$1=="R-BP-SIZE" {print $7}' "$BATS_TEST_TMPDIR/28d.tsv"
+    [[ "$output" == *'growth_elapsed_days=28'* ]]
+    [[ "$output" == *'growth_180d=2.57G'* ]]
+}
+
+@test "dbsize duplicate retries are idempotent and partial late snapshots are ignored" {
+    make_audit "$BATS_TEST_TMPDIR/audit.tsv" 10.11.13 5368709120 67108864 128M
+    make_samples "$BATS_TEST_TMPDIR/samples.tsv" 30 2 10 0 62914560
+    cat >"$BATS_TEST_TMPDIR/dbsize.tsv" <<'EOF'
+timestamp	database	size_bytes
+2026-07-01T00:00:00Z	shop	5000000000
+2026-07-01T00:00:00Z	logs	100000000
+2026-07-02T00:00:00Z	shop	5100000000
+2026-07-02T00:00:00Z	logs	100000000
+2026-07-03T00:00:00Z	shop	5200000000
+2026-07-03T00:00:00Z	logs	100000000
+2026-07-04T00:00:00Z	shop	5300000000
+2026-07-04T00:00:00Z	logs	100000000
+2026-07-05T00:00:00Z	shop	5400000000
+2026-07-05T00:00:00Z	logs	100000000
+EOF
+    cp "$BATS_TEST_TMPDIR/dbsize.tsv" "$BATS_TEST_TMPDIR/dbsize-retry.tsv"
+    awk 'NR>1 {print}' "$BATS_TEST_TMPDIR/dbsize.tsv" >>"$BATS_TEST_TMPDIR/dbsize-retry.tsv"
+    printf '%s\n' $'2026-07-05T23:00:00Z\tshop\t50000000000' >>"$BATS_TEST_TMPDIR/dbsize-retry.tsv"
+
+    dbtune_rules_analyze "$BATS_TEST_TMPDIR/audit.tsv" "$BATS_TEST_TMPDIR/samples.tsv" "$BATS_TEST_TMPDIR/dbsize.tsv" "" "" 10 >"$BATS_TEST_TMPDIR/original.tsv"
+    dbtune_rules_analyze "$BATS_TEST_TMPDIR/audit.tsv" "$BATS_TEST_TMPDIR/samples.tsv" "$BATS_TEST_TMPDIR/dbsize-retry.tsv" "" "" 10 >"$BATS_TEST_TMPDIR/retry.tsv"
+    run cmp "$BATS_TEST_TMPDIR/original.tsv" "$BATS_TEST_TMPDIR/retry.tsv"
+    [ "$status" -eq 0 ]
+}
+
+@test "dbsize import is review evidence and excluded from automatic growth" {
+    make_audit "$BATS_TEST_TMPDIR/audit.tsv" 10.11.13 10737418240 134217728 128M
+    make_samples "$BATS_TEST_TMPDIR/samples.tsv" 30 2 10 0 125829120
+    cat >"$BATS_TEST_TMPDIR/dbsize-import.tsv" <<'EOF'
+timestamp	database	size_bytes
+2026-07-01T00:00:00Z	shop	10737418240
+2026-07-02T00:00:00Z	shop	10844792422
+2026-07-03T00:00:00Z	shop	53794465382
+2026-07-04T00:00:00Z	shop	53901839564
+2026-07-05T00:00:00Z	shop	54009213746
+EOF
+
+    dbtune_rules_analyze "$BATS_TEST_TMPDIR/audit.tsv" "$BATS_TEST_TMPDIR/samples.tsv" "$BATS_TEST_TMPDIR/dbsize-import.tsv" "" "" 10 >"$BATS_TEST_TMPDIR/import.tsv"
+    run awk -F '\t' '$1=="R-BP-GROWTH" {print $3, $4, $7}' "$BATS_TEST_TMPDIR/import.tsv"
+    [ "$status" -eq 0 ]
+    [[ "$output" == 'medium REVIEW '* ]]
+    [[ "$output" == *'excluded_from_growth=true'* ]]
+    run awk -F '\t' '$1=="R-BP-SIZE" {print $7}' "$BATS_TEST_TMPDIR/import.tsv"
+    [[ "$output" == *'growth_180d=18.00G'* ]]
+    [[ "$output" == *'discontinuities=1'* ]]
 }
 
 @test "version families expose removed deprecated and dynamic gates" {
@@ -203,6 +298,52 @@ EOF
     [ "$output" = yes ]
 }
 
+@test "object cache is OK only with both drop-in and successful Redis probe" {
+    make_audit "$BATS_TEST_TMPDIR/audit.tsv"
+    make_samples "$BATS_TEST_TMPDIR/samples.tsv" 30 2 10
+    cat >"$BATS_TEST_TMPDIR/apps.tsv" <<'EOF'
+app_id	is_wp	object_cache_dropin	redis_active
+both-up	1	1	1
+redis-down	1	1	0
+dropin-missing	1	0	1
+both-down	1	0	0
+redis-unknown	1	1	unknown
+dropin-unknown	1	unknown	1
+EOF
+
+    dbtune_rules_analyze "$BATS_TEST_TMPDIR/audit.tsv" "$BATS_TEST_TMPDIR/samples.tsv" "" "$BATS_TEST_TMPDIR/apps.tsv" "" 10 >"$BATS_TEST_TMPDIR/analysis.tsv"
+    run awk -F '\t' '$1=="R-APP-OBJECT-CACHE" {print $2, $3, $4}' "$BATS_TEST_TMPDIR/analysis.tsv"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *'app:both-up info OK'* ]]
+    [[ "$output" == *'app:redis-down critical REDIS-DOWN'* ]]
+    [[ "$output" == *'app:dropin-missing critical DROPIN-MISSING'* ]]
+    [[ "$output" == *'app:both-down critical REDIS-DOWN'* ]]
+    [[ "$output" == *'app:redis-unknown medium UNKNOWN'* ]]
+    [[ "$output" == *'app:dropin-unknown medium UNKNOWN'* ]]
+}
+
+@test "backup rule obeys verified missing unknown tri-state contract" {
+    make_audit "$BATS_TEST_TMPDIR/verified.tsv"
+    make_samples "$BATS_TEST_TMPDIR/samples.tsv" 30 2 10
+    cp "$BATS_TEST_TMPDIR/verified.tsv" "$BATS_TEST_TMPDIR/missing.tsv"
+    printf '%s\n' $'backup.status\tmissing' >>"$BATS_TEST_TMPDIR/missing.tsv"
+    cp "$BATS_TEST_TMPDIR/verified.tsv" "$BATS_TEST_TMPDIR/unknown.tsv"
+    printf '%s\n' $'backup.status\tunknown' >>"$BATS_TEST_TMPDIR/unknown.tsv"
+    awk -F '\t' '$1 !~ /^backup[._](status|source|last_success)$/' "$BATS_TEST_TMPDIR/verified.tsv" >"$BATS_TEST_TMPDIR/schedule-only.tsv"
+    printf '%s\n' $'backup.schedule_count\t4' >>"$BATS_TEST_TMPDIR/schedule-only.tsv"
+
+    for status in verified missing unknown schedule-only; do
+        dbtune_rules_analyze "$BATS_TEST_TMPDIR/$status.tsv" "$BATS_TEST_TMPDIR/samples.tsv" "" "" "" 10 >"$BATS_TEST_TMPDIR/$status-analysis.tsv"
+    done
+    [ "$(awk -F '\t' '$1=="R-BACKUP" {print $3, $4}' "$BATS_TEST_TMPDIR/verified-analysis.tsv")" = 'info OK' ]
+    [ "$(awk -F '\t' '$1=="R-BACKUP" {print $3, $4}' "$BATS_TEST_TMPDIR/missing-analysis.tsv")" = 'critical MISSING' ]
+    [ "$(awk -F '\t' '$1=="R-BACKUP" {print $3, $4}' "$BATS_TEST_TMPDIR/unknown-analysis.tsv")" = 'medium UNKNOWN' ]
+    [ "$(awk -F '\t' '$1=="R-BACKUP" {print $3, $4}' "$BATS_TEST_TMPDIR/schedule-only-analysis.tsv")" = 'medium UNKNOWN' ]
+    run awk -F '\t' '$1=="R-BACKUP" {print $7}' "$BATS_TEST_TMPDIR/verified-analysis.tsv"
+    [[ "$output" == *'source=unit-test'* ]]
+    [[ "$output" == *'last_success=2026-07-23T02:00:00Z'* ]]
+}
+
 @test "proposal renderer consumes only server proposal records" {
     cat >"$BATS_TEST_TMPDIR/analysis.tsv" <<'EOF'
 rule_id	scope	severity	verdict	proposed_key	proposed_value	evidence	reason_sk
@@ -266,6 +407,8 @@ EOF
     [ "$output" = yes ]
     run awk -F '\t' '$1=="R-VERSION" && $4=="REMOVED" || $1=="R-SEC" && $4=="EXPOSED" {n++} END {print n+0}' "$BATS_TEST_TMPDIR/analysis.tsv"
     [ "$output" = 2 ]
+    run awk -F '\t' '$1=="R-BACKUP" {print $3, $4}' "$BATS_TEST_TMPDIR/analysis.tsv"
+    [ "$output" = 'medium UNKNOWN' ]
 }
 
 @test "app scoped database metrics do not collide for a shared database" {

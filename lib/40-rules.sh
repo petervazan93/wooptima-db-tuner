@@ -196,28 +196,97 @@ dbtune_rules_analyze() {
         p05_available_kb = percentile(mem_available, sample_count, 5)
     }
 
-    function load_dbsize(file, line, fields, date, size, n, i) {
+    function load_dbsize(file, line, fields, date, database, timestamp, size_text, size, n, i, key, elapsed, delta, magnitude, threshold, valid_delta, valid_days) {
         if (file == "" || (getline line < file) <= 0) return
         while ((getline line < file) > 0) {
             sub(/\r$/, "", line)
             n = split(line, fields, "\t")
-            if (n < 3 || fields[1] == "") continue
-            date = substr(fields[1], 1, 10)
-            size = numeric(fields[3])
-            if (!(date in day_seen)) {
-                day_seen[date] = 1
-                dates[++day_count] = date
+            timestamp = trim(fields[1])
+            database = trim(fields[2])
+            date = substr(timestamp, 1, 10)
+            size_text = trim(fields[3])
+            if (n < 3 || timestamp == "" || database == "" || date_ordinal(date) <= 0 || size_text !~ /^[0-9]+([.][0-9]+)?$/) continue
+            size = size_text + 0
+            key = timestamp SUBSEP database
+            if (!(key in snapshot_size)) {
+                snapshot_count[timestamp]++
+                if (!(timestamp in snapshot_seen)) {
+                    snapshot_seen[timestamp] = 1
+                    snapshot_day[timestamp] = date
+                    snapshots[++snapshot_total] = timestamp
+                }
             }
-            day_size[date] += size
+            snapshot_size[key] = size
         }
         close(file)
+        for (i = 1; i <= snapshot_total; i++) {
+            timestamp = snapshots[i]
+            date = snapshot_day[timestamp]
+            if (snapshot_count[timestamp] > day_database_count[date]) day_database_count[date] = snapshot_count[timestamp]
+        }
+        for (i = 1; i <= snapshot_total; i++) {
+            timestamp = snapshots[i]
+            date = snapshot_day[timestamp]
+            if (snapshot_count[timestamp] == day_database_count[date] && (!(date in day_snapshot) || timestamp > day_snapshot[date]))
+                day_snapshot[date] = timestamp
+        }
+        for (key in snapshot_size) {
+            split(key, fields, SUBSEP)
+            timestamp = fields[1]
+            database = fields[2]
+            date = snapshot_day[timestamp]
+            if (day_snapshot[date] == timestamp) day_size[date] += snapshot_size[key]
+        }
+        for (date in day_snapshot) {
+            day_seen[date] = 1
+            dates[++day_count] = date
+        }
         sort_text(dates, day_count)
         if (day_count > 0) latest_dbsize = day_size[dates[day_count]]
         if (day_count >= 5) {
-            daily_growth = (day_size[dates[day_count]] - day_size[dates[1]]) / (day_count - 1)
+            growth_elapsed_days = date_ordinal(dates[day_count]) - date_ordinal(dates[1])
+            for (i = 2; i <= day_count; i++) {
+                elapsed = date_ordinal(dates[i]) - date_ordinal(dates[i - 1])
+                if (elapsed <= 0) continue
+                delta = day_size[dates[i]] - day_size[dates[i - 1]]
+                magnitude = delta < 0 ? -delta : delta
+                threshold = max(gib, day_size[dates[i - 1]] * 0.25)
+                if (magnitude > threshold) {
+                    discontinuity_count++
+                    if (magnitude > discontinuity_largest) {
+                        discontinuity_largest = magnitude
+                        discontinuity_date = dates[i]
+                    }
+                    continue
+                }
+                valid_delta += delta
+                valid_days += elapsed
+            }
+            growth_valid_days = valid_days
+            daily_growth = valid_days > 0 ? valid_delta / valid_days : 0
             if (daily_growth < 0) daily_growth = 0
             growth_180 = daily_growth * 180
         }
+    }
+
+    function date_ordinal(date, parts, offsets, year, month, day, days, limit) {
+        if (date !~ /^[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]$/) return 0
+        split(date, parts, "-")
+        year = parts[1] + 0
+        month = parts[2] + 0
+        day = parts[3] + 0
+        if (year < 1 || month < 1 || month > 12) return 0
+        split("0 31 59 90 120 151 181 212 243 273 304 334", offsets, " ")
+        limit = month == 2 ? (is_leap_year(year) ? 29 : 28) : (month == 4 || month == 6 || month == 9 || month == 11 ? 30 : 31)
+        if (day < 1 || day > limit) return 0
+        days = 365 * (year - 1) + int((year - 1) / 4) - int((year - 1) / 100) + int((year - 1) / 400)
+        days += offsets[month] + day
+        if (month > 2 && is_leap_year(year)) days++
+        return days
+    }
+
+    function is_leap_year(year) {
+        return year % 400 == 0 || (year % 4 == 0 && year % 100 != 0)
     }
 
     function load_table(file, kind, first, fields, columns, line, n, i, id, key, value, pos, flatkey, parts, count) {
@@ -442,7 +511,7 @@ dbtune_rules_analyze() {
             safe_cap = current + max(0, available - reserve)
             if (target > safe_cap) target = int(safe_cap / step) * step
         }
-        evidence = sprintf("dataset=%.2fG; growth_points=%d; growth_180d=%.2fG; ram=%.2fG; mem_available_p05=%.2fG", dataset / gib, day_count, growth_180 / gib, ram / gib, available / gib)
+        evidence = sprintf("dataset=%.2fG; growth_points=%d; growth_elapsed_days=%d; growth_valid_days=%d; growth_180d=%.2fG; discontinuities=%d; ram=%.2fG; mem_available_p05=%.2fG", dataset / gib, day_count, growth_elapsed_days, growth_valid_days, growth_180 / gib, discontinuity_count, ram / gib, available / gib)
         if (target <= current && current > 0) {
             emit("R-BP-SIZE", "server", "info", "NO-SHRINK", "", "", evidence "; current=" format_size(current), "Existujuci pool sa automaticky nezmensuje; zmensovanie je rusiva operacia.")
         } else if (target < step) {
@@ -452,9 +521,21 @@ dbtune_rules_analyze() {
         }
     }
 
-    function max_connections_rule(workers, peak, formula, peak_floor, target, current, evidence) {
+    function growth_evidence_rule() {
+        if (discontinuity_count > 0)
+            emit("R-BP-GROWTH", "server", "medium", "REVIEW", "", "", sprintf("discontinuities=%d; largest_jump=%.2fG; date=%s; excluded_from_growth=true", discontinuity_count, discontinuity_largest / gib, discontinuity_date), "Skok nad adaptivny prah 25 percent, minimalne 1 GiB, vyzera ako import alebo diskontinuita; z projekcie rastu je vyluceny.")
+    }
+
+    function max_connections_rule(workers, peak, formula, peak_floor, target, current, evidence, ols, worker_status) {
         workers = numeric(ag("pm_max_children_sum", "0"))
         peak = max(numeric(ag("max_used_connections", "0")), peak_connected)
+        ols = truth(ag("php_fpm_ols_stack", ""))
+        if (ols || !("pm_max_children_sum" in present) || workers <= 0) {
+            worker_status = ols ? "ols-unavailable" : (("pm_max_children_sum" in present) ? "invalid" : "missing")
+            evidence = sprintf("pm.max_children_sum=%d; worker_limit=%s; ols_stack=%s; measured_peak=%d", workers, worker_status, ag("php_fpm_ols_stack", "unknown"), peak)
+            emit("R-MAXCONN", "server", "high", "UNKNOWN", "", "", evidence, "Bez autoritativneho limitu PHP-FPM alebo OLS workerov sa max_connections nesmie odhadovat ani pri nizkom peaku.")
+            return
+        }
         formula = max(100, ceil(workers * 1.25 + 20))
         peak_floor = ceil(peak * 1.25)
         target = max(formula, peak_floor)
@@ -523,7 +604,7 @@ dbtune_rules_analyze() {
         setting("R-PINNED", "table_definition_cache", "2000", "low", "wordpress tables", "Viac WP databaz potrebuje rezervu definicii tabuliek.")
     }
 
-    function operational_rules(key_reads, backup_interval, bind, wildcard, configured, effective) {
+    function operational_rules(key_reads, backup_interval, bind, wildcard, configured, effective, backup_status, backup_evidence) {
         key_reads = numeric(ag("key_read_requests", "0"))
         if (key_reads > 0) emit("R-MYISAM", "server", "info", "KEEP", "", "", "Key_read_requests=" key_reads, "MyISAM sa pouziva, key buffer sa nesmie plosne zmensit.")
         else size_setting("R-MYISAM", "key_buffer_size", "32M", "low", "Key_read_requests=0", "Moderny WordPress MyISAM bezne nepouziva.")
@@ -551,16 +632,21 @@ dbtune_rules_analyze() {
             emit("R-SEC", "server", "low", "CREDENTIAL-NOTE", "", "", "root.cnf contains a managed credential", "Heslo z root.cnf nikdy nevypisuj; pri rotacii ho zmen naraz v MariaDB aj v RunCloud subore.")
 
         backup_interval = numeric(ag("backup_interval_hours", "0"))
-        if (falsehood(ag("backup_enabled", "")) || (ag("backup_enabled", "") == "" && numeric(ag("backup_schedule_count", "0")) == 0))
-            emit("R-BACKUP", "server", "critical", "MISSING", "", "", "backup_enabled=" ag("backup_enabled", "unknown"), "Bez overenej zalohy tuning nenasadzuj.")
+        backup_status = tolower(trim(ag("backup_status", "unknown")))
+        backup_evidence = "status=" backup_status "; source=" ag("backup_source", "unknown") "; last_success=" ag("backup_last_success", "unknown") "; schedule_count=" ag("backup_schedule_count", "unknown") "; interval_hours=" backup_interval
+        if (backup_status == "missing")
+            emit("R-BACKUP", "server", "critical", "MISSING", "", "", backup_evidence, "Potvrdena absencia zalohy blokuje tuning.")
+        else if (backup_status != "verified")
+            emit("R-BACKUP", "server", "medium", "UNKNOWN", "", "", backup_evidence, "Stav zalohy nie je autoritativne overeny; pocet lokalnych planov sam o sebe zalohu nepotvrdzuje.")
         else if (backup_interval > 0 && backup_interval <= 3)
-            emit("R-BACKUP", "server", "medium", "FREQUENT", "", "", "interval_hours=" backup_interval, "Casty mydumper full scan moze vytvarat IO spicky; over realnu potrebu.")
-        else emit("R-BACKUP", "server", "info", "OK", "", "", "interval_hours=" backup_interval, "Zaloha je evidovana; pred apply over posledny uspesny beh.")
+            emit("R-BACKUP", "server", "medium", "FREQUENT", "", "", backup_evidence, "Casty mydumper full scan moze vytvarat IO spicky; over realnu potrebu.")
+        else emit("R-BACKUP", "server", "info", "OK", "", "", backup_evidence, "Zaloha je autoritativne overena.")
     }
 
     function server_rules(dataset, log_size, log_gate) {
         version_parts(ag("mariadb_version", "0.0"))
         gate_rules()
+        growth_evidence_rule()
         buffer_pool_rule()
         max_connections_rule()
         io_rule()
@@ -596,10 +682,14 @@ dbtune_rules_analyze() {
             redis = av(id, "redis_active", "redis_running", "redis")
             if (redis == "") redis = ag("app_redis_ping", ag("app_redis_service_active", ""))
             cache = av(id, "object_cache", "object_cache_dropin", "object_cache_php")
-            if (cache != "" && falsehood(cache)) {
-                if (redis != "" && falsehood(redis)) app_emit("R-APP-OBJECT-CACHE", id, "critical", "REDIS-DOWN", "redis=" redis "; dropin=" cache, "Persistent object cache chyba a Redis nebezi; aplikacnu vrstvu ries pred DB tuningom.")
-                else app_emit("R-APP-OBJECT-CACHE", id, "critical", "DROPIN-MISSING", "redis=" redis "; dropin=" cache, "Redis sam nestaci; WordPress potrebuje wp-content/object-cache.php drop-in.")
-            } else if (truth(cache)) app_emit("R-APP-OBJECT-CACHE", id, "info", "OK", "dropin=present", "Persistent object cache je aktivny.")
+            if (truth(cache) && truth(redis))
+                app_emit("R-APP-OBJECT-CACHE", id, "info", "OK", "redis=probe-success; dropin=present", "Persistent object cache ma drop-in aj uspesny Redis probe.")
+            else if (falsehood(redis))
+                app_emit("R-APP-OBJECT-CACHE", id, "critical", "REDIS-DOWN", "redis=" redis "; dropin=" (cache == "" ? "unknown" : cache), "Redis probe zlyhal; aplikacnu vrstvu ries pred DB tuningom.")
+            else if (falsehood(cache) && truth(redis))
+                app_emit("R-APP-OBJECT-CACHE", id, "critical", "DROPIN-MISSING", "redis=" redis "; dropin=" cache, "Redis sam nestaci; WordPress potrebuje wp-content/object-cache.php drop-in.")
+            else
+                app_emit("R-APP-OBJECT-CACHE", id, "medium", "UNKNOWN", "redis=" (redis == "" ? "unknown" : redis) "; dropin=" (cache == "" ? "unknown" : cache), "Drop-in aj Redis probe musia byt potvrdene; neznamy stav nie je zdravy stav.")
 
             disabled_cron = av(id, "disable_wp_cron", "wp_cron_disabled")
             system_cron = av(id, "system_wp_cron", "wp_cron_system", "cron_present")
