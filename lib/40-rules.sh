@@ -164,7 +164,7 @@ dbtune_rules_analyze() {
         return 1
     }
 
-    function load_samples(file, line, fields, header, n, i, value) {
+    function load_samples(file, line, fields, header, n, i, value, status, restart, denominator, hit_text) {
         if ((getline line < file) <= 0) {
             print "dbtune: samples.tsv je prazdny" > "/dev/stderr"
             exit 65
@@ -181,18 +181,36 @@ dbtune_rules_analyze() {
             if (line == "") continue
             n = split(line, fields, "\t")
             if (fields[header["timestamp"]] == "") continue
+            status = ("sample_status" in header) ? trim(fields[header["sample_status"]]) : "ok"
+            restart = numeric(fields[header["restart_flag"]])
+            if (status != "ok" || restart != 0) {
+                degraded_sample_count++
+                continue
+            }
             sample_count++
             value = numeric(fields[header["threads_running"]]); threads_running[sample_count] = value
             value = numeric(fields[header["threads_connected"]]); threads_connected[sample_count] = value
-            value = numeric(fields[header["qcache_hit_pct"]]); qcache_hit[sample_count] = value
             value = numeric(fields[header["mem_available_kb"]]); mem_available[sample_count] = value
             value = numeric(fields[header["log_waits_delta"]]); log_waits_total += value
             value = numeric(fields[header["wait_free_delta"]]); wait_free_total += value
             if (threads_connected[sample_count] > peak_connected) peak_connected = threads_connected[sample_count]
+            if (!("qcache_queries_delta" in header)) {
+                qcache_unavailable_count++
+                continue
+            }
+            denominator = trim(fields[header["qcache_queries_delta"]])
+            hit_text = trim(fields[header["qcache_hit_pct"]])
+            if (denominator !~ /^[0-9]+([.][0-9]+)?$/ || hit_text !~ /^[0-9]+([.][0-9]+)?$/ || hit_text + 0 < 0 || hit_text + 0 > 100) {
+                qcache_unavailable_count++
+            } else if (denominator + 0 > 0) {
+                qcache_hit[++qcache_active_count] = hit_text + 0
+            } else {
+                qcache_idle_count++
+            }
         }
         close(file)
         p95_threads = percentile(threads_running, sample_count, 95)
-        p50_qcache = percentile(qcache_hit, sample_count, 50)
+        p50_qcache = percentile(qcache_hit, qcache_active_count, 50)
         p05_available_kb = percentile(mem_available, sample_count, 5)
     }
 
@@ -568,7 +586,11 @@ dbtune_rules_analyze() {
     function qcache_rule(hit, threads, evidence) {
         hit = p50_qcache
         threads = p95_threads
-        evidence = sprintf("qcache_hit_p50=%.2f%%; threads_running_p95=%.2f", hit, threads)
+        evidence = sprintf("qcache_hit_p50=%.2f%%; active_windows=%d; required=%d; idle_windows=%d; unavailable_windows=%d; degraded_windows=%d; threads_running_p95=%.2f", hit, qcache_active_count, min_samples, qcache_idle_count, qcache_unavailable_count, degraded_sample_count, threads)
+        if (qcache_active_count < min_samples) {
+            emit("R-QCACHE", "server", "medium", "UNKNOWN", "", "", evidence, "Query cache nema dost aktivnych okien s nenulovym poctom query; idle okna sa do hit-rate percentilu nerataju.")
+            return
+        }
         if (hit < 20 || threads > 8) {
             setting("R-QCACHE", "query_cache_type", "0", "high", evidence, "Query cache sa vypina pri hit rate pod 20 percent alebo p95 Threads_running nad 8.")
             size_setting("R-QCACHE", "query_cache_size", "0", "high", evidence, "Pri vypnutom query cache sa uvolni aj jeho pamat.")

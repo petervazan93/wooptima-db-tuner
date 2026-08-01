@@ -65,9 +65,9 @@ write_sample_rows() {
     local count=$1 file
 
     file=$(dbtune_collect_samples_file)
-    printf 'header\n' >"$file"
+    printf 'timestamp\tuptime\tbp_hit_pct\tbp_misses_s\tdata_read_s\trnd_next_s\ttmp_disk_pct\tthreads_running\tthreads_connected\tqcache_hit_pct\tlog_waits_delta\twait_free_delta\tcpu_pct\tmem_available_kb\tswap_used_kb\tload1\trestart_flag\tqcache_queries_delta\tinterval_seconds\tsample_status\n' >"$file"
     for ((i = 0; i < count; i++)); do
-        printf 'sample-%s\n' "$i" >>"$file"
+        printf 'sample-%s\t%s\t99\t0\t0\t0\t0\t1\t1\t100\t0\t0\t1\t1000\t0\t1\t0\t1\t60\tok\n' "$i" "$i" >>"$file"
     done
 }
 
@@ -85,7 +85,7 @@ dbtune_embedded_get() {
 
     run dbtune_collect_delta now "$first" "$second" 60 $'7\t100' $'7\t400' 100 $'900000\t12000' 1.25 0
     [ "$status" -eq 0 ]
-    [ "$output" = $'now\t160\t95.00\t0.17\t100.00\t5.00\t30.00\t4\t10\t40.00\t2\t3\t5.00\t900000\t12000\t1.25\t0' ]
+    [ "$output" = $'now\t160\t95.00\t0.17\t100.00\t5.00\t30.00\t4\t10\t40.00\t2\t3\t5.00\t900000\t12000\t1.25\t0\t100\t60.000000\tok' ]
 }
 
 @test "uptime reset zeroes deltas and marks restart" {
@@ -94,7 +94,7 @@ dbtune_embedded_get() {
 
     run dbtune_collect_delta now "$first" "$second" 60 $'7\t500' $'8\t20' 100 $'900000\t12000' 0.50 1
     [ "$status" -eq 0 ]
-    [[ "$output" == $'now\t20\t100.00\t0.00\t0.00\t0.00\t0.00\t1\t3\t0.00\t0\t0\t0.00\t900000\t12000\t0.50\t1' ]]
+    [[ "$output" == $'now\t20\t100.00\t0.00\t0.00\t0.00\t0.00\t1\t3\t0.00\t0\t0\t0.00\t900000\t12000\t0.50\t1\t0\t60.000000\tok' ]]
 }
 
 @test "sample header is exact and idempotent" {
@@ -105,7 +105,81 @@ dbtune_embedded_get() {
     [ "$status" -eq 0 ]
     [ "$output" -eq 3 ]
     run awk 'NR == 1 { print }' "$(dbtune_collect_samples_file)"
-    [ "$output" = $'timestamp\tuptime\tbp_hit_pct\tbp_misses_s\tdata_read_s\trnd_next_s\ttmp_disk_pct\tthreads_running\tthreads_connected\tqcache_hit_pct\tlog_waits_delta\twait_free_delta\tcpu_pct\tmem_available_kb\tswap_used_kb\tload1\trestart_flag' ]
+    [ "$output" = $'timestamp\tuptime\tbp_hit_pct\tbp_misses_s\tdata_read_s\trnd_next_s\ttmp_disk_pct\tthreads_running\tthreads_connected\tqcache_hit_pct\tlog_waits_delta\twait_free_delta\tcpu_pct\tmem_available_kb\tswap_used_kb\tload1\trestart_flag\tqcache_queries_delta\tinterval_seconds\tsample_status' ]
+}
+
+@test "first new append atomically upgrades a legacy sample header" {
+    file=$(dbtune_collect_samples_file)
+    dbtune_collect_legacy_sample_header >"$file"
+    printf 'old\t100\t99\t1\t1\t1\t0\t1\t1\t100\t0\t0\t1\t1000\t0\t1\t0\n' >>"$file"
+    new=$'new\t160\t99\t1\t1\t1\t0\t1\t1\t100\t0\t0\t1\t1000\t0\t1\t0\t1\t60.000000\tok'
+
+    run dbtune_collect_append_sample "$new"
+    [ "$status" -eq 0 ]
+    [ "$(awk -F '\t' 'NR==1 {print NF}' "$file")" -eq 20 ]
+    [ "$(awk -F '\t' 'NR==2 {print NF, $18, $19, $20}' "$file")" = '20   ok' ]
+    [ "$(awk -F '\t' 'NR==3 {print NF, $18, $19, $20}' "$file")" = '20 1 60.000000 ok' ]
+}
+
+@test "interval validity rejects non-increasing and overly long measurements" {
+    run dbtune_collect_interval_seconds 100 175
+    [ "$status" -eq 0 ]
+    [ "$output" = 75.000000 ]
+    run dbtune_collect_interval_seconds 100 100
+    [ "$status" -ne 0 ]
+
+    run dbtune_collect_interval_status 120 60
+    [ "$output" = ok ]
+    run dbtune_collect_interval_status 120.000001 60
+    [ "$output" = degraded_interval ]
+    run dbtune_collect_interval_status 0 60
+    [ "$output" = degraded_interval ]
+
+    first=$'100\t10\t1000\t10000\t200\t5\t20\t2\t8\t100\t300\t1\t2'
+    second=$'221\t20\t1200\t16000\t500\t8\t30\t4\t10\t140\t360\t3\t5'
+    run dbtune_collect_delta now "$first" "$second" 121 $'7\t100' $'7\t400' 100 $'900000\t12000' 1.25 0 degraded_interval
+    [ "$status" -eq 0 ]
+    [ "$(awk -F '\t' '{print $4, $5, $6, $13, $19, $20}' <<<"$output")" = '0.00 0.00 0.00 0.00 121.000000 degraded_interval' ]
+}
+
+@test "tick rates and CPU use the real monotonic interval including second snapshot delay" {
+    dbtune_state_write collecting
+    write_collect_config
+    export DBTUNE_SAMPLE_SECONDS=60
+    export DBTUNE_SLEEP=true
+    dbtune_collect_guards() { return 0; }
+    dbtune_collect_status_snapshot() {
+        local count=0 count_file="$BATS_TEST_TMPDIR/status-count"
+        [[ -r $count_file ]] && read -r count <"$count_file"
+        count=$((count + 1)); printf '%s\n' "$count" >"$count_file"
+        if ((count == 1)); then
+            printf '100\t10\t1000\t10000\t200\t5\t20\t2\t8\t100\t300\t1\t2\n'
+        else
+            printf '175\t25\t1300\t17500\t575\t8\t30\t4\t10\t150\t350\t3\t5\n'
+        fi
+    }
+    dbtune_collect_cpu_snapshot() {
+        local count=0 count_file="$BATS_TEST_TMPDIR/cpu-count"
+        [[ -r $count_file ]] && read -r count <"$count_file"
+        count=$((count + 1)); printf '%s\n' "$count" >"$count_file"
+        ((count == 1)) && printf '7\t100\t20\n' || printf '7\t7600\t20\n'
+    }
+    dbtune_collect_monotonic() {
+        local count=0 count_file="$BATS_TEST_TMPDIR/monotonic-count"
+        [[ -r $count_file ]] && read -r count <"$count_file"
+        count=$((count + 1)); printf '%s\n' "$count" >"$count_file"
+        ((count == 1)) && printf '100\n' || printf '175\n'
+    }
+    dbtune_collect_memory_snapshot() { printf '900000\t12000\n'; }
+    dbtune_collect_load1() { printf '0.5\n'; }
+    dbtune_collect_ensure_slow_log() { printf 'ok\n'; }
+    dbtune_collect_daily_dbsize() { return 0; }
+    export DBTUNE_CLK_TCK=100
+
+    run cmd_tick
+    [ "$status" -eq 0 ]
+    run awk -F '\t' 'END {print $4, $5, $6, $13, $18, $19, $20}' "$(dbtune_collect_samples_file)"
+    [ "$output" = '0.20 100.00 5.00 100.00 100 75.000000 ok' ]
 }
 
 @test "start validates arguments" {
@@ -272,7 +346,6 @@ dbtune_embedded_get() {
     dbtune_state_write collecting
     write_collect_config
     printf '100\t1000\t999700\t111\t10\n' >"$(dbtune_collect_last_uptime_file)"
-    export DBTUNE_MONOTONIC=1300
     export DBTUNE_SLEEP=true
     dbtune_collect_guards() { return 0; }
     dbtune_collect_status_snapshot() {
@@ -293,6 +366,13 @@ dbtune_embedded_get() {
         printf '%s\n' "$count" >"$count_file"
         printf '222\t%s\t20\n' "$((count * 100))"
     }
+    dbtune_collect_monotonic() {
+        local count_file="$BATS_TEST_TMPDIR/monotonic-count" count=0
+        [[ -r $count_file ]] && read -r count <"$count_file"
+        count=$((count + 1))
+        printf '%s\n' "$count" >"$count_file"
+        ((count == 1)) && printf '1300\n' || printf '1360\n'
+    }
     dbtune_collect_memory_snapshot() { printf '900000\t12000\n'; }
     dbtune_collect_load1() { printf '0.5\n'; }
     dbtune_collect_daily_dbsize() { return 0; }
@@ -309,7 +389,7 @@ dbtune_embedded_get() {
     grep -F 'SET GLOBAL slow_query_log=ON' "$BATS_TEST_TMPDIR/sql.log"
     grep -F '"event":"db_restart_detected"' "$(dbtune_events_file)"
     grep -F '"event":"collect_slow_log_self_healed"' "$(dbtune_events_file)"
-    grep -F $'\tok\trestart_flag=1 slow_log=healed\t' "$(dbtune_collect_health_file)"
+    grep -F $'\tok\trestart_flag=1 sample_status=ok interval_seconds=60.000000 slow_log=healed\t' "$(dbtune_collect_health_file)"
 }
 
 @test "disk guard disables timer and terminates collection" {

@@ -53,7 +53,7 @@ Stavy: `idle → audited → collecting → collected → analyzed → proposed 
 ## Fáza COLLECT
 
 - **systemd oneshot service + timer** (`OnCalendar=*:0/5`, `Persistent=false`, enabled → prežije reboot = automatické pokračovanie po prerušení). Tick: `flock`, **vždy exit 0** (zdravie sa sleduje v health súbore, nie vo failed unite).
-- Každý tick = **60 s dvojbodová delta** (2× jeden SQL round-trip GLOBAL STATUS + /proc CPU mariadbd + free + loadavg) → riadok do `samples.tsv`: BP hit ratio v krátkom okne, missy/s, data_read/s, `Handler_read_rnd_next`/s, tmp disk %, Threads_running/connected, qcache, log_waits, wait_free, CPU %, RAM/swap, restart_flag. 7 dní ≈ 500 KB.
+- Každý tick = **60 s dvojbodová delta** (2× jeden SQL round-trip GLOBAL STATUS + /proc CPU mariadbd + free + loadavg) → riadok do `samples.tsv`: BP hit ratio v krátkom okne, missy/s, data_read/s, `Handler_read_rnd_next`/s, tmp disk %, Threads_running/connected, qcache aj jeho denominator, log_waits, wait_free, CPU %, RAM/swap, restart_flag, skutocny monotónny interval a sample status. Rates a CPU pouzivaju realny interval vratane SQL/scheduler delay; neplatne alebo prilis dlhe intervaly su degraded a rules ich nepouziju. 7 dní ≈ 500 KB.
 - **Slow log** runtime (`long_query_time=2` do `/var/log/mysql/slow.log` kvôli logrotate pokrytiu). **Self-healing:** tick deteguje reset uptime (unattended-upgrades reštart) → znovu zapne slow log + event `db_restart_detected`; restart_flag umožní analyze správne segmentovať lifetime countery.
 - **Denne:** per-DB snapshot veľkostí → `dbsize.tsv` (growth rate pre rezervu na expanziu); disk guardy (voľné miesto, veľkosť samples, slow log > 2 GB watchdog).
 - **Auto-stop** po `--days` + automatický `analyze` + `report` — po týždni na serveri čaká hotový report.

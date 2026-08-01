@@ -69,7 +69,7 @@ integration_dbtune() {
         DBTUNE_SYSTEMCTL=/var/lib/dbtune-bin/systemctl \
         DBTUNE_PROGRAM_PATH=/usr/local/bin/dbtune \
         DBTUNE_SAMPLE_SECONDS=1 \
-        DBTUNE_SLEEP=true \
+        DBTUNE_MAX_SAMPLE_INTERVAL_SECONDS=5 \
         DBTUNE_MIN_FREE_KB=1 \
         DBTUNE_MIN_APPLY_SAMPLES=5 \
         DBTUNE_NOW_HHMM=1200 \

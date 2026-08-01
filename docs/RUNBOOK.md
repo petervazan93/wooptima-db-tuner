@@ -28,6 +28,7 @@ Prvy start moze pri zmene `innodb_log_file_size` trvat dlhsie. Zvysene `Innodb_b
 - `$STATE/apply/` a `$STATE/apply/current` sa novym auditom nemenia. `dbtune status` zobrazi `rollback_available: ano` a rollback zostava dostupny aj po zacati noveho meracieho cyklu; v aktivnom stave `collecting` je z bezpecnostnych dovodov potrebne najprv zastavit collect.
 - `analysis-manifest.tsv` musi presne sediet s aktualnym audit runom/hashom, `samples.tsv` a `analysis.tsv`. Report a proposal tento kontrakt znovu overia. Bezny apply overi aj proposal manifest a nasadi sukromny snapshot presne s overenym `proposal_hash`.
 - Mutujuce lifecycle prikazy cakaju na spolocny exkluzivny lock. `_tick` je neblokujuci: pri obsadenom lifecycle locku zapise skip event a skonci uspesne, takze systemd timer nevytvara deadlock ani failed unit.
+- `samples.tsv` od noveho collectoru pridava za povodnych 17 stlpcov `qcache_queries_delta`, `interval_seconds` a `sample_status`. Iba `sample_status=ok` bez `restart_flag` sa rata medzi validne vzorky. `degraded_interval` znamena neplatny alebo prilis dlhy monotónny interval a nesmie vstupit do rules/report metrík; query-cache percentile navyse pouziva iba okna s `qcache_queries_delta > 0`.
 
 ## Force
 

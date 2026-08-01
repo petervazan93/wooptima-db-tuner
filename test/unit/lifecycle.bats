@@ -42,8 +42,8 @@ setup() {
     : >"$DBTUNE_STATE_DIR/apps.tsv"
     : >"$DBTUNE_STATE_DIR/databases.tsv"
     printf 'rule_id\tscope\tseverity\tverdict\tproposed_key\tproposed_value\tevidence\treason_sk\n' >"$DBTUNE_STATE_DIR/analysis.tsv"
-    printf 'timestamp\tuptime\tbp_hit_pct\tbp_misses_s\tdata_read_s\trnd_next_s\ttmp_disk_pct\tthreads_running\tthreads_connected\tqcache_hit_pct\tlog_waits_delta\twait_free_delta\tcpu_pct\tmem_available_kb\tswap_used_kb\tload1\trestart_flag\n' >"$DBTUNE_STATE_DIR/samples.tsv"
-    printf '2026-07-31T12:00:00Z\t100\t99\t0\t0\t0\t0\t1\t1\t30\t0\t0\t1\t1000\t0\t1\t0\n' >>"$DBTUNE_STATE_DIR/samples.tsv"
+    printf 'timestamp\tuptime\tbp_hit_pct\tbp_misses_s\tdata_read_s\trnd_next_s\ttmp_disk_pct\tthreads_running\tthreads_connected\tqcache_hit_pct\tlog_waits_delta\twait_free_delta\tcpu_pct\tmem_available_kb\tswap_used_kb\tload1\trestart_flag\tqcache_queries_delta\tinterval_seconds\tsample_status\n' >"$DBTUNE_STATE_DIR/samples.tsv"
+    printf '2026-07-31T12:00:00Z\t100\t99\t0\t0\t0\t0\t1\t1\t30\t0\t0\t1\t1000\t0\t1\t0\t1\t60\tok\n' >>"$DBTUNE_STATE_DIR/samples.tsv"
     dbtune_provenance_write_audit_manifest "$DBTUNE_STATE_DIR/audit-manifest.tsv" \
         lifecycle-run "$DBTUNE_STATE_DIR/audit.tsv" "$DBTUNE_STATE_DIR/apps.tsv" "$DBTUNE_STATE_DIR/databases.tsv"
     dbtune_provenance_write_analysis_manifest "$DBTUNE_STATE_DIR/analysis-manifest.tsv" \
@@ -201,6 +201,17 @@ write_manifest() {
     run cmd_apply
     [ "$status" -eq 65 ]
     [[ "$output" == *"sa zmenil"* ]]
+    [ ! -e "$DBTUNE_CONFIG_TARGET" ]
+}
+
+@test "degraded samples do not satisfy the apply measurement minimum" {
+    export DBTUNE_MIN_APPLY_SAMPLES=2
+    printf 'degraded\t200\t0\t999\t999\t999\t100\t999\t999\t0\t999\t999\t999\t1\t1\t1\t0\t1\t999\tdegraded_interval\n' >>"$DBTUNE_STATE_DIR/samples.tsv"
+    write_manifest
+
+    run cmd_apply
+    [ "$status" -eq 65 ]
+    [[ "$output" == *"Apply je zablokovany"* ]]
     [ ! -e "$DBTUNE_CONFIG_TARGET" ]
 }
 

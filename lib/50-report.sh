@@ -237,9 +237,22 @@ dbtune_render_tsv_inventory() {
 dbtune_samples_count() {
     local file=${1:-}
     awk -F '\t' '
+        function norm(value) { value=tolower(value); gsub(/-/, "_", value); return value }
+        NR == 1 {
+            first=norm($1)
+            header=(first == "timestamp" || first == "sampled_at" || first == "time" || first == "ts")
+            if (header) {
+                for (i=1; i<=NF; i++) {
+                    name=norm($i)
+                    if (name == "sample_status") status_column=i
+                    if (name == "restart_flag") restart_column=i
+                }
+                next
+            }
+        }
         NF {
-            first=tolower($1); gsub(/-/, "_", first)
-            if (NR == 1 && (first == "timestamp" || first == "sampled_at" || first == "time" || first == "ts")) next
+            if (status_column && $status_column != "ok") next
+            if (restart_column && $restart_column != 0) next
             count++
         }
         END { print count + 0 }
@@ -256,10 +269,15 @@ dbtune_samples_stats() {
         BEGIN { count=split(aliases, wanted, ","); column=fallback }
         NR == 1 {
             found=0; header=(norm($1) == "timestamp" || norm($1) == "sampled_at" || norm($1) == "time" || norm($1) == "ts")
-            for (i=1; i<=NF; i++) for (j=1; j<=count; j++) if (norm($i) == wanted[j]) { column=i; found=1 }
+            for (i=1; i<=NF; i++) {
+                name=norm($i)
+                if (name == "sample_status") status_column=i
+                if (name == "restart_flag") restart_column=i
+                for (j=1; j<=count; j++) if (name == wanted[j]) { column=i; found=1 }
+            }
             if (header) { if (!found) column=0; next }
         }
-        column > 0 && $column ~ /^-?[0-9]+([.][0-9]+)?$/ { print $column + 0 }
+        column > 0 && (!status_column || $status_column == "ok") && (!restart_column || $restart_column == 0) && $column ~ /^-?[0-9]+([.][0-9]+)?$/ { print $column + 0 }
     ' "$file" | LC_ALL=C sort -n | awk '
         { values[NR]=$1 }
         END {
@@ -289,10 +307,14 @@ dbtune_samples_worst() {
                 if (oneof(name,"rnd_next_s,handler_rnd_next_s,handler_read_rnd_next_s,handler_read_rnd_next_per_s")) rnd=i
                 if (oneof(name,"threads_running,running_threads")) threads=i
                 if (oneof(name,"mariadbd_cpu_pct,cpu_pct,db_cpu_pct")) cpu=i
+                if (name == "sample_status") status_column=i
+                if (name == "restart_flag") restart_column=i
             }
             if (header) next
         }
         {
+            if (status_column && $status_column != "ok") next
+            if (restart_column && $restart_column != 0) next
             score=($cpu ~ /^-?[0-9]+([.][0-9]+)?$/) ? $cpu+0 : (($miss ~ /^-?[0-9]+([.][0-9]+)?$/) ? $miss+0 : 0)
             printf "%.8f\t%s\t%s\t%s\t%s\t%s\t%s\n", score, $ts, $cpu, $bp, $miss, $readbps, $threads
         }
@@ -377,7 +399,7 @@ dbtune_render_server_profile() {
     dbtune_render_audit_fact 'RAM (bajty)' hw.ram_bytes ram_total ram_mb memory_total_mb memory.total_mb
     dbtune_render_audit_fact 'Disk' hw.storage_class disk_type storage_type storage.class
     dbtune_render_audit_fact 'Dataset (bajty)' mariadb.dataset_bytes dataset_size dataset_bytes dataset_mb dataset.total_mb
-    printf -- '- **Počet vzoriek:** %s\n\n' "$(dbtune_samples_count "$DBTUNE_SAMPLES_FILE")"
+    printf -- '- **Počet validných vzoriek:** %s\n\n' "$(dbtune_samples_count "$DBTUNE_SAMPLES_FILE")"
 
     printf '### Percentily krátkych okien\n\n'
     printf '| Metrika | p50 | p95 | p99 | Maximum |\n|---|---:|---:|---:|---:|\n'

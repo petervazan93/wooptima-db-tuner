@@ -36,10 +36,10 @@ shop_db	size_bytes	4294967296
 shop_db	table_count	120
 EOF
     cat >"$DBTUNE_STATE_DIR/samples.tsv" <<'EOF'
-timestamp	uptime	bp_hit_pct	bp_misses_s	data_read_s	rnd_next_s	tmp_disk_pct	threads_running	threads_connected	qcache_hit_pct	log_waits_delta	wait_free_delta	cpu_pct	mem_available_kb	swap_used_kb	load1	restart_flag
-2026-07-01T10:00:00Z	1000	99.9	1	1024	100	10	2	4	30	0	0	5	12000000	0	0.2	0
-2026-07-01T10:05:00Z	1300	80	200	4096000	9000	40	12	20	10	1	0	75	9000000	64	4.2	0
-2026-07-01T10:10:00Z	1600	95	40	2048000	3000	25	7	12	22	0	0	30	10000000	64	2.1	0
+timestamp	uptime	bp_hit_pct	bp_misses_s	data_read_s	rnd_next_s	tmp_disk_pct	threads_running	threads_connected	qcache_hit_pct	log_waits_delta	wait_free_delta	cpu_pct	mem_available_kb	swap_used_kb	load1	restart_flag	qcache_queries_delta	interval_seconds	sample_status
+2026-07-01T10:00:00Z	1000	99.9	1	1024	100	10	2	4	30	0	0	5	12000000	0	0.2	0	10	300	ok
+2026-07-01T10:05:00Z	1300	80	200	4096000	9000	40	12	20	10	1	0	75	9000000	64	4.2	0	10	300	ok
+2026-07-01T10:10:00Z	1600	95	40	2048000	3000	25	7	12	22	0	0	30	10000000	64	2.1	0	10	300	ok
 EOF
     dbtune_provenance_write_audit_manifest "$DBTUNE_STATE_DIR/audit-manifest.tsv" \
         report-run "$DBTUNE_STATE_DIR/audit.tsv" "$DBTUNE_STATE_DIR/apps.tsv" "$DBTUNE_STATE_DIR/databases.tsv"
@@ -86,6 +86,22 @@ EOF
     if command -v jq >/dev/null 2>&1; then
         jq -e 'type == "object" and ([paths | length] | max) == 1' "$DBTUNE_STATE_DIR/report.json"
     fi
+}
+
+@test "report metrics exclude degraded and restart samples" {
+    printf 'degraded\t1900\t0\t999\t999\t999\t100\t999\t999\t0\t999\t999\t999\t1\t1\t1\t0\t1\t999\tdegraded_interval\n' >>"$DBTUNE_STATE_DIR/samples.tsv"
+    printf 'restart\t10\t0\t888\t888\t888\t100\t888\t888\t0\t0\t0\t888\t1\t1\t1\t1\t0\t60\tok\n' >>"$DBTUNE_STATE_DIR/samples.tsv"
+
+    run dbtune_samples_count "$DBTUNE_STATE_DIR/samples.tsv"
+    [ "$status" -eq 0 ]
+    [ "$output" = 3 ]
+    run dbtune_samples_stats "$DBTUNE_STATE_DIR/samples.tsv" cpu_pct 13
+    [ "$status" -eq 0 ]
+    [ "$output" = $'30.00\t75.00\t75.00\t75.00' ]
+    run dbtune_samples_worst "$DBTUNE_STATE_DIR/samples.tsv"
+    [ "$status" -eq 0 ]
+    [[ "$output" != *degraded* ]]
+    [[ "$output" != *restart* ]]
 }
 
 @test "report escapes hostile TSV text and does not expose sensitive audit values" {

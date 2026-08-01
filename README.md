@@ -71,4 +71,13 @@ Backup sa z lokalneho cronu neodvodzuje. Autoritativna integracia moze atomicky 
 - `dbtune_sql QUERY [DATABASE]` cita query cez stdin klienta. Najprv skusi root `unix_socket`, potom `DBTUNE_ROOT_CNF` (default `/etc/mysql/conf.d/root.cnf`) cez `--defaults-extra-file`. Heslo nikdy nie je na CLI ani v logu a uspesna metoda sa ulozi do state.
 - Embedded asset sa cita cez `dbtune_embedded_get templates/tuning.cnf.tmpl`; zoznam poskytne `dbtune_embedded_list`.
 
+### Kontrakt `samples.tsv`
+
+Novy collector zapisuje append-only hlavicku `timestamp, uptime, bp_hit_pct, bp_misses_s, data_read_s, rnd_next_s, tmp_disk_pct, threads_running, threads_connected, qcache_hit_pct, log_waits_delta, wait_free_delta, cpu_pct, mem_available_kb, swap_used_kb, load1, restart_flag, qcache_queries_delta, interval_seconds, sample_status` oddelenu tabulatormi. Prvych 17 stlpcov zostava v povodnom poradi; posledne tri su rozsirujuci kontrakt.
+
+- `qcache_queries_delta` je denominator `Qcache_hits delta + Com_select delta`. Hodnota `0` znamena idle okno a `R-QCACHE` ho nezahrnie do hit-rate percentilu. Pravidlo vyzaduje aspon tolko aktivnych okien, kolko urcuje `--min-samples`; inak emituje `UNKNOWN` bez proposal.
+- `interval_seconds` je skutocny monotónny cas medzi dvojicou status/CPU snapshotov, vratane sleepu, scheduler delay a druheho SQL snapshotu. Rates a CPU pouzivaju tento interval, nie nakonfigurovany sleep.
+- `sample_status` je `ok` alebo `degraded_interval`. Nečíselny, nerastuci alebo prilis dlhy interval je degraded; predvoleny limit je dvojnasobok `DBTUNE_SAMPLE_SECONDS` a da sa explicitne nastavit cez `DBTUNE_MAX_SAMPLE_INTERVAL_SECONDS`. Degraded a restart riadky sa nepouziju v rules/report metrikach ani v minimalnom pocte validnych vzoriek.
+- Legacy 17-stlpcove subory ostavaju kompatibilne pre ostatne pravidla. Kedze neuchovavaju query-cache denominator, `R-QCACHE` pri nich bezpecne vrati `UNKNOWN` bez proposal. Ak upgrade zastihne aktivny legacy collect, prvy novy append atomicky rozsiri jeho hlavicku a stare riadky; povodne metriky ostanu validne a novy denominator v starych riadkoch ostane prazdny.
+
 Projekt globalne pouziva `set -u`, nie `set -e`. Kniznicove moduly obsahuju iba deklaracie a funkcie; vykonanie programu zabezpecuje jediny guard na konci `lib/90-main.sh`.

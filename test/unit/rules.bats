@@ -46,11 +46,12 @@ make_samples() {
     local log_waits=${5:-0}
     local mem_available_kb=${6:-12582912}
     local connected=${7:-50}
+    local qcache_queries=${8:-1}
 
-    awk -v hit="$hit" -v threads="$threads" -v count="$count" -v waits="$log_waits" -v available="$mem_available_kb" -v connected="$connected" 'BEGIN {
+    awk -v hit="$hit" -v threads="$threads" -v count="$count" -v waits="$log_waits" -v available="$mem_available_kb" -v connected="$connected" -v qcache_queries="$qcache_queries" 'BEGIN {
         OFS="\t"
-        print "timestamp","uptime","bp_hit_pct","bp_misses_s","data_read_s","rnd_next_s","tmp_disk_pct","threads_running","threads_connected","qcache_hit_pct","log_waits_delta","wait_free_delta","cpu_pct","mem_available_kb","swap_used_kb","load1","restart_flag"
-        for (i=1; i<=count; i++) print "2026-07-24T00:00:00Z",i*300,99.9,1,1024,100,20,threads,connected,hit,(i==1 ? waits : 0),0,5,available,0,1,0
+        print "timestamp","uptime","bp_hit_pct","bp_misses_s","data_read_s","rnd_next_s","tmp_disk_pct","threads_running","threads_connected","qcache_hit_pct","log_waits_delta","wait_free_delta","cpu_pct","mem_available_kb","swap_used_kb","load1","restart_flag","qcache_queries_delta","interval_seconds","sample_status"
+        for (i=1; i<=count; i++) print "2026-07-24T00:00:00Z",i*300,99.9,1,1024,100,20,threads,connected,hit,(i==1 ? waits : 0),0,5,available,0,1,0,qcache_queries,300,"ok"
     }' >"$file"
 }
 
@@ -128,6 +129,59 @@ write_current_audit_manifest() {
     make_samples "$BATS_TEST_TMPDIR/samples-busy.tsv" 20 8.01 10
     dbtune_rules_analyze "$BATS_TEST_TMPDIR/audit.tsv" "$BATS_TEST_TMPDIR/samples-busy.tsv" "" "" "" 10 >"$BATS_TEST_TMPDIR/busy.tsv"
     [ "$(analysis_value "$BATS_TEST_TMPDIR/busy.tsv" R-QCACHE query_cache_type)" = 0 ]
+}
+
+@test "query cache ignores idle windows when active windows have 100 percent hits" {
+    make_audit "$BATS_TEST_TMPDIR/audit.tsv"
+    make_samples "$BATS_TEST_TMPDIR/samples.tsv" 100 2 10
+    awk -F '\t' 'BEGIN {OFS="\t"} NR>1 && NR<=6 {$10=0; $18=0} {print}' "$BATS_TEST_TMPDIR/samples.tsv" >"$BATS_TEST_TMPDIR/mixed.tsv"
+
+    dbtune_rules_analyze "$BATS_TEST_TMPDIR/audit.tsv" "$BATS_TEST_TMPDIR/mixed.tsv" "" "" "" 5 >"$BATS_TEST_TMPDIR/analysis.tsv"
+    run awk -F '\t' '$1=="R-QCACHE" {print $4, $5, $7; exit}' "$BATS_TEST_TMPDIR/analysis.tsv"
+    [ "$status" -eq 0 ]
+    [[ "$output" == 'KEEP  '* ]]
+    [[ "$output" == *'qcache_hit_p50=100.00%'* ]]
+    [[ "$output" == *'active_windows=5'* ]]
+    [[ "$output" == *'idle_windows=5'* ]]
+}
+
+@test "query cache is unknown without enough active windows and emits no proposal" {
+    make_audit "$BATS_TEST_TMPDIR/audit.tsv"
+    make_samples "$BATS_TEST_TMPDIR/samples.tsv" 100 2 10
+    awk -F '\t' 'BEGIN {OFS="\t"} NR>3 {$10=0; $18=0} {print}' "$BATS_TEST_TMPDIR/samples.tsv" >"$BATS_TEST_TMPDIR/sparse.tsv"
+
+    dbtune_rules_analyze "$BATS_TEST_TMPDIR/audit.tsv" "$BATS_TEST_TMPDIR/sparse.tsv" "" "" "" 10 >"$BATS_TEST_TMPDIR/analysis.tsv"
+    run awk -F '\t' '$1=="R-QCACHE" {print $3, $4, $5, $6, $7; exit}' "$BATS_TEST_TMPDIR/analysis.tsv"
+    [ "$status" -eq 0 ]
+    [[ "$output" == 'medium UNKNOWN   '* ]]
+    [[ "$output" == *'active_windows=2'* ]]
+    [ -z "$(analysis_value "$BATS_TEST_TMPDIR/analysis.tsv" R-QCACHE query_cache_type)" ]
+}
+
+@test "legacy samples remain analyzable but query cache is unknown without a denominator" {
+    make_audit "$BATS_TEST_TMPDIR/audit.tsv"
+    make_samples "$BATS_TEST_TMPDIR/samples-v2.tsv" 100 2 10
+    cut -f1-17 "$BATS_TEST_TMPDIR/samples-v2.tsv" >"$BATS_TEST_TMPDIR/samples-v1.tsv"
+
+    dbtune_rules_analyze "$BATS_TEST_TMPDIR/audit.tsv" "$BATS_TEST_TMPDIR/samples-v1.tsv" "" "" "" 10 >"$BATS_TEST_TMPDIR/analysis.tsv"
+    run awk -F '\t' '$1=="R-QCACHE" {print $4, $5, $7; exit}' "$BATS_TEST_TMPDIR/analysis.tsv"
+    [ "$status" -eq 0 ]
+    [[ "$output" == 'UNKNOWN  '* ]]
+    [[ "$output" == *'unavailable_windows=10'* ]]
+}
+
+@test "degraded interval rows are excluded from rule metrics and valid sample count" {
+    make_audit "$BATS_TEST_TMPDIR/audit.tsv"
+    make_samples "$BATS_TEST_TMPDIR/samples.tsv" 100 2 10
+    printf 'bad\t9999\t0\t99999\t99999\t99999\t100\t999\t999\t0\t999\t999\t999\t1\t1\t1\t0\t1\t999\tdegraded_interval\n' >>"$BATS_TEST_TMPDIR/samples.tsv"
+
+    dbtune_rules_analyze "$BATS_TEST_TMPDIR/audit.tsv" "$BATS_TEST_TMPDIR/samples.tsv" "" "" "" 10 >"$BATS_TEST_TMPDIR/analysis.tsv"
+    run awk -F '\t' '$1=="R-QCACHE" {print $4, $7; exit}' "$BATS_TEST_TMPDIR/analysis.tsv"
+    [ "$status" -eq 0 ]
+    [[ "$output" == 'KEEP '* ]]
+    [[ "$output" == *'active_windows=10'* ]]
+    [[ "$output" == *'degraded_windows=1'* ]]
+    [[ "$output" == *'threads_running_p95=2.00'* ]]
 }
 
 @test "buffer pool never shrinks an existing larger pool" {

@@ -103,7 +103,20 @@ dbtune_lifecycle_has_measurement() {
 
     [[ -s $samples && -s $analysis ]] || return 1
     dbtune_provenance_validate_analysis >/dev/null 2>&1 || return 1
-    IFS= read -r count < <(awk -F '\t' 'NR==1 {ok=($1=="timestamp" && $17=="restart_flag"); next} NF==17 {n++} END {if (!ok) exit 1; print n+0}' "$samples") || return 1
+    IFS= read -r count < <(awk -F '\t' '
+        NR == 1 {
+            required_count=split("timestamp uptime bp_hit_pct bp_misses_s data_read_s rnd_next_s tmp_disk_pct threads_running threads_connected qcache_hit_pct log_waits_delta wait_free_delta cpu_pct mem_available_kb swap_used_kb load1 restart_flag", required, " ")
+            for (i=1; i<=NF; i++) column[$i]=i
+            ok=1
+            for (i=1; i<=required_count; i++) if (!(required[i] in column)) ok=0
+            next
+        }
+        ok && $column["timestamp"] != "" {
+            status=("sample_status" in column) ? $column["sample_status"] : "ok"
+            if (status == "ok" && $column["restart_flag"] == 0) n++
+        }
+        END {if (!ok) exit 1; print n+0}
+    ' "$samples") || return 1
     ((count >= ${DBTUNE_MIN_APPLY_SAMPLES:-288})) || return 1
     awk -F '\t' 'NR==1 {exit !(NF==8 && $1=="rule_id" && $2=="scope" && $5=="proposed_key" && $8=="reason_sk")}' "$analysis"
 }
