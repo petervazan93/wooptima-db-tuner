@@ -239,6 +239,50 @@ dbtune_audit_sql() {
     DBTUNE_SQL_STATEMENT_TIMEOUT="${DBTUNE_AUDIT_QUERY_TIMEOUT_SECONDS:-5}" dbtune_sql "$1" 2>/dev/null
 }
 
+dbtune_audit_effective_variables() {
+    printf '%s\n' \
+        innodb_buffer_pool_size \
+        max_connections \
+        innodb_io_capacity \
+        innodb_io_capacity_max \
+        innodb_read_io_threads \
+        innodb_write_io_threads \
+        innodb_flush_neighbors \
+        innodb_log_file_size \
+        innodb_log_buffer_size \
+        query_cache_type \
+        query_cache_size \
+        innodb_flush_log_at_trx_commit \
+        innodb_doublewrite \
+        innodb_flush_method \
+        innodb_buffer_pool_dump_at_shutdown \
+        innodb_buffer_pool_load_at_startup \
+        innodb_max_dirty_pages_pct \
+        innodb_max_dirty_pages_pct_lwm \
+        innodb_lock_wait_timeout \
+        skip_name_resolve \
+        thread_cache_size \
+        tmp_table_size \
+        max_heap_table_size \
+        table_definition_cache \
+        key_buffer_size \
+        slow_query_log \
+        slow_query_log_file \
+        long_query_time \
+        log_slow_verbosity
+}
+
+dbtune_audit_mariadb_variables() {
+    dbtune_audit_effective_variables
+    printf '%s\n' \
+        datadir \
+        open_files_limit \
+        performance_schema \
+        log_bin \
+        wsrep_on \
+        bind_address
+}
+
 dbtune_audit_storage_class() {
     local datadir=${1:-/var/lib/mysql}
     local source rows name type rota model class=unknown uncertain=0
@@ -368,7 +412,11 @@ dbtune_audit_collect_mariadb() {
     dbtune_audit_put "$out" mariadb.available 1
     dbtune_audit_put "$out" mariadb.version "$version"
 
-    variables="'DATADIR','INNODB_BUFFER_POOL_SIZE','INNODB_LOG_FILE_SIZE','INNODB_LOG_BUFFER_SIZE','INNODB_FLUSH_LOG_AT_TRX_COMMIT','INNODB_IO_CAPACITY','INNODB_IO_CAPACITY_MAX','INNODB_READ_IO_THREADS','INNODB_WRITE_IO_THREADS','INNODB_FLUSH_METHOD','INNODB_FLUSH_NEIGHBORS','INNODB_MAX_DIRTY_PAGES_PCT','INNODB_MAX_DIRTY_PAGES_PCT_LWM','MAX_CONNECTIONS','OPEN_FILES_LIMIT','PERFORMANCE_SCHEMA','QUERY_CACHE_SIZE','QUERY_CACHE_TYPE','SKIP_NAME_RESOLVE','SLOW_QUERY_LOG','LONG_QUERY_TIME','LOG_BIN','WSREP_ON','BIND_ADDRESS','KEY_BUFFER_SIZE','TMP_TABLE_SIZE','MAX_HEAP_TABLE_SIZE'"
+    variables=$(dbtune_audit_mariadb_variables | command awk '
+        BEGIN { separator="" }
+        /^[a-z][a-z0-9_]*$/ { printf "%s\047%s\047", separator, toupper($0); separator="," }
+        END { print "" }
+    ')
     if ! rows=$(dbtune_audit_sql "SELECT LOWER(VARIABLE_NAME), VARIABLE_VALUE FROM information_schema.GLOBAL_VARIABLES WHERE VARIABLE_NAME IN ($variables) ORDER BY VARIABLE_NAME"); then
         rows=''
         dbtune_audit_put "$out" finding.global_variables_query_failed warning

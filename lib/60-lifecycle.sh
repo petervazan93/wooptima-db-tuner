@@ -131,7 +131,7 @@ dbtune_lifecycle_manifest_value_from() {
 dbtune_lifecycle_validate_proposal_manifest() {
     local manifest="$DBTUNE_STATE_DIR/proposal-manifest.tsv"
     local proposal=${1:-$DBTUNE_STATE_DIR/proposed-99-zz-tuning.cnf}
-    local analysis_manifest key expected actual
+    local analysis_manifest analysis key expected actual proposal_count proposal_records_hash
 
     [[ -r $manifest ]] || {
         dbtune_log error "Chyba proposal manifest: $manifest"
@@ -160,6 +160,54 @@ dbtune_lifecycle_validate_proposal_manifest() {
         dbtune_log error "Proposal snapshot sa zmenil alebo nezodpoveda manifestu"
         return 65
     fi
+    proposal_count=$(dbtune_manifest_value "$manifest" proposal_count) || {
+        dbtune_log error "Proposal manifest nema proposal_count"
+        return 65
+    }
+    proposal_records_hash=$(dbtune_manifest_value "$manifest" proposal_records_hash) || {
+        dbtune_log error "Proposal manifest nema proposal_records_hash"
+        return 65
+    }
+    [[ $proposal_count =~ ^[0-9]+$ && $proposal_records_hash =~ ^[0-9a-f]{64}$ ]] || return 65
+    DBTUNE_AUDIT_FILE=$(dbtune_path audit.tsv) || return
+    analysis=$(dbtune_path analysis.tsv) || return
+    dbtune_analysis_load "$analysis" || return
+    dbtune_proposals_load "$DBTUNE_AUDIT_FILE" || return
+    if ((${#DBTUNE_PROPOSAL_LINES[@]} != proposal_count)) ||
+        [[ $(dbtune_proposal_records_hash) != "$proposal_records_hash" ]]; then
+        dbtune_log error "Proposal manifest nezodpoveda kanonickemu zoznamu zmien"
+        return 65
+    fi
+    dbtune_lifecycle_validate_proposal_records "$proposal" || return
+}
+
+dbtune_lifecycle_validate_proposal_records() {
+    local proposal=${1:-}
+    local line key value
+    local -A expected=() actual=()
+
+    for line in "${DBTUNE_PROPOSAL_LINES[@]}"; do
+        dbtune_proposal_parse "$line"
+        expected["$DBTUNE_PROPOSAL_KEY"]=$DBTUNE_PROPOSAL_VALUE
+    done
+    while IFS=$'\t' read -r key value; do
+        [[ -n $key ]] || continue
+        if [[ -n ${actual[$key]+x} ]]; then
+            dbtune_log error "Nasadeny CNF obsahuje duplicitny kluc $key"
+            return 65
+        fi
+        actual["$key"]=$value
+    done < <(dbtune_lifecycle_config_entries "$proposal")
+    if ((${#expected[@]} != ${#actual[@]})); then
+        dbtune_log error "CNF a kanonicky proposal maju rozdielny pocet zmien"
+        return 65
+    fi
+    for key in "${!expected[@]}"; do
+        if [[ -z ${actual[$key]+x} || ${actual[$key]} != "${expected[$key]}" ]]; then
+            dbtune_log error "CNF nezodpoveda kanonickej zmene $key"
+            return 65
+        fi
+    done
 }
 
 dbtune_lifecycle_check_apply_inputs() {

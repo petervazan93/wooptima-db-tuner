@@ -57,6 +57,10 @@ Kazdy uspesny `audit` je stale read-only voci MariaDB a systemovej konfiguracii,
 
 `analysis-manifest.tsv` nesie povodny `run_id`, `audit_hash`, presny `samples_hash` a `analysis_hash`. Report tieto hodnoty publikuje, proposal manifest ich prebera a doplna `proposal_hash`; apply history ich zaznamena spolu s hashom skutocne nasadeneho snapshotu. Ak sa ktorykolvek vstup zmeni alebo zmiesa s inym runom, `report`, `propose` a bezny `apply` ho odmietnu. `verify` navyse vyzaduje regularny nesymlinkovy target `root:root 0644`, ktoreho hash presne sedi s immutable `apply/<run>/proposed.cnf`.
 
+Audit cita efektivne hodnoty vsetkych MariaDB premennych, ktore rules engine moze navrhnut. Bez znamenej aktualnej hodnoty bezne pravidlo emituje `UNKNOWN` bez proposal; explicitne durability pravidlo je v evidencii oznacene `durability_exception=explicit`, ale pri chybajucej current hodnote je rovnako fail-closed. Report ani proposal preto nikdy nepublikuju aktivnu zmenu s `current=unknown`.
+
+Serverove proposal records sa pri `report` a `propose` validuju a kanonizuju (`-` na `_`, lowercase) do jedneho streamu. Unsafe hodnota, app-scope proposal, chybajuca current hodnota alebo kanonicky duplicitny kluc zastavia prikaz. Markdown diff, flat JSON `proposal.*`, CNF a `proposal-manifest.tsv` pouzivaju rovnake poradie zmien; manifest nesie aj `proposal_count` a `proposal_records_hash`, ktore apply znovu porovna s analysis a CNF.
+
 Backup sa z lokalneho cronu neodvodzuje. Autoritativna integracia moze atomicky vytvorit root-owned mode `0600` subor `$DBTUNE_STATE_DIR/backup-evidence.tsv` s piatimi jedinecnymi TSV klucmi: `schema=1`, `status=verified|missing|unknown`, `source`, UTC `checked_at` a `last_success`. `verified` vyzaduje UTC timestamp posledneho uspesneho behu, `missing` vyzaduje `last_success=none`; bez platneho `verified` artefaktu apply vyzaduje samostatne TTY potvrdenie `POTVRDZUJEM OBNOVITELNU ZALOHU`. Potvrdene `missing` apply vzdy blokuje. Audit artefakt iba cita a nikdy ho nevytvara ani rucne nedoplna `audit.tsv`.
 
 ## Spolocne kontrakty
@@ -67,6 +71,7 @@ Backup sa z lokalneho cronu neodvodzuje. Autoritativna integracia moze atomicky 
 - `dbtune_atomic_write CESTA [MODE]` cita obsah zo stdin a publikuje ho cez docasny subor v rovnakom adresari.
 - `dbtune_is_uint HODNOTA` a `dbtune_require_uint NAZOV HODNOTA [MIN] [MAX]` validuju integer argumenty bez implicitnych Bash konverzii.
 - `dbtune_json_escape TEXT` a `dbtune_json_emit KLUC HODNOTA ...` su jediny podporovany sposob tvorby flat JSON. Vsetky emitovane hodnoty su JSON stringy.
+- `dbtune_tsv_percentile` je spolocny nearest-rank percentile algoritmus pre rules aj report. Pri 20 hodnotach je p95 devatnasta zoradena hodnota.
 - `dbtune_event TYP [KLUC HODNOTA ...]` zapisuje redigovany JSONL do `events.log`; `dbtune_log_*` zapisuje redigovane spravy na stderr. Hesla ani cele credential subory sa nesmu posielat loggeru.
 - `dbtune_sql QUERY [DATABASE]` cita query cez stdin klienta. Najprv skusi root `unix_socket`, potom `DBTUNE_ROOT_CNF` (default `/etc/mysql/conf.d/root.cnf`) cez `--defaults-extra-file`. Heslo nikdy nie je na CLI ani v logu a uspesna metoda sa ulozi do state.
 - Embedded asset sa cita cez `dbtune_embedded_get templates/tuning.cnf.tmpl`; zoznam poskytne `dbtune_embedded_list`.
@@ -79,5 +84,11 @@ Novy collector zapisuje append-only hlavicku `timestamp, uptime, bp_hit_pct, bp_
 - `interval_seconds` je skutocny monotónny cas medzi dvojicou status/CPU snapshotov, vratane sleepu, scheduler delay a druheho SQL snapshotu. Rates a CPU pouzivaju tento interval, nie nakonfigurovany sleep.
 - `sample_status` je `ok` alebo `degraded_interval`. Nečíselny, nerastuci alebo prilis dlhy interval je degraded; predvoleny limit je dvojnasobok `DBTUNE_SAMPLE_SECONDS` a da sa explicitne nastavit cez `DBTUNE_MAX_SAMPLE_INTERVAL_SECONDS`. Degraded a restart riadky sa nepouziju v rules/report metrikach ani v minimalnom pocte validnych vzoriek.
 - Legacy 17-stlpcove subory ostavaju kompatibilne pre ostatne pravidla. Kedze neuchovavaju query-cache denominator, `R-QCACHE` pri nich bezpecne vrati `UNKNOWN` bez proposal. Ak upgrade zastihne aktivny legacy collect, prvy novy append atomicky rozsiri jeho hlavicku a stare riadky; povodne metriky ostanu validne a novy denominator v starych riadkoch ostane prazdny.
+
+### Report action kontrakt
+
+Kazdy emitovany per-app rule dostane v Markdown aj JSON rovnake action metadata: `rule_id`, app scope, typ, safety, ciel, prikaz, `destructive=false` a varovanie. Ak je dostupne bezpecne mapovanie, read-only SQL je scopeovane cez `--database` a validovany WordPress prefix; wp-cli pouziva auditovany `--path` a ownera. Ak mapovanie nie je bezpecne, report pouzije iba read-only fallback. Prikazy su navrhy na rucne spustenie: dbtune ich nevykonava a negeneruje automaticky `DELETE`, `DROP` ani `UPDATE`.
+
+Report publikuje nazvy a velkosti zozbieranych top-20 autoload poloziek, nikdy ich hodnoty; citlive nazvy su nahradene `[REDACTED]`. Najhorsie measurement okna obsahuju backup korelaciu s autoritativnym statusom, zdrojom, `last_success`, casovym rozdielom, casom kontroly, poctom planov a process snapshotom z auditu. Korelacia je evidencia, nie dokaz priciny.
 
 Projekt globalne pouziva `set -u`, nie `set -e`. Kniznicove moduly obsahuju iba deklaracie a funkcie; vykonanie programu zabezpecuje jediny guard na konci `lib/90-main.sh`.

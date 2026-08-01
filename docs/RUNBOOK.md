@@ -12,6 +12,7 @@
 
 1. Vyberte 1-2 servery: jeden MariaDB 10.6 a jeden z rodiny 11.x. Nevyberajte najvacsi obchod ani server bez otestovaneho backupu.
 2. Dokoncite `audit`, zber, `analyze`, kontrolu reportu a `propose`. Rucne skontrolujte sizing poolu, `max_connections`, diskovu triedu a aplikacne nalezy.
+   Report musi mat pre kazdu aktivnu serverovu zmenu znamu current hodnotu. Chybajuca current, unsafe proposal alebo aliasovy duplikat ako `max_connections`/`max-connections` je chyba vstupu, nie polozka na preskocenie.
 3. Spustite `dbtune apply`. Nastroj overi samostatny backup evidence, vsetky aktivne nazvy z `[mysqld]` jednym dotazom do `information_schema.GLOBAL_VARIABLES`, ulozi baseline a atomicky zapise config ako `root:root 0644`.
 4. Precitajte `$STATE/apply/<timestamp>-<pid>/ROLLBACK.txt` este pred restartom. Obsahuje doslovne prikazy a funguje bez dbtune aj bez funkcnej databazy.
 5. Bez `--restart` vykonajte restart cez RunCloud `Services -> MariaDB -> Restart`. `--restart` pouzivajte iba na pilotne skriptovanie; vola `systemctl restart mariadb`, kontroluje active stav a pri chybe obnovi config.
@@ -27,6 +28,7 @@ Prvy start moze pri zmene `innodb_log_file_size` trvat dlhsie. Zvysene `Innodb_b
 - Pri opakovanom audite sa predchadzajuce audit, collect, analysis, report a proposal artefakty skopiruju do `$STATE/runs/<run_id>/`. Aktivne downstream artefakty sa zneplatnia a stav prejde na `audited`.
 - `$STATE/apply/` a `$STATE/apply/current` sa novym auditom nemenia. `dbtune status` zobrazi `rollback_available: ano` a rollback zostava dostupny aj po zacati noveho meracieho cyklu; v aktivnom stave `collecting` je z bezpecnostnych dovodov potrebne najprv zastavit collect.
 - `analysis-manifest.tsv` musi presne sediet s aktualnym audit runom/hashom, `samples.tsv` a `analysis.tsv`. Report a proposal tento kontrakt znovu overia. Bezny apply overi aj proposal manifest a nasadi sukromny snapshot presne s overenym `proposal_hash`.
+- `proposal-manifest.tsv` navyse viaze `proposal_count` a `proposal_records_hash` na kanonicky zoznam. Apply porovna tento zoznam s analysis aj skutocnymi CNF klucmi a hodnotami.
 - Mutujuce lifecycle prikazy cakaju na spolocny exkluzivny lock. `_tick` je neblokujuci: pri obsadenom lifecycle locku zapise skip event a skonci uspesne, takze systemd timer nevytvara deadlock ani failed unit.
 - `samples.tsv` od noveho collectoru pridava za povodnych 17 stlpcov `qcache_queries_delta`, `interval_seconds` a `sample_status`. Iba `sample_status=ok` bez `restart_flag` sa rata medzi validne vzorky. `degraded_interval` znamena neplatny alebo prilis dlhy monotónny interval a nesmie vstupit do rules/report metrík; query-cache percentile navyse pouziva iba okna s `qcache_queries_delta > 0`.
 
@@ -54,6 +56,8 @@ Pri skutocne chybajucom alebo neplatnom merani dostanu apply historia, `apply-re
 2. Sledujte ich najmenej 24 hodin. Porovnajte checkout chyby, DB CPU/IO, swap, connection peak, wait-free a log waits.
 3. Zvysok flotily robte v davkach najviac priblizne 10 serverov. Dalsiu davku nezacinajte pred `verify --post` predchadzajucej davky.
 4. Zachovajte manualny RunCloud restart. Stav kontrolujte cez `dbtune status`; prikaz necita SQL a je pouzitelny aj pri vypadku DB.
+
+Per-app action kroky z reportu su copy-paste read-only diagnostika. Pred spustenim skontrolujte `target` (app, path, database a prefix) a shell quoting. dbtune ich automaticky nespusta; cleanup, migraciu, `DELETE`, `DROP` ani `UPDATE` nevykonavajte bez samostatneho review, overenej obnovitelnej zalohy a maintenance planu. Top autoload sekcia obsahuje iba nazvy a velkosti. Backup korelacia pri najhorsich oknach porovnava dostupnu evidenciu, ale sama nepotvrdzuje kauzalitu.
 
 ## Rollback
 

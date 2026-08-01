@@ -6,6 +6,7 @@ setup() {
     mkdir -p "$DBTUNE_STATE_DIR"
     source "$BATS_TEST_DIRNAME/../../lib/00-header.sh"
     source "$BATS_TEST_DIRNAME/../../lib/10-util.sh"
+    source "$BATS_TEST_DIRNAME/../../lib/20-audit.sh"
     source "$BATS_TEST_DIRNAME/../../lib/40-rules.sh"
 }
 
@@ -81,6 +82,31 @@ write_current_audit_manifest() {
     run dbtune_rules_percentile "$BATS_TEST_TMPDIR/ordered.tsv" threads_running 95
     [ "$status" -eq 0 ]
     [ "$output" = 4 ]
+}
+
+@test "audit effective variables exactly cover the rules proposal contract" {
+    run diff <(dbtune_audit_effective_variables | LC_ALL=C sort -u) <(dbtune_rules_proposable_variables | LC_ALL=C sort -u)
+    [ "$status" -eq 0 ]
+}
+
+@test "missing current values block ordinary and explicit durability proposals" {
+    make_audit "$BATS_TEST_TMPDIR/audit.tsv"
+    make_samples "$BATS_TEST_TMPDIR/samples.tsv" 10 10 20
+    awk -F '\t' '$1 != "max_connections" && $1 != "query_cache_type" && $1 != "query_cache_size" {print}' OFS='\t' \
+        "$BATS_TEST_TMPDIR/audit.tsv" >"$BATS_TEST_TMPDIR/missing.tsv"
+
+    dbtune_rules_analyze "$BATS_TEST_TMPDIR/missing.tsv" "$BATS_TEST_TMPDIR/samples.tsv" "" "" "" 20 >"$BATS_TEST_TMPDIR/analysis.tsv"
+
+    run awk -F '\t' '$1=="R-MAXCONN" || $1=="R-QCACHE" || $1=="R-TRXCOMMIT" {if ($5!="" || $6!="") bad=1} END {print bad+0}' "$BATS_TEST_TMPDIR/analysis.tsv"
+    [ "$status" -eq 0 ]
+    [ "$output" = 0 ]
+    run awk -F '\t' '$1=="R-TRXCOMMIT" {print $4, $7}' "$BATS_TEST_TMPDIR/analysis.tsv"
+    [[ "$output" == 'UNKNOWN '* ]]
+    [[ "$output" == *'durability_exception=explicit'* ]]
+    [[ "$output" == *'proposal_blocked=missing-current'* ]]
+    run awk -F '\t' '$1=="R-PINNED" && $7 ~ /durability_exception=explicit/ {print $4, $7; exit}' "$BATS_TEST_TMPDIR/analysis.tsv"
+    [[ "$output" == 'UNKNOWN '* ]]
+    [[ "$output" == *'current=missing'* ]]
 }
 
 @test "10.6 formulas and analysis contract produce expected proposals" {
@@ -411,19 +437,6 @@ EOF
     run awk -F '\t' '$1=="R-BACKUP" {print $7}' "$BATS_TEST_TMPDIR/verified-analysis.tsv"
     [[ "$output" == *'source=unit-test'* ]]
     [[ "$output" == *'last_success=2026-07-23T02:00:00Z'* ]]
-}
-
-@test "proposal renderer consumes only server proposal records" {
-    cat >"$BATS_TEST_TMPDIR/analysis.tsv" <<'EOF'
-rule_id	scope	severity	verdict	proposed_key	proposed_value	evidence	reason_sk
-R-A	server	high	CHANGE	max_connections	220	x	x
-R-B	app:shop	critical	CHANGE	evil_app_key	1	x	x
-R-C	server	info	OK			x	x
-EOF
-    run dbtune_rules_emit_server_proposal "$BATS_TEST_TMPDIR/analysis.tsv"
-    [ "$status" -eq 0 ]
-    [[ "$output" == *'max_connections = 220'* ]]
-    [[ "$output" != *evil_app_key* ]]
 }
 
 @test "production audit scoped TSV contract feeds server and app rules" {

@@ -124,6 +124,25 @@ EOF
     [ "$status" -eq 0 ]
 }
 
+@test "MariaDB audit query includes every rules-proposable effective variable" {
+    dbtune_audit_sql() {
+        case $1 in
+            'SELECT VERSION()') printf '11.4.12-MariaDB\n' ;;
+            *information_schema.GLOBAL_VARIABLES*) printf '%s\n' "$1" >"$BATS_TEST_TMPDIR/variables-query" ;;
+            *) printf '' ;;
+        esac
+    }
+    : >"$BATS_TEST_TMPDIR/audit.tsv"
+    : >"$BATS_TEST_TMPDIR/databases.tsv"
+
+    dbtune_audit_collect_mariadb "$BATS_TEST_TMPDIR/audit.tsv" "$BATS_TEST_TMPDIR/databases.tsv"
+
+    while IFS= read -r variable; do
+        run grep -F "'${variable^^}'" "$BATS_TEST_TMPDIR/variables-query"
+        [ "$status" -eq 0 ]
+    done < <(dbtune_audit_effective_variables)
+}
+
 @test "landmine scan applies MariaDB version gates" {
     cat >"$DBTUNE_MYSQL_CONFIG_DIR/99-old.cnf" <<'EOF'
 [mysqld]

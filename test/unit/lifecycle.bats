@@ -38,10 +38,18 @@ setup() {
     DBTUNE_CONFIG_UID=$(id -u)
     DBTUNE_CONFIG_GID=$(id -g)
     write_backup_evidence verified
-    printf 'audit.hostname\ttest\n' >"$DBTUNE_STATE_DIR/audit.tsv"
+    cat >"$DBTUNE_STATE_DIR/audit.tsv" <<'EOF'
+audit.hostname	test
+mariadb.variable.max_connections	200
+mariadb.variable.skip_name_resolve	OFF
+EOF
     : >"$DBTUNE_STATE_DIR/apps.tsv"
     : >"$DBTUNE_STATE_DIR/databases.tsv"
-    printf 'rule_id\tscope\tseverity\tverdict\tproposed_key\tproposed_value\tevidence\treason_sk\n' >"$DBTUNE_STATE_DIR/analysis.tsv"
+    cat >"$DBTUNE_STATE_DIR/analysis.tsv" <<'EOF'
+rule_id	scope	severity	verdict	proposed_key	proposed_value	evidence	reason_sk
+R-MAXCONN	server	high	CHANGE	max_connections	300	current=200	Test max connections.
+R-PINNED	server	medium	CHANGE	skip_name_resolve	1	current=OFF	Test name resolve.
+EOF
     printf 'timestamp\tuptime\tbp_hit_pct\tbp_misses_s\tdata_read_s\trnd_next_s\ttmp_disk_pct\tthreads_running\tthreads_connected\tqcache_hit_pct\tlog_waits_delta\twait_free_delta\tcpu_pct\tmem_available_kb\tswap_used_kb\tload1\trestart_flag\tqcache_queries_delta\tinterval_seconds\tsample_status\n' >"$DBTUNE_STATE_DIR/samples.tsv"
     printf '2026-07-31T12:00:00Z\t100\t99\t0\t0\t0\t0\t1\t1\t30\t0\t0\t1\t1000\t0\t1\t0\t1\t60\tok\n' >>"$DBTUNE_STATE_DIR/samples.tsv"
     dbtune_provenance_write_audit_manifest "$DBTUNE_STATE_DIR/audit-manifest.tsv" \
@@ -175,15 +183,22 @@ CNF
 
 write_manifest() {
     local analysis_manifest="$DBTUNE_STATE_DIR/analysis-manifest.tsv"
+    local proposal_records_hash
 
     dbtune_provenance_write_analysis_manifest "$analysis_manifest" \
         "$DBTUNE_STATE_DIR/analysis.tsv" "$DBTUNE_STATE_DIR/samples.tsv"
+    DBTUNE_AUDIT_FILE="$DBTUNE_STATE_DIR/audit.tsv"
+    dbtune_analysis_load "$DBTUNE_STATE_DIR/analysis.tsv"
+    dbtune_proposals_load "$DBTUNE_AUDIT_FILE"
+    proposal_records_hash=$(dbtune_proposal_records_hash)
     {
         printf 'schema\t1\n'
         printf 'run_id\t%s\n' "$(dbtune_manifest_value "$analysis_manifest" run_id)"
         printf 'audit_hash\t%s\n' "$(dbtune_manifest_value "$analysis_manifest" audit_hash)"
         printf 'samples_hash\t%s\n' "$(dbtune_manifest_value "$analysis_manifest" samples_hash)"
         printf 'analysis_hash\t%s\n' "$(dbtune_manifest_value "$analysis_manifest" analysis_hash)"
+        printf 'proposal_count\t%s\n' "${#DBTUNE_PROPOSAL_LINES[@]}"
+        printf 'proposal_records_hash\t%s\n' "$proposal_records_hash"
         printf 'proposal_hash\t%s\n' "$(dbtune_sha256_file "$DBTUNE_STATE_DIR/proposed-99-zz-tuning.cnf")"
     } >"$DBTUNE_STATE_DIR/proposal-manifest.tsv"
 }

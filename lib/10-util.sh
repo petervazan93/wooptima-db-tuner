@@ -169,6 +169,54 @@ dbtune_json_emit() {
     printf '%s}\n' "$output"
 }
 
+dbtune_shell_quote() {
+    local value=${1-}
+
+    printf "'%s'" "${value//\'/\'\\\'\'}"
+}
+
+dbtune_tsv_percentile() {
+    local file=${1:-}
+    local aliases=${2:-}
+    local fallback=${3:-1}
+    local percentile=${4:-}
+    local filter=${5:-valid}
+
+    [[ -r $file && -n $aliases && $fallback =~ ^[1-9][0-9]*$ ]] || return 64
+    [[ $percentile =~ ^[0-9]+([.][0-9]+)?$ ]] || return 64
+    [[ $filter == valid || $filter == qcache-active ]] || return 64
+    awk -F '\t' -v aliases="$aliases" -v fallback="$fallback" -v filter="$filter" '
+        function norm(value) { value=tolower(value); gsub(/-/, "_", value); return value }
+        BEGIN { wanted_count=split(aliases, wanted, ","); column=fallback }
+        NR == 1 {
+            found=0
+            header=(norm($1) == "timestamp" || norm($1) == "sampled_at" || norm($1) == "time" || norm($1) == "ts")
+            for (i=1; i<=NF; i++) {
+                name=norm($i)
+                if (name == "sample_status") status_column=i
+                if (name == "restart_flag") restart_column=i
+                if (name == "qcache_queries_delta") qcache_queries_column=i
+                for (j=1; j<=wanted_count; j++) if (name == wanted[j]) { column=i; found=1 }
+            }
+            if (header) { if (!found) column=0; next }
+        }
+        column > 0 && (!status_column || $status_column == "ok") &&
+        (!restart_column || $restart_column == 0) &&
+        (filter != "qcache-active" || (qcache_queries_column && $qcache_queries_column ~ /^[0-9]+([.][0-9]+)?$/ && $qcache_queries_column + 0 > 0)) &&
+        (filter != "qcache-active" || ($column + 0 >= 0 && $column + 0 <= 100)) &&
+        $column ~ /^-?[0-9]+([.][0-9]+)?$/ { print $column + 0 }
+    ' "$file" | LC_ALL=C sort -n | awk -v percentile="$percentile" '
+        { values[NR]=$1 }
+        END {
+            if (!NR || percentile < 0 || percentile > 100) exit 65
+            rank=int((percentile * NR + 99.999999) / 100)
+            if (rank < 1) rank=1
+            if (rank > NR) rank=NR
+            printf "%.6g\n", values[rank]
+        }
+    '
+}
+
 dbtune_sha256_file() {
     local file=${1:-}
 

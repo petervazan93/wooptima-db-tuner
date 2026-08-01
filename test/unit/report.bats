@@ -25,15 +25,26 @@ hw.storage_class	nvme
 mariadb.dataset_bytes	4294967296
 mariadb.variable.innodb_buffer_pool_size	128M
 mariadb.variable.max_connections	4096
+backup.status	verified
+backup.source	unit-test-backup
+backup.checked_at	2026-07-01T10:15:00Z
+backup.last_success	2026-07-01T10:06:00Z
+backup.schedule_count	1
+backup.process_count	0
 EOF
     cat >"$DBTUNE_STATE_DIR/apps.tsv" <<'EOF'
-app.0	path	/home/runcloud/webapps/shop-a
-app.0	type	wordpress
-app.0	woocommerce	1
+shop-a	path	/home/runcloud/webapps/shop-a
+shop-a	owner	runcloud
+shop-a	type	wordpress
+shop-a	database	shop_db
+shop-a	table_prefix	wp_
+shop-a	woocommerce	1
 EOF
     cat >"$DBTUNE_STATE_DIR/databases.tsv" <<'EOF'
-shop_db	size_bytes	4294967296
-shop_db	table_count	120
+shop-a	size_bytes	4294967296
+shop-a	table_count	120
+shop-a	autoload.top.0	large_option:1048576
+shop-a	autoload.top.1	api_token:512
 EOF
     cat >"$DBTUNE_STATE_DIR/samples.tsv" <<'EOF'
 timestamp	uptime	bp_hit_pct	bp_misses_s	data_read_s	rnd_next_s	tmp_disk_pct	threads_running	threads_connected	qcache_hit_pct	log_waits_delta	wait_free_delta	cpu_pct	mem_available_kb	swap_used_kb	load1	restart_flag	qcache_queries_delta	interval_seconds	sample_status
@@ -54,11 +65,11 @@ write_analysis() {
     cat >"$DBTUNE_STATE_DIR/analysis.tsv" <<'EOF'
 rule_id	scope	severity	verdict	proposed_key	proposed_value	evidence	reason_sk
 R-OC	app:shop-a	critical	Chýba object cache			Redis inactive | drop-in chýba	Zapnite Redis object cache "hneď".
+R-APP-AUTOLOAD	app:shop-a	high	TOO-LARGE			autoload=4M	Skontrolujte top autoload options.
 R-BP-SIZE	server	high	Pool je malý	innodb_buffer_pool_size	4G	dataset 4 GB; burst 80 %	Pool musí absorbovať bursty.
 R-MAXCONN	server	medium	Limit je privysoký	max_connections	200	FPM 120; peak 80	Zníži OOM riziko.
 R-SEC	server	high	MariaDB počúva verejne			bind-address=0.0.0.0	Obmedzte bind-address.
-R-APP-SQL	app:shop-a	high	Nikdy do CNF	query_cache_type	DROP TABLE wp_posts	app SQL	Iba aplikačné odporúčanie.
-R-DUP	server	low	Duplicitný návrh	max-connections	300	duplicitný kľúč	Musí sa preskočiť.
+R-APP-SQL	app:shop-a	high	Diagnostika			app SQL	Iba aplikačné odporúčanie.
 EOF
     write_analysis_manifest
 }
@@ -83,6 +94,14 @@ EOF
     grep -F '"apps.count":"1"' "$DBTUNE_STATE_DIR/report.json"
     grep -F '"databases.count":"1"' "$DBTUNE_STATE_DIR/report.json"
     grep -F '"metrics.cpu_pct.p95":"75.00"' "$DBTUNE_STATE_DIR/report.json"
+    grep -F '"proposal.001.key":"max_connections"' "$DBTUNE_STATE_DIR/report.json"
+    grep -F '"action.000.safety":"read-only"' "$DBTUNE_STATE_DIR/report.json"
+    grep -F 'large_option' "$DBTUNE_STATE_DIR/report.md"
+    grep -F '[REDACTED]' "$DBTUNE_STATE_DIR/report.md"
+    grep -F 'near_last_success' "$DBTUNE_STATE_DIR/report.md"
+    grep -F -- '--database=' "$DBTUNE_STATE_DIR/report.md"
+    [ "$(grep -o '"action\.[0-9][0-9][0-9]\.destructive":"false"' "$DBTUNE_STATE_DIR/report.json" | wc -l | tr -d ' ')" = 3 ]
+    ! grep -E '"action\.[0-9]+\.command":"[^"]*(DELETE|DROP|UPDATE)' "$DBTUNE_STATE_DIR/report.json"
     if command -v jq >/dev/null 2>&1; then
         jq -e 'type == "object" and ([paths | length] | max) == 1' "$DBTUNE_STATE_DIR/report.json"
     fi
@@ -102,6 +121,35 @@ EOF
     [ "$status" -eq 0 ]
     [[ "$output" != *degraded* ]]
     [[ "$output" != *restart* ]]
+}
+
+@test "shared nearest-rank p95 selects sample 19 at the 20-sample edge" {
+    local sample_file="$BATS_TEST_TMPDIR/twenty.tsv"
+    local value
+
+    printf 'timestamp\tuptime\tbp_hit_pct\tbp_misses_s\tdata_read_s\trnd_next_s\ttmp_disk_pct\tthreads_running\tthreads_connected\tqcache_hit_pct\tlog_waits_delta\twait_free_delta\tcpu_pct\tmem_available_kb\tswap_used_kb\tload1\trestart_flag\tqcache_queries_delta\tinterval_seconds\tsample_status\n' >"$sample_file"
+    for value in {1..20}; do
+        printf 'sample-%s\t%s\t99\t0\t0\t0\t0\t%s\t1\t30\t0\t0\t%s\t1000\t0\t1\t0\t1\t60\tok\n' \
+            "$value" "$value" "$value" "$value" >>"$sample_file"
+    done
+
+    run dbtune_samples_stats "$sample_file" cpu_pct 13
+    [ "$status" -eq 0 ]
+    [ "$output" = $'10.00\t19.00\t20.00\t20.00' ]
+}
+
+@test "action commands shell-quote scope and reject unsafe table prefixes" {
+    run dbtune_action_sql_command "shop';touch /tmp/not-run" wp_ R-APP-AUTOLOAD
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"--database='shop'\\'';touch /tmp/not-run'"* ]]
+    [[ "$output" == *'FROM `wp_options`'* ]]
+
+    run dbtune_action_sql_command shop 'wp_;DROP' R-APP-AUTOLOAD
+    [ "$status" -ne 0 ]
+
+    run dbtune_action_wp_command "/home/shop app';touch" runcloud cron
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"--path='/home/shop app'\\'';touch'"* ]]
 }
 
 @test "report escapes hostile TSV text and does not expose sensitive audit values" {
@@ -129,11 +177,18 @@ EOF
 @test "proposal contains only server rules and no duplicate canonical keys" {
     write_analysis
     dbtune_state_write analyzed
+    cmd_report >/dev/null
 
     run cmd_propose
     [ "$status" -eq 0 ]
     [ "$(dbtune_state_read)" = proposed ]
     [ "$(dbtune_manifest_value "$DBTUNE_STATE_DIR/proposal-manifest.tsv" run_id)" = report-run ]
+    [ "$(dbtune_manifest_value "$DBTUNE_STATE_DIR/proposal-manifest.tsv" proposal_count)" = 2 ]
+    grep -F '"proposals.count":"2"' "$DBTUNE_STATE_DIR/report.json"
+    [ "$(dbtune_manifest_value "$DBTUNE_STATE_DIR/proposal-manifest.tsv" proposal_records_hash)" = \
+        "$(grep -o '"proposals.hash":"[0-9a-f]*"' "$DBTUNE_STATE_DIR/report.json" | cut -d'"' -f4)" ]
+    ! grep -F 'current":"unknown' "$DBTUNE_STATE_DIR/report.json"
+    ! grep -F '`nezistená`' "$DBTUNE_STATE_DIR/report.md"
     proposal="$DBTUNE_STATE_DIR/proposed-99-zz-tuning.cnf"
     grep -Fx '[mysqld]' "$proposal"
     grep -F 'innodb_buffer_pool_size = 4G' "$proposal"
@@ -143,6 +198,28 @@ EOF
     run grep -F 'DROP TABLE' "$proposal"
     [ "$status" -ne 0 ]
     [ "$(awk -F= '/^[[:space:]]*[A-Za-z][A-Za-z0-9_-]*[[:space:]]*=/{key=$1; gsub(/[[:space:]-]/,"",key); key=tolower(key); count[key]++} END{for(key in count) if(count[key]>1) duplicate++} END{print duplicate+0}' "$proposal")" -eq 0 ]
+}
+
+@test "report and propose fail closed on canonical duplicate or unsafe proposal" {
+    DBTUNE_LOG_LEVEL=error
+    write_analysis
+    printf 'R-DUP\tserver\tlow\tCHANGE\tmax-connections\t300\tduplicate\tDuplicate.\n' >>"$DBTUNE_STATE_DIR/analysis.tsv"
+    write_analysis_manifest
+    dbtune_state_write analyzed
+
+    run cmd_report
+    [ "$status" -eq 65 ]
+    [[ "$output" == *"Kanonicky duplicitny"* ]]
+    run cmd_propose
+    [ "$status" -eq 65 ]
+    [ ! -e "$DBTUNE_STATE_DIR/proposed-99-zz-tuning.cnf" ]
+
+    write_analysis
+    printf 'R-BAD\tserver\thigh\tCHANGE\tunsafe;key\t1\tx\tx\n' >>"$DBTUNE_STATE_DIR/analysis.tsv"
+    write_analysis_manifest
+    run cmd_report
+    [ "$status" -eq 65 ]
+    [[ "$output" == *"Nebezpecny proposal"* ]]
 }
 
 @test "repeated proposal preserves proposed state and deterministic keys" {

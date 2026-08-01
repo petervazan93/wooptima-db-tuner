@@ -40,37 +40,40 @@ dbtune_rules_percentile() {
     local column=${2:-}
     local percentile=${3:-}
 
-    [[ -r $file && -n $column && $percentile =~ ^[0-9]+([.][0-9]+)?$ ]] || return 64
-    awk -F '\t' -v wanted="$column" -v percentile="$percentile" '
-        function sort_numeric(a, left, right, i, j, pivot, swap) {
-            i = left
-            j = right
-            pivot = a[int((left + right) / 2)]
-            while (i <= j) {
-                while (a[i] < pivot) i++
-                while (a[j] > pivot) j--
-                if (i <= j) {
-                    swap = a[i]; a[i] = a[j]; a[j] = swap
-                    i++; j--
-                }
-            }
-            if (left < j) sort_numeric(a, left, j)
-            if (i < right) sort_numeric(a, i, right)
-        }
-        NR == 1 {
-            for (i = 1; i <= NF; i++) if ($i == wanted) col = i
-            next
-        }
-        col && $col ~ /^-?[0-9]+([.][0-9]+)?$/ { values[++n] = $col + 0 }
-        END {
-            if (!col || !n || percentile < 0 || percentile > 100) exit 64
-            sort_numeric(values, 1, n)
-            rank = int((percentile * n + 99.999999) / 100)
-            if (rank < 1) rank = 1
-            if (rank > n) rank = n
-            printf "%.6g\n", values[rank]
-        }
-    ' "$file"
+    dbtune_tsv_percentile "$file" "$column" 1 "$percentile"
+}
+
+dbtune_rules_proposable_variables() {
+    printf '%s\n' \
+        innodb_buffer_pool_size \
+        max_connections \
+        innodb_io_capacity \
+        innodb_io_capacity_max \
+        innodb_read_io_threads \
+        innodb_write_io_threads \
+        innodb_flush_neighbors \
+        innodb_log_file_size \
+        innodb_log_buffer_size \
+        query_cache_type \
+        query_cache_size \
+        innodb_flush_log_at_trx_commit \
+        innodb_doublewrite \
+        innodb_flush_method \
+        innodb_buffer_pool_dump_at_shutdown \
+        innodb_buffer_pool_load_at_startup \
+        innodb_max_dirty_pages_pct \
+        innodb_max_dirty_pages_pct_lwm \
+        innodb_lock_wait_timeout \
+        skip_name_resolve \
+        thread_cache_size \
+        tmp_table_size \
+        max_heap_table_size \
+        table_definition_cache \
+        key_buffer_size \
+        slow_query_log \
+        slow_query_log_file \
+        long_query_time \
+        log_slow_verbosity
 }
 
 dbtune_rules_analyze() {
@@ -80,11 +83,17 @@ dbtune_rules_analyze() {
     local apps_file=${4:-}
     local databases_file=${5:-}
     local min_samples=${6:-288}
+    local p95_threads p50_qcache p05_available
 
     [[ -r $audit_file && -r $samples_file ]] || return 66
+    p95_threads=$(dbtune_tsv_percentile "$samples_file" threads_running 8 95) || return 65
+    p05_available=$(dbtune_tsv_percentile "$samples_file" mem_available_kb 14 5) || return 65
+    p50_qcache=$(dbtune_tsv_percentile "$samples_file" qcache_hit_pct 10 50 qcache-active 2>/dev/null || printf '0')
     awk -v audit_file="$audit_file" -v samples_file="$samples_file" \
         -v dbsize_file="$dbsize_file" -v apps_file="$apps_file" \
-        -v databases_file="$databases_file" -v min_samples="$min_samples" '
+        -v databases_file="$databases_file" -v min_samples="$min_samples" \
+        -v shared_p95_threads="$p95_threads" -v shared_p50_qcache="$p50_qcache" \
+        -v shared_p05_available="$p05_available" '
     BEGIN {
         FS = OFS = "\t"
         gib = 1073741824
@@ -209,9 +218,9 @@ dbtune_rules_analyze() {
             }
         }
         close(file)
-        p95_threads = percentile(threads_running, sample_count, 95)
-        p50_qcache = percentile(qcache_hit, qcache_active_count, 50)
-        p05_available_kb = percentile(mem_available, sample_count, 5)
+        p95_threads = shared_p95_threads + 0
+        p50_qcache = shared_p50_qcache + 0
+        p05_available_kb = shared_p05_available + 0
     }
 
     function load_dbsize(file, line, fields, date, database, timestamp, size_text, size, n, i, key, elapsed, delta, magnitude, threshold, valid_delta, valid_days) {
@@ -429,27 +438,6 @@ dbtune_rules_analyze() {
         return value == "0" || value == "no" || value == "false" || value == "off" || value == "disabled" || value == "inactive"
     }
 
-    function sort_numeric(values, left, right, i, j, pivot, swap) {
-        i = left; j = right; pivot = values[int((left + right) / 2)]
-        while (i <= j) {
-            while (values[i] < pivot) i++
-            while (values[j] > pivot) j--
-            if (i <= j) { swap = values[i]; values[i] = values[j]; values[j] = swap; i++; j-- }
-        }
-        if (left < j) sort_numeric(values, left, j)
-        if (i < right) sort_numeric(values, i, right)
-    }
-
-    function percentile(source, count, pct, copy, i, rank) {
-        if (count < 1) return 0
-        for (i = 1; i <= count; i++) copy[i] = source[i] + 0
-        sort_numeric(copy, 1, count)
-        rank = int((pct * count + 99.999999) / 100)
-        if (rank < 1) rank = 1
-        if (rank > count) rank = count
-        return copy[rank]
-    }
-
     function sort_text(values, count, i, j, swap) {
         for (i = 2; i <= count; i++) {
             swap = values[i]
@@ -484,14 +472,33 @@ dbtune_rules_analyze() {
 
     function setting(rule, key, target, severity, evidence, reason, current) {
         current = ag(key, "")
+        if (current == "" || tolower(current) == "unknown") {
+            emit(rule, "server", severity, "UNKNOWN", "", "", evidence "; current=missing; proposal_blocked=missing-current", reason)
+            return
+        }
         if (tolower(current) == tolower(target)) emit(rule, "server", "info", "OK", "", "", evidence "; current=" current, reason)
-        else emit(rule, "server", severity, "CHANGE", key, target, evidence "; current=" (current == "" ? "unknown" : current), reason)
+        else emit(rule, "server", severity, "CHANGE", key, target, evidence "; current=" current, reason)
     }
 
     function size_setting(rule, key, target, severity, evidence, reason, current) {
         current = ag(key, "")
+        if (current == "" || tolower(current) == "unknown") {
+            emit(rule, "server", severity, "UNKNOWN", "", "", evidence "; current=missing; proposal_blocked=missing-current", reason)
+            return
+        }
         if (same_size(current, target)) emit(rule, "server", "info", "OK", "", "", evidence "; current=" current, reason)
-        else emit(rule, "server", severity, "CHANGE", key, target, evidence "; current=" (current == "" ? "unknown" : current), reason)
+        else emit(rule, "server", severity, "CHANGE", key, target, evidence "; current=" current, reason)
+    }
+
+    function durability_setting(rule, key, target, severity, evidence, reason, current) {
+        current = ag(key, "")
+        evidence = evidence "; durability_exception=explicit"
+        if (current == "" || tolower(current) == "unknown") {
+            emit(rule, "server", severity, "UNKNOWN", "", "", evidence "; current=missing; proposal_blocked=missing-current", reason)
+            return
+        }
+        if (tolower(current) == tolower(target)) emit(rule, "server", "info", "OK", "", "", evidence "; current=" current, reason)
+        else emit(rule, "server", severity, "CHANGE", key, target, evidence "; current=" current, reason)
     }
 
     function version_parts(version) {
@@ -510,6 +517,10 @@ dbtune_rules_analyze() {
         ram = bytes(ag("ram_total_bytes", "0"))
         if (ram <= 0) ram = numeric(ag("ram_total_kb", "0")) * 1024
         current = bytes(ag("innodb_buffer_pool_size", "0"))
+        if (!("innodb_buffer_pool_size" in present) || current <= 0) {
+            emit("R-BP-SIZE", "server", "high", "UNKNOWN", "", "", "current=missing; proposal_blocked=missing-current", "Chyba efektivna hodnota buffer poolu; zmena sa nesmie navrhnut naslepo.")
+            return
+        }
         if (dataset <= 0 || ram <= 0) {
             emit("R-BP-SIZE", "server", "high", "UNKNOWN", "", "", "dataset_bytes=" dataset "; ram_bytes=" ram, "Chybaju data pre bezpecny vypocet buffer poolu.")
             return
@@ -544,7 +555,7 @@ dbtune_rules_analyze() {
             emit("R-BP-GROWTH", "server", "medium", "REVIEW", "", "", sprintf("discontinuities=%d; largest_jump=%.2fG; date=%s; excluded_from_growth=true", discontinuity_count, discontinuity_largest / gib, discontinuity_date), "Skok nad adaptivny prah 25 percent, minimalne 1 GiB, vyzera ako import alebo diskontinuita; z projekcie rastu je vyluceny.")
     }
 
-    function max_connections_rule(workers, peak, formula, peak_floor, target, current, evidence, ols, worker_status) {
+    function max_connections_rule(workers, peak, formula, peak_floor, target, current, current_text, evidence, ols, worker_status) {
         workers = numeric(ag("pm_max_children_sum", "0"))
         peak = max(numeric(ag("max_used_connections", "0")), peak_connected)
         ols = truth(ag("php_fpm_ols_stack", ""))
@@ -557,8 +568,13 @@ dbtune_rules_analyze() {
         formula = max(100, ceil(workers * 1.25 + 20))
         peak_floor = ceil(peak * 1.25)
         target = max(formula, peak_floor)
-        current = numeric(ag("max_connections", "0"))
         evidence = sprintf("pm.max_children_sum=%d; measured_peak=%d; formula=%d; peak_floor=%d", workers, peak, formula, peak_floor)
+        current_text = ag("max_connections", "")
+        if (current_text !~ /^[0-9]+$/) {
+            emit("R-MAXCONN", "server", "high", "UNKNOWN", "", "", evidence "; current=missing; proposal_blocked=missing-current", "Chyba efektivna hodnota max_connections; zmena sa nesmie navrhnut naslepo.")
+            return
+        }
+        current = numeric(current_text)
         if (current == target) emit("R-MAXCONN", "server", "info", "OK", "", "", evidence, "Limit pokryva PHP-FPM aj 25-percentnu rezervu nad nameranym peakom.")
         else emit("R-MAXCONN", "server", "high", "CHANGE", "max_connections", target, evidence, "Pouziva sa vacsia hodnota zo vzorca PHP-FPM a 25-percentnej rezervy nad realnym peakom.")
     }
@@ -612,7 +628,7 @@ dbtune_rules_analyze() {
     }
 
     function pinned_rules() {
-        setting("R-PINNED", "innodb_doublewrite", "1", "high", "durability", "Doublewrite chrani stranky pri torn write.")
+        durability_setting("R-PINNED", "innodb_doublewrite", "1", "high", "durability", "Doublewrite chrani stranky pri torn write.")
         if (version_major < 11) setting("R-PINNED", "innodb_flush_method", "O_DIRECT", "medium", "family=" version_family, "O_DIRECT obmedzi dvojite cachovanie dat.")
         setting("R-PINNED", "innodb_buffer_pool_dump_at_shutdown", "1", "medium", "warmup", "Dump a load poolu skracuje warm-up po restarte.")
         setting("R-PINNED", "innodb_buffer_pool_load_at_startup", "1", "medium", "warmup", "Dump a load poolu skracuje warm-up po restarte.")
@@ -681,7 +697,7 @@ dbtune_rules_analyze() {
         size_setting("R-LOG-BUF", "innodb_log_buffer_size", log_waits_total > 0 ? "64M" : "32M", log_waits_total > 0 ? "high" : "medium", "sum_log_waits_delta=" log_waits_total, "64M je odovodnene iba rastom Innodb_log_waits.")
         qcache_rule()
         if (truth(ag("skip_log_bin", "")) || falsehood(ag("log_bin", "")))
-            setting("R-TRXCOMMIT", "innodb_flush_log_at_trx_commit", "1", "critical", "skip-log-bin; no PITR", "Bez binlogu je redo jedina ochrana potvrdenych objednavok.")
+            durability_setting("R-TRXCOMMIT", "innodb_flush_log_at_trx_commit", "1", "critical", "skip-log-bin; no PITR", "Bez binlogu je redo jedina ochrana potvrdenych objednavok.")
         else emit("R-TRXCOMMIT", "server", "info", "REVIEW", "", "", "binary log enabled", "Pri zapnutom binlogu posud durability spolu so sync_binlog a PITR politikou.")
         pinned_rules()
         operational_rules()
@@ -758,29 +774,6 @@ dbtune_rules_analyze() {
         }
     }
     ' </dev/null
-}
-
-dbtune_rules_emit_server_proposal() {
-    local analysis_file=${1:-}
-
-    [[ -r $analysis_file ]] || return 66
-    awk -F '\t' '
-        NR == 1 {
-            if (NF != 8 || $1 != "rule_id" || $2 != "scope" || $5 != "proposed_key") exit 65
-            next
-        }
-        NF == 8 && $2 == "server" && $5 != "" {
-            if ($5 !~ /^[a-zA-Z0-9_]+$/ || $6 ~ /[\r\n]/) exit 65
-            if (!seen[$5]++) order[++count] = $5
-            value[$5] = $6
-        }
-        END {
-            if (NR < 1) exit 65
-            print "# Generated only from server-scope records in analysis.tsv."
-            print "[mysqld]"
-            for (i = 1; i <= count; i++) print order[i] " = " value[order[i]]
-        }
-    ' "$analysis_file"
 }
 
 # Funkciu vola CLI dispatcher aj collector bez argumentov.
