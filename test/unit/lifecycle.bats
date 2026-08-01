@@ -32,6 +32,14 @@ setup() {
     write_manifest
 }
 
+file_mode() {
+    if [[ $(uname -s) == Darwin ]]; then
+        stat -f '%Lp' "$1"
+    else
+        stat -c '%a' "$1"
+    fi
+}
+
 bats::on_failure() {
     printf '%s\n' "$output" >&3
 }
@@ -214,7 +222,7 @@ write_manifest() {
     run cmd_apply
     [ "$status" -eq 0 ]
     [[ "$output" == *"RunCloud"* ]]
-    [ "$(stat -f '%Lp' "$DBTUNE_CONFIG_TARGET" 2>/dev/null || stat -c '%a' "$DBTUNE_CONFIG_TARGET")" = 644 ]
+    [ "$(file_mode "$DBTUNE_CONFIG_TARGET")" = 644 ]
 
     run cmd_verify --post
     [ "$status" -eq 0 ]

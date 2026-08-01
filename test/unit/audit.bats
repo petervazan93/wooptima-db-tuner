@@ -16,6 +16,14 @@ setup() {
     source "$BATS_TEST_DIRNAME/../../lib/20-audit.sh"
 }
 
+file_mode() {
+    if [[ $(uname -s) == Darwin ]]; then
+        stat -f '%Lp' "$1"
+    else
+        stat -c '%a' "$1"
+    fi
+}
+
 @test "wp-config parser handles variants without leaking DB_PASSWORD" {
     export WORDPRESS_DB_NAME=woo_environment
     export WORDPRESS_DB_PASSWORD=environment-secret-must-never-appear
@@ -169,9 +177,9 @@ EOF
     [[ "$output" == *'"mariadb.version":"11.4.12-MariaDB"'* ]]
     [[ "$output" == *'"database.shopdb.autoload_bytes":"2097152"'* ]]
     [[ "$output" != *secret* ]]
-    [ "$(stat -f '%Lp' "$DBTUNE_STATE_DIR/audit.tsv" 2>/dev/null || stat -c '%a' "$DBTUNE_STATE_DIR/audit.tsv")" = 600 ]
-    [ "$(stat -f '%Lp' "$DBTUNE_STATE_DIR/apps.tsv" 2>/dev/null || stat -c '%a' "$DBTUNE_STATE_DIR/apps.tsv")" = 600 ]
-    [ "$(stat -f '%Lp' "$DBTUNE_STATE_DIR/databases.tsv" 2>/dev/null || stat -c '%a' "$DBTUNE_STATE_DIR/databases.tsv")" = 600 ]
+    [ "$(file_mode "$DBTUNE_STATE_DIR/audit.tsv")" = 600 ]
+    [ "$(file_mode "$DBTUNE_STATE_DIR/apps.tsv")" = 600 ]
+    [ "$(file_mode "$DBTUNE_STATE_DIR/databases.tsv")" = 600 ]
     [ "$(dbtune_state_read)" = audited ]
 
     run cmd_audit
