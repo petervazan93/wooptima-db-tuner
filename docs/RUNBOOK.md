@@ -5,7 +5,7 @@
 - Spustajte ako `root` na podporovanej MariaDB 10.6 az 11.x, nie na Galera/wsrep uzle.
 - Pred pilotom overte obnovitelny databazovy backup, pristup do RunCloud panela a konzolu mimo webu. Lokalne cron zaznamy nie su dokaz uspesnej RunCloud zalohy.
 - Bezny `apply` ocakava stav `proposed`, aspon 288 validnych vzoriek a `proposal-manifest.tsv`, ktory cez `run_id`, `audit_hash`, `samples_hash`, `analysis_hash` a `proposal_hash` viaze proposal na jeden meraci cyklus.
-- Predvoleny ciel je `/etc/mysql/mariadb.conf.d/99-zz-tuning.cnf`. `DBTUNE_CONFIG_TARGET` je urceny pre test alebo explicitne riadene nestandardne instalacie.
+- Predvoleny ciel je `/etc/mysql/mariadb.conf.d/99-zz-tuning.cnf` a povoleny adresar `/etc/mysql/mariadb.conf.d`. Nestandardny `DBTUNE_CONFIG_TARGET` vyzaduje aj explicitny `DBTUNE_CONFIG_ALLOWED_DIR`; target musi byt priamy `.cnf` v tomto adresari. Apply odmieta target symlink, dangling symlink, hardlink topologiu, symlink parent komponent, vymenu parent adresara pocas apply a existujuci subor mimo `root:root 0644` kontraktu.
 - Apply je bez `--force` blokovany v lokalnom case 05:30-07:30 a vzdy blokovany pri Galera, beziacom mydumper procese alebo autoritativnom backup stave `missing`. Apply aj `--force` vyzaduju platny backup evidence artefakt alebo samostatne bezpecnostne potvrdenie na TTY.
 
 ## Pilot
@@ -67,7 +67,7 @@ Preferovany postup:
 sudo dbtune rollback
 ```
 
-Rollback najprv presunie nasadeny ciel do apply historie a obnovi povodny subor, ak existoval. Nepouziva SQL. Ak MariaDB nebezi, zavola `systemctl start mariadb`; ak bezi, runtime hodnoty sa bez restartu nezmenia, preto vytvori `RESTART_REQUIRED` a vyziada manualny restart cez RunCloud panel. `dbtune status` tento pending restart zobrazi.
+Rollback pri povodne absent targete presunie nasadeny regularny subor do apply historie a ponecha target absent. Pri povodnom regularnom targete najprv zachova nasadeny subor v historii a povodny snapshot publikuje atomicky; symlinky neobnovuje ani nenasleduje. Nepouziva SQL. Ak MariaDB nebezi, zavola `systemctl start mariadb`; ak bezi, runtime hodnoty sa bez restartu nezmenia, preto vytvori `RESTART_REQUIRED` a vyziada manualny restart cez RunCloud panel. `dbtune status` tento pending restart zobrazi.
 
 Ak filesystem restore zlyha, `apply/current` ostane na problemovej historii, stav bude `recovery_required` alebo `rollback_failed` a `dbtune status` vypise `sudo dbtune rollback` aj cestu k `ROLLBACK.txt`. Pointer ani predchadzajuci state sa po zlyhanom apply nerestartuju naslepo; obnovia sa az po potvrdenom restore.
 

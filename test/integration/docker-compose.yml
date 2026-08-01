@@ -1,6 +1,6 @@
 services:
   mariadb106:
-    image: mariadb:10.6
+    image: mariadb:10.6@sha256:114d40be36852d0a019afd8458f7e1cc63fd300403b115b1f32e31130d5f671b
     environment:
       MARIADB_ALLOW_EMPTY_ROOT_PASSWORD: "1"
       MARIADB_DATABASE: dbtune
@@ -15,7 +15,7 @@ services:
       - ../../dist/dbtune:/usr/local/bin/dbtune:ro
 
   mariadb114:
-    image: mariadb:11.4
+    image: mariadb:11.4@sha256:a794d9eb009e20de605858a11f32f63b4075cbd197c650436f0e3b457e4caed7
     environment:
       MARIADB_ALLOW_EMPTY_ROOT_PASSWORD: "1"
       MARIADB_DATABASE: dbtune

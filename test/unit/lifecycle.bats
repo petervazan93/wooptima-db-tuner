@@ -1,8 +1,11 @@
 #!/usr/bin/env bats
 
 setup() {
+    BATS_TEST_TMPDIR=$(CDPATH='' cd -- "$BATS_TEST_TMPDIR" && pwd -P)
+    export BATS_TEST_TMPDIR
     export DBTUNE_STATE_DIR="$BATS_TEST_TMPDIR/state"
     export DBTUNE_CONFIG_TARGET="$BATS_TEST_TMPDIR/etc/99-zz-tuning.cnf"
+    export DBTUNE_CONFIG_ALLOWED_DIR="$BATS_TEST_TMPDIR/etc"
     export DBTUNE_LOG_LEVEL=error
     export DBTUNE_MIN_APPLY_SAMPLES=1
     export DBTUNE_SQL_AUTH_METHOD=socket
@@ -240,6 +243,102 @@ write_manifest() {
     [ "$(cat "$DBTUNE_STATE_DIR/state")" = proposed ]
 }
 
+@test "apply accepts an absent target in the explicit allowed directory" {
+    run cmd_apply
+    [ "$status" -eq 0 ]
+    [ -f "$DBTUNE_CONFIG_TARGET" ]
+    [ ! -L "$DBTUNE_CONFIG_TARGET" ]
+}
+
+@test "apply accepts and backs up a regular target in the explicit allowed directory" {
+    printf 'original\n' >"$DBTUNE_CONFIG_TARGET"
+    run cmd_apply
+    [ "$status" -eq 0 ]
+    history=$(cat "$DBTUNE_STATE_DIR/apply/current")
+    [ "$(cat "$history/original.cnf")" = original ]
+}
+
+@test "apply rejects target symlinks and dangling symlinks" {
+    printf 'outside\n' >"$BATS_TEST_TMPDIR/outside.cnf"
+    ln -s "$BATS_TEST_TMPDIR/outside.cnf" "$DBTUNE_CONFIG_TARGET"
+    run cmd_apply
+    [ "$status" -eq 65 ]
+    [[ "$output" == *"symlink"* ]]
+    [ "$(cat "$BATS_TEST_TMPDIR/outside.cnf")" = outside ]
+
+    rm "$DBTUNE_CONFIG_TARGET"
+    ln -s "$BATS_TEST_TMPDIR/missing.cnf" "$DBTUNE_CONFIG_TARGET"
+    run cmd_apply
+    [ "$status" -eq 65 ]
+    [[ "$output" == *"dangling symlink"* ]]
+    [ -L "$DBTUNE_CONFIG_TARGET" ]
+}
+
+@test "apply rejects a symlink in the config parent path" {
+    rmdir "$DBTUNE_CONFIG_ALLOWED_DIR"
+    mkdir "$BATS_TEST_TMPDIR/real-config"
+    ln -s "$BATS_TEST_TMPDIR/real-config" "$DBTUNE_CONFIG_ALLOWED_DIR"
+
+    run cmd_apply
+    [ "$status" -eq 65 ]
+    [[ "$output" == *"parent komponent"* ]]
+    [ ! -e "$BATS_TEST_TMPDIR/real-config/99-zz-tuning.cnf" ]
+}
+
+@test "apply rejects a target outside the explicit allowed directory" {
+    mkdir "$BATS_TEST_TMPDIR/outside-config"
+    export DBTUNE_CONFIG_TARGET="$BATS_TEST_TMPDIR/outside-config/99-zz-tuning.cnf"
+
+    run cmd_apply
+    [ "$status" -eq 65 ]
+    [[ "$output" == *"povolenom adresari"* ]]
+    [ ! -e "$DBTUNE_CONFIG_TARGET" ]
+}
+
+@test "apply rejects an existing target with an unexpected mode" {
+    printf 'original\n' >"$DBTUNE_CONFIG_TARGET"
+    chmod 600 "$DBTUNE_CONFIG_TARGET"
+
+    run cmd_apply
+    [ "$status" -eq 65 ]
+    [[ "$output" == *"vlastnictvo alebo mode"* ]]
+    [ "$(cat "$DBTUNE_CONFIG_TARGET")" = original ]
+}
+
+@test "apply rejects an existing target with hardlinks" {
+    printf 'original\n' >"$DBTUNE_CONFIG_TARGET"
+    ln "$DBTUNE_CONFIG_TARGET" "$BATS_TEST_TMPDIR/original-hardlink.cnf"
+
+    run cmd_apply
+    [ "$status" -eq 65 ]
+    [[ "$output" == *"viac hardlinkov"* ]]
+    [ "$(cat "$DBTUNE_CONFIG_TARGET")" = original ]
+    [ "$(cat "$BATS_TEST_TMPDIR/original-hardlink.cnf")" = original ]
+}
+
+@test "apply rejects an unexpected config ownership contract" {
+    printf 'original\n' >"$DBTUNE_CONFIG_TARGET"
+    export DBTUNE_CONFIG_UID=$((DBTUNE_CONFIG_UID + 1))
+
+    run cmd_apply
+    [ "$status" -eq 65 ]
+    [[ "$output" == *"neocakavane vlastnictvo"* ]]
+    [ "$(cat "$DBTUNE_CONFIG_TARGET")" = original ]
+}
+
+@test "apply revalidates parent identity immediately before atomic publish" {
+    dbtune_lifecycle_before_publish() {
+        mv "$DBTUNE_CONFIG_ALLOWED_DIR" "$BATS_TEST_TMPDIR/original-config-dir"
+        mkdir "$DBTUNE_CONFIG_ALLOWED_DIR"
+    }
+
+    run cmd_apply
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"adresar bol pocas apply vymeneny"* ]]
+    [ ! -e "$BATS_TEST_TMPDIR/original-config-dir/99-zz-tuning.cnf" ]
+    [ ! -e "$DBTUNE_CONFIG_TARGET" ]
+}
+
 @test "validation parser ignores benign invalid words in help output" {
     output_file="$BATS_TEST_TMPDIR/help.log"
     printf '%s\n' 'attempts due to invalid password' 'NO_ZERO_DATE, ALLOW_INVALID_DATES' 'query-cache-wlock-invalidate FALSE' >"$output_file"
@@ -300,6 +399,16 @@ write_manifest() {
     grep -Fx 'start mariadb' "$DBTUNE_STATE_DIR/systemctl.log"
     history=$(cat "$DBTUNE_STATE_DIR/apply/current")
     [ ! -e "$history/RESTART_REQUIRED" ]
+}
+
+@test "rollback restores an originally absent target to absent topology" {
+    cmd_apply >/dev/null
+    [ -f "$DBTUNE_CONFIG_TARGET" ]
+
+    run cmd_rollback
+    [ "$status" -eq 0 ]
+    [ ! -e "$DBTUNE_CONFIG_TARGET" ]
+    [ ! -L "$DBTUNE_CONFIG_TARGET" ]
 }
 
 @test "unattended-upgrades window blocks apply without force" {

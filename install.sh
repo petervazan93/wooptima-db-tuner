@@ -4,16 +4,18 @@ set -eu
 
 REPOSITORY=${DBTUNE_REPOSITORY:-petervazan93/wooptima-db-tuner}
 INSTALL_DIR=${DBTUNE_INSTALL_DIR:-/usr/local/bin}
-VERSION=${DBTUNE_VERSION:-latest}
+RELEASE=${DBTUNE_RELEASE:-latest}
 DOWNLOAD_BASE=${DBTUNE_DOWNLOAD_BASE:-}
 ALLOW_UNSUPPORTED_OS=${DBTUNE_ALLOW_UNSUPPORTED_OS:-0}
+ATTESTATION_REPOSITORY=petervazan93/wooptima-db-tuner
+ATTESTATION_SIGNER_WORKFLOW=petervazan93/wooptima-db-tuner/.github/workflows/release.yml
 
 usage() {
     cat <<'EOF'
 Pouzitie: install.sh [--version vX.Y.Z] [--install-dir CESTA]
 
 Premenne:
-  DBTUNE_VERSION               Release tag, default latest
+  DBTUNE_RELEASE               Release tag, default latest
   DBTUNE_INSTALL_DIR           Cielovy adresar, default /usr/local/bin
   DBTUNE_REPOSITORY            GitHub owner/repo
 EOF
@@ -28,7 +30,7 @@ while [ "$#" -gt 0 ]; do
     case $1 in
         --version)
             [ "$#" -ge 2 ] || fail '--version vyzaduje hodnotu'
-            VERSION=$2
+            RELEASE=$2
             shift 2
             ;;
         --install-dir)
@@ -49,12 +51,12 @@ case $INSTALL_DIR in
     *) fail 'installacny adresar musi byt absolutna cesta' ;;
 esac
 
-case $VERSION in
+case $RELEASE in
     latest) ;;
     v*) ;;
-    *) VERSION="v$VERSION" ;;
+    *) RELEASE="v$RELEASE" ;;
 esac
-if [ "$VERSION" != latest ] && ! printf '%s\n' "$VERSION" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+if [ "$RELEASE" != latest ] && ! printf '%s\n' "$RELEASE" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
     fail 'verzia musi byt latest alebo vX.Y.Z'
 fi
 if ! printf '%s\n' "$REPOSITORY" | grep -Eq '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$'; then
@@ -67,15 +69,16 @@ fi
 command -v curl >/dev/null 2>&1 || fail 'chyba curl'
 command -v install >/dev/null 2>&1 || fail 'chyba prikaz install'
 command -v bash >/dev/null 2>&1 || fail 'chyba bash'
+command -v gh >/dev/null 2>&1 || fail 'chyba gh CLI potrebne pre overenie artifact attestation'
 
 bash_major=$(bash -c 'printf "%s" "${BASH_VERSINFO[0]}"')
 [ "$bash_major" -ge 4 ] || fail 'dbtune vyzaduje Bash 4 alebo novsi'
 
 if [ -z "$DOWNLOAD_BASE" ]; then
-    if [ "$VERSION" = latest ]; then
+    if [ "$RELEASE" = latest ]; then
         DOWNLOAD_BASE="https://github.com/$REPOSITORY/releases/latest/download"
     else
-        DOWNLOAD_BASE="https://github.com/$REPOSITORY/releases/download/$VERSION"
+        DOWNLOAD_BASE="https://github.com/$REPOSITORY/releases/download/$RELEASE"
     fi
 fi
 
@@ -96,9 +99,29 @@ download() {
     esac
 }
 
-printf 'dbtune install: stahujem %s (%s)\n' "$REPOSITORY" "$VERSION"
+verify_attestation() {
+    artifact=$1
+    source_ref=${2:-}
+    if [ -n "$source_ref" ]; then
+        gh attestation verify "$artifact" \
+            --bundle "$temporary/dbtune-attestation.jsonl" \
+            --repo "$ATTESTATION_REPOSITORY" \
+            --signer-workflow "$ATTESTATION_SIGNER_WORKFLOW" \
+            --source-ref "$source_ref" \
+            --deny-self-hosted-runners >/dev/null
+    else
+        gh attestation verify "$artifact" \
+            --bundle "$temporary/dbtune-attestation.jsonl" \
+            --repo "$ATTESTATION_REPOSITORY" \
+            --signer-workflow "$ATTESTATION_SIGNER_WORKFLOW" \
+            --deny-self-hosted-runners >/dev/null
+    fi
+}
+
+printf 'dbtune install: stahujem %s (%s)\n' "$REPOSITORY" "$RELEASE"
 download dbtune "$temporary/dbtune"
 download dbtune.sha256 "$temporary/dbtune.sha256"
+download dbtune-attestation.jsonl "$temporary/dbtune-attestation.jsonl"
 
 expected=$(awk '$2 == "dbtune" || $2 == "*dbtune" {print $1; exit}' "$temporary/dbtune.sha256")
 case $expected in
@@ -114,11 +137,25 @@ else
     fail 'chyba sha256sum aj shasum'
 fi
 [ "$actual" = "$expected" ] || fail 'SHA-256 kontrola artefaktu zlyhala'
+if [ "$RELEASE" = latest ]; then
+    verify_attestation "$temporary/dbtune" || fail 'GitHub artifact attestation overenie zlyhalo'
+else
+    verify_attestation "$temporary/dbtune" "refs/tags/$RELEASE" || fail 'GitHub artifact attestation overenie zlyhalo'
+fi
 bash -n "$temporary/dbtune" || fail 'stiahnuty artefakt nema platnu Bash syntax'
-artifact_version=$(bash "$temporary/dbtune" version | awk 'NF == 2 && $1 == "dbtune" {print $2}')
+artifact_version=$(
+    (
+        unset DBTUNE_VERSION DBTUNE_ARTIFACT_VERSION DBTUNE_RELEASE DBTUNE_PROGRAM
+        bash "$temporary/dbtune" version
+    ) | awk 'NF == 2 && $1 == "dbtune" {print $2}'
+)
 [ -n "$artifact_version" ] || fail 'artefakt nevratil platnu verziu'
-if [ "$VERSION" != latest ] && [ "v$artifact_version" != "$VERSION" ]; then
-    fail "artefakt ma verziu $artifact_version, ocakavana je ${VERSION#v}"
+if [ "$RELEASE" != latest ] && [ "v$artifact_version" != "$RELEASE" ]; then
+    fail "artefakt ma verziu $artifact_version, ocakavana je ${RELEASE#v}"
+fi
+if [ "$RELEASE" = latest ]; then
+    verify_attestation "$temporary/dbtune" "refs/tags/v$artifact_version" ||
+        fail 'GitHub artifact attestation nezodpoveda tagu immutable verzie'
 fi
 
 SUDO=

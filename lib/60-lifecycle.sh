@@ -2,6 +2,134 @@ dbtune_lifecycle_target() {
     printf '%s\n' "${DBTUNE_CONFIG_TARGET:-/etc/mysql/mariadb.conf.d/99-zz-tuning.cnf}"
 }
 
+dbtune_lifecycle_allowed_directory() {
+    printf '%s\n' "${DBTUNE_CONFIG_ALLOWED_DIR:-/etc/mysql/mariadb.conf.d}"
+}
+
+dbtune_lifecycle_path_is_canonical_absolute() {
+    local path=${1:-}
+
+    [[ $path == /* && $path != / && $path != */ && $path != *//* && $path != *$'\n'* ]] || return 1
+    [[ $path != */./* && $path != */. && $path != */../* && $path != */.. ]]
+}
+
+dbtune_lifecycle_file_identity() {
+    local path=${1:-}
+
+    [[ -n $path ]] || return 64
+    if stat -c '%d:%i' "$path" >/dev/null 2>&1; then
+        stat -c '%d:%i' "$path"
+    else
+        stat -f '%d:%i' "$path"
+    fi
+}
+
+dbtune_lifecycle_file_links() {
+    local path=${1:-}
+
+    [[ -n $path ]] || return 64
+    if stat -c '%h' "$path" >/dev/null 2>&1; then
+        stat -c '%h' "$path"
+    else
+        stat -f '%l' "$path"
+    fi
+}
+
+dbtune_lifecycle_validate_parent_components() {
+    local directory=${1:-}
+    local component current=''
+    local -a components
+
+    dbtune_lifecycle_path_is_canonical_absolute "$directory" || return 1
+    IFS=/ read -r -a components <<<"$directory"
+    for component in "${components[@]}"; do
+        [[ -n $component ]] || continue
+        current+="/$component"
+        if [[ -L $current || ! -d $current ]]; then
+            dbtune_log error "Config parent komponent nie je bezpecny regularny adresar: $current"
+            return 65
+        fi
+    done
+}
+
+dbtune_lifecycle_validate_target_path() {
+    local target=${1:-}
+    local expected_topology=${2:-any}
+    local expected_directory_identity=${3:-}
+    local expected_target_identity=${4:-}
+    local expected_target_hash=${5:-}
+    local allowed directory base uid gid mode links expected_uid expected_gid expected_mode
+
+    allowed=$(dbtune_lifecycle_allowed_directory)
+    if ! dbtune_lifecycle_path_is_canonical_absolute "$target" ||
+        ! dbtune_lifecycle_path_is_canonical_absolute "$allowed"; then
+        dbtune_log error "Config target a povoleny adresar musia byt kanonicke absolutne cesty"
+        return 65
+    fi
+    directory=${target%/*}
+    base=${target##*/}
+    if [[ $directory != "$allowed" || ! $base =~ ^[A-Za-z0-9][A-Za-z0-9._-]*[.]cnf$ ]]; then
+        dbtune_log error "Config target musi byt .cnf priamo v povolenom adresari $allowed"
+        return 65
+    fi
+    dbtune_lifecycle_validate_parent_components "$allowed" || return
+
+    expected_uid=${DBTUNE_CONFIG_UID:-0}
+    expected_gid=${DBTUNE_CONFIG_GID:-0}
+    expected_mode=${DBTUNE_CONFIG_MODE:-644}
+    [[ $expected_uid =~ ^[0-9]+$ && $expected_gid =~ ^[0-9]+$ && $expected_mode =~ ^[0-7]{3,4}$ ]] || return 64
+    expected_mode=${expected_mode#0}
+    read -r uid gid mode < <(dbtune_file_stat "$allowed") || return 1
+    if [[ $uid != "$expected_uid" || $gid != "$expected_gid" || ${mode: -2:1} == [2367] || ${mode: -1} == [2367] ]]; then
+        dbtune_log error "Povoleny config adresar ma neocakavane vlastnictvo alebo je group/world writable: $allowed ($uid:$gid $mode)"
+        return 65
+    fi
+    DBTUNE_LIFECYCLE_DIRECTORY_IDENTITY=$(dbtune_lifecycle_file_identity "$allowed") || return
+    if [[ -n $expected_directory_identity && $DBTUNE_LIFECYCLE_DIRECTORY_IDENTITY != "$expected_directory_identity" ]]; then
+        dbtune_log error "Povoleny config adresar bol pocas apply vymeneny"
+        return 65
+    fi
+
+    DBTUNE_LIFECYCLE_TARGET_IDENTITY=
+    DBTUNE_LIFECYCLE_TARGET_HASH=
+    if [[ -L $target ]]; then
+        dbtune_log error "Config target je symlink alebo dangling symlink: $target"
+        return 65
+    elif [[ -e $target ]]; then
+        if [[ ! -f $target ]]; then
+            dbtune_log error "Config target nie je regularny subor: $target"
+            return 65
+        fi
+        read -r uid gid mode < <(dbtune_file_stat "$target") || return 1
+        if [[ $uid != "$expected_uid" || $gid != "$expected_gid" || $mode != "$expected_mode" ]]; then
+            dbtune_log error "Config target ma neocakavane vlastnictvo alebo mode: $target ($uid:$gid $mode)"
+            return 65
+        fi
+        links=$(dbtune_lifecycle_file_links "$target") || return 1
+        if [[ $links != 1 ]]; then
+            dbtune_log error "Config target ma viac hardlinkov a jeho topologiu nie je mozne bezpecne obnovit: $target"
+            return 65
+        fi
+        DBTUNE_LIFECYCLE_TARGET_TOPOLOGY=regular
+        DBTUNE_LIFECYCLE_TARGET_IDENTITY=$(dbtune_lifecycle_file_identity "$target") || return
+        DBTUNE_LIFECYCLE_TARGET_HASH=$(dbtune_sha256_file "$target") || return
+    else
+        DBTUNE_LIFECYCLE_TARGET_TOPOLOGY=absent
+    fi
+    if [[ $expected_topology != any && $DBTUNE_LIFECYCLE_TARGET_TOPOLOGY != "$expected_topology" ]]; then
+        dbtune_log error "Config target zmenil pocas operacie topologiu ($expected_topology -> $DBTUNE_LIFECYCLE_TARGET_TOPOLOGY)"
+        return 65
+    fi
+    if [[ -n $expected_target_identity && $DBTUNE_LIFECYCLE_TARGET_IDENTITY != "$expected_target_identity" ]]; then
+        dbtune_log error "Config target bol pocas operacie vymeneny"
+        return 65
+    fi
+    if [[ -n $expected_target_hash && $DBTUNE_LIFECYCLE_TARGET_HASH != "$expected_target_hash" ]]; then
+        dbtune_log error "Config target bol pocas operacie zmeneny"
+        return 65
+    fi
+}
+
 dbtune_lifecycle_proposal() {
     printf '%s/proposed-99-zz-tuning.cnf\n' "$DBTUNE_STATE_DIR"
 }
@@ -416,7 +544,8 @@ dbtune_lifecycle_write_rollback_instructions() {
     {
         printf '# Filesystem-first rollback; nevyzaduje funkcnu MariaDB ani dbtune.\n'
         printf 'sudo test -d %s\n' "$history_q"
-        printf 'sudo test ! -e %s || sudo mv %s %s\n' "$target_q" "$target_q" "$removed_q"
+        printf 'sudo test ! -L %s\n' "$target_q"
+        printf 'if sudo test -e %s; then sudo test -f %s && sudo mv %s %s; fi\n' "$target_q" "$target_q" "$target_q" "$removed_q"
         if ((had_original == 1)); then
             printf 'sudo install -o root -g root -m 0644 %s %s\n' "$backup_q" "$target_q"
         fi
@@ -433,13 +562,26 @@ dbtune_lifecycle_prepare_history() {
     local target=${2:-}
     local proposal=${3:-}
     local backup_evidence=${4:-}
-    local had_original=0 proposal_hash expected_hash run_id=unmeasured audit_hash=unmeasured
+    local expected_topology=${5:-}
+    local expected_directory_identity=${6:-}
+    local expected_target_identity=${7:-}
+    local expected_target_hash=${8:-}
+    local had_original=0 original_hash=absent proposal_hash expected_hash run_id=unmeasured audit_hash=unmeasured
     local backup_hash=interactive
     local proposal_manifest="$DBTUNE_STATE_DIR/proposal-manifest.tsv"
 
-    if [[ -e $target ]]; then
+    dbtune_lifecycle_validate_target_path "$target" "$expected_topology" \
+        "$expected_directory_identity" "$expected_target_identity" "$expected_target_hash" || return
+    if [[ $DBTUNE_LIFECYCLE_TARGET_TOPOLOGY == regular ]]; then
         cp -p "$target" "$history/original.cnf" || return 1
         chmod 600 "$history/original.cnf" || return 1
+        dbtune_lifecycle_validate_target_path "$target" regular \
+            "$expected_directory_identity" "$expected_target_identity" "$expected_target_hash" || return
+        original_hash=$(dbtune_sha256_file "$history/original.cnf") || return
+        [[ $original_hash == "$expected_target_hash" ]] || {
+            dbtune_log error "Backup povodneho config targetu nezodpoveda zdroju"
+            return 65
+        }
         had_original=1
     fi
     cp "$proposal" "$history/proposed.cnf" || return 1
@@ -466,7 +608,9 @@ dbtune_lifecycle_prepare_history() {
     fi
     {
         printf 'target\t%s\n' "$target"
+        printf 'directory_identity\t%s\n' "$expected_directory_identity"
         printf 'had_original\t%s\n' "$had_original"
+        printf 'original_hash\t%s\n' "$original_hash"
         printf 'created_at\t%s\n' "$(dbtune_now)"
         printf 'run_id\t%s\n' "$run_id"
         printf 'audit_hash\t%s\n' "$audit_hash"
@@ -483,15 +627,29 @@ dbtune_lifecycle_prepare_history() {
 dbtune_lifecycle_install_config() {
     local proposal=${1:-}
     local target=${2:-}
+    local expected_topology=${3:-}
+    local expected_directory_identity=${4:-}
+    local expected_target_identity=${5:-}
+    local expected_target_hash=${6:-}
     local directory temporary
 
     directory=${target%/*}
-    [[ $directory != "$target" ]] || directory=.
-    install -d -m 755 "$directory" || return 1
+    dbtune_lifecycle_validate_target_path "$target" "$expected_topology" \
+        "$expected_directory_identity" "$expected_target_identity" "$expected_target_hash" || return
     temporary=$(mktemp "$directory/.99-zz-tuning.cnf.tmp.XXXXXX") || return 1
     if ! command cat "$proposal" >"$temporary" || ! chown root:root "$temporary" || ! chmod 0644 "$temporary"; then
         rm -f "$temporary"
         return 1
+    fi
+    dbtune_lifecycle_before_publish "$target" "$temporary" || {
+        rm -f "$temporary"
+        return 1
+    }
+    if ! dbtune_lifecycle_validate_target_path "$target" "$expected_topology" \
+        "$expected_directory_identity" "$expected_target_identity" "$expected_target_hash" ||
+        [[ ! -f $temporary || -L $temporary ]]; then
+        rm -f "$temporary"
+        return 65
     fi
     if ! mv -f "$temporary" "$target"; then
         rm -f "$temporary"
@@ -583,30 +741,73 @@ dbtune_lifecycle_manifest_value() {
 
 dbtune_lifecycle_restore_config() {
     local history=${1:-}
-    local target had_original removed directory temporary
+    local target manifest_directory_identity had_original original_hash removed directory temporary
+    local topology directory_identity target_identity target_hash backup_hash
 
     target=$(dbtune_lifecycle_manifest_value "$history" target) || return 1
+    manifest_directory_identity=$(dbtune_lifecycle_manifest_value "$history" directory_identity 2>/dev/null || true)
     had_original=$(dbtune_lifecycle_manifest_value "$history" had_original) || return 1
     [[ -n $target && $had_original =~ ^[01]$ ]] || return 65
-    if ((had_original == 1)) && [[ ! -f $history/original.cnf ]]; then
-        dbtune_log error "V apply historii chyba povodny config: $history/original.cnf"
-        return 66
+    dbtune_lifecycle_validate_target_path "$target" any "$manifest_directory_identity" || return
+    topology=$DBTUNE_LIFECYCLE_TARGET_TOPOLOGY
+    directory_identity=$DBTUNE_LIFECYCLE_DIRECTORY_IDENTITY
+    target_identity=$DBTUNE_LIFECYCLE_TARGET_IDENTITY
+    target_hash=$DBTUNE_LIFECYCLE_TARGET_HASH
+    original_hash=$(dbtune_lifecycle_manifest_value "$history" original_hash 2>/dev/null || true)
+    if ((had_original == 1)); then
+        if [[ ! -f $history/original.cnf || -L $history/original.cnf ]]; then
+            dbtune_log error "V apply historii chyba regularny povodny config: $history/original.cnf"
+            return 66
+        fi
+        backup_hash=$(dbtune_sha256_file "$history/original.cnf") || return
+        if [[ -n $original_hash && $original_hash != "$backup_hash" ]]; then
+            dbtune_log error "Povodny config v apply historii ma neplatny hash"
+            return 65
+        fi
     fi
     removed="$history/rollback-deployed.cnf"
-    if [[ -e $target ]]; then
-        if [[ -e $removed ]]; then
-            removed="$history/rollback-deployed-$(date -u '+%Y%m%dT%H%M%SZ').cnf"
-        fi
-        mv "$target" "$removed" || return 1
+    if [[ -e $removed || -L $removed ]]; then
+        removed="$history/rollback-deployed-$(date -u '+%Y%m%dT%H%M%SZ').cnf"
     fi
-    if ((had_original == 1)); then
-        directory=${target%/*}
-        [[ $directory != "$target" ]] || directory=.
-        temporary=$(mktemp "$directory/.99-zz-restore.tmp.XXXXXX") || return 1
-        if ! command cat "$history/original.cnf" >"$temporary" || ! chown root:root "$temporary" || ! chmod 0644 "$temporary" || ! mv -f "$temporary" "$target"; then
+    if ((had_original == 0)); then
+        dbtune_lifecycle_validate_target_path "$target" "$topology" \
+            "$directory_identity" "$target_identity" "$target_hash" || return
+        if [[ $topology == regular ]]; then
+            mv "$target" "$removed" || return 1
+        fi
+        [[ ! -e $target && ! -L $target ]] || return 65
+        return 0
+    fi
+
+    directory=${target%/*}
+    temporary=$(mktemp "$directory/.99-zz-restore.tmp.XXXXXX") || return 1
+    if ! command cat "$history/original.cnf" >"$temporary" || ! chown root:root "$temporary" || ! chmod 0644 "$temporary"; then
+        rm -f "$temporary"
+        return 1
+    fi
+    if ! dbtune_lifecycle_validate_target_path "$target" "$topology" \
+        "$directory_identity" "$target_identity" "$target_hash"; then
+        rm -f "$temporary"
+        return 65
+    fi
+    if [[ $topology == regular ]]; then
+        if ! cp -p "$target" "$removed"; then
             rm -f "$temporary"
             return 1
         fi
+        if [[ $(dbtune_sha256_file "$removed") != "$target_hash" ]]; then
+            rm -f "$temporary"
+            return 65
+        fi
+    fi
+    if ! mv -f "$temporary" "$target"; then
+        rm -f "$temporary"
+        return 1
+    fi
+    dbtune_lifecycle_validate_target_path "$target" regular "$directory_identity" || return
+    if [[ $DBTUNE_LIFECYCLE_TARGET_HASH != "$backup_hash" ]]; then
+        dbtune_log error "Obnoveny config nezodpoveda povodnemu backupu"
+        return 65
     fi
 }
 
@@ -732,12 +933,17 @@ dbtune_lifecycle_after_manifest_check() {
     return 0
 }
 
+dbtune_lifecycle_before_publish() {
+    return 0
+}
+
 dbtune_lifecycle_apply_snapshot() {
     local restart=${1:-0}
     local force=${2:-0}
     local proposal=${3:-}
     local backup_evidence=${4:-}
     local target history had_original previous_state previous_current='' unmeasured=0
+    local target_topology directory_identity target_identity target_hash
     local systemctl_command=${DBTUNE_SYSTEMCTL:-systemctl}
 
     dbtune_lifecycle_has_measurement || unmeasured=1
@@ -748,6 +954,11 @@ dbtune_lifecycle_apply_snapshot() {
     dbtune_lifecycle_check_time_window "$force" || return
 
     target=$(dbtune_lifecycle_target)
+    dbtune_lifecycle_validate_target_path "$target" || return
+    target_topology=$DBTUNE_LIFECYCLE_TARGET_TOPOLOGY
+    directory_identity=$DBTUNE_LIFECYCLE_DIRECTORY_IDENTITY
+    target_identity=$DBTUNE_LIFECYCLE_TARGET_IDENTITY
+    target_hash=$DBTUNE_LIFECYCLE_TARGET_HASH
     dbtune_init_state_dir || return 1
     dbtune_lifecycle_validate_variable_names "$proposal" || return
     dbtune_lifecycle_reject_galera || return
@@ -761,14 +972,22 @@ dbtune_lifecycle_apply_snapshot() {
     if [[ -r $(dbtune_lifecycle_current_file) ]]; then
         IFS= read -r previous_current <"$(dbtune_lifecycle_current_file)" || previous_current=''
     fi
-    had_original=$(dbtune_lifecycle_prepare_history "$history" "$target" "$proposal" "$backup_evidence") || return
+    had_original=$(dbtune_lifecycle_prepare_history "$history" "$target" "$proposal" "$backup_evidence" \
+        "$target_topology" "$directory_identity" "$target_identity" "$target_hash") || return
     dbtune_lifecycle_capture_baseline "$history" || {
         dbtune_log error "Nepodarilo sa ulozit baseline; config sa nezapisal"
         return 1
     }
-    if ! dbtune_lifecycle_install_config "$proposal" "$target"; then
+    if ! dbtune_lifecycle_install_config "$proposal" "$target" "$target_topology" \
+        "$directory_identity" "$target_identity" "$target_hash"; then
         dbtune_log error "Atomicky zapis konfiguracie zlyhal"
         return 1
+    fi
+    if ! dbtune_lifecycle_validate_target_path "$target" regular "$directory_identity" ||
+        [[ $DBTUNE_LIFECYCLE_TARGET_HASH != "$(dbtune_sha256_file "$proposal")" ]]; then
+        dbtune_log error "Publikovany config nepresiel finalnou filesystem kontrolou"
+        dbtune_lifecycle_recover_failed_apply "$history" "$previous_state" "$previous_current" publish || true
+        return 65
     fi
     if ! dbtune_lifecycle_validate_config; then
         dbtune_lifecycle_recover_failed_apply "$history" "$previous_state" "$previous_current" validation || true

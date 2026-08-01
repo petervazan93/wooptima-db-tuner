@@ -6,19 +6,33 @@ on:
 
 permissions:
   contents: write
+  id-token: write
+  attestations: write
 
 jobs:
   release:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Install test tools
         run: sudo apt-get update && sudo apt-get install -y bats shellcheck
       - name: Verify, test and build
         run: make check && make test && make integration && make build
       - name: Verify tag matches artifact version
         run: test "v$(dist/dbtune version | awk '{print $2}')" = "$GITHUB_REF_NAME"
+      - name: Attest release artifacts
+        id: attest
+        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
+        with:
+          subject-path: |
+            dist/dbtune
+            dist/dbtune.sha256
+            install.sh
+      - name: Stage offline attestation bundle
+        run: cp "${{ steps.attest.outputs.bundle-path }}" dist/dbtune-attestation.jsonl
+      - name: Verify dbtune attestation policy
+        run: gh attestation verify dist/dbtune --bundle dist/dbtune-attestation.jsonl --repo "$GITHUB_REPOSITORY" --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml" --source-ref "$GITHUB_REF" --deny-self-hosted-runners
       - name: Publish GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" dist/dbtune dist/dbtune.sha256 install.sh --verify-tag --generate-notes --title "$GITHUB_REF_NAME"
+        run: gh release create "$GITHUB_REF_NAME" dist/dbtune dist/dbtune.sha256 dist/dbtune-attestation.jsonl install.sh --verify-tag --generate-notes --title "$GITHUB_REF_NAME"

@@ -21,7 +21,7 @@ USAGE
 }
 
 dbtune_version() {
-    printf '%s %s\n' "$DBTUNE_PROGRAM" "$DBTUNE_VERSION"
+    printf '%s %s\n' "$DBTUNE_PROGRAM" "$DBTUNE_ARTIFACT_VERSION"
 }
 
 dbtune_call_command() {

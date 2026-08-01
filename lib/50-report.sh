@@ -707,7 +707,7 @@ dbtune_render_markdown() {
     low=$(dbtune_analysis_count all low)
 
     printf '# dbtune report\n\n'
-    printf '_Vygenerované: %s | dbtune %s_\n\n' "$(dbtune_markdown_escape "$generated_at")" "$(dbtune_markdown_escape "$DBTUNE_VERSION")"
+    printf '_Vygenerované: %s | dbtune %s_\n\n' "$(dbtune_markdown_escape "$generated_at")" "$(dbtune_markdown_escape "$DBTUNE_ARTIFACT_VERSION")"
     printf "_Run: \`%s\` | audit SHA-256: \`%s\` | samples SHA-256: \`%s\`_\n\n" \
         "$(dbtune_markdown_escape "$DBTUNE_RUN_ID")" \
         "$(dbtune_markdown_escape "$DBTUNE_AUDIT_HASH")" \
@@ -757,7 +757,7 @@ dbtune_render_json() {
     DBTUNE_JSON_FIELDS=(
         schema_version fleet-v2
         generated_at "$generated_at"
-        dbtune_version "$DBTUNE_VERSION"
+        dbtune_version "$DBTUNE_ARTIFACT_VERSION"
         run_id "$DBTUNE_RUN_ID"
         audit_hash "$DBTUNE_AUDIT_HASH"
         samples_hash "$DBTUNE_SAMPLES_HASH"
@@ -980,7 +980,7 @@ dbtune_render_proposal() {
     local line
 
     while IFS= read -r line || [[ -n $line ]]; do
-        line=${line//@DBTUNE_VERSION@/$DBTUNE_VERSION}
+        line=${line//@DBTUNE_VERSION@/$DBTUNE_ARTIFACT_VERSION}
         line=${line//@GENERATED_AT@/$generated_at}
         if [[ $line == '@RULES@' ]]; then
             dbtune_render_proposal_rules

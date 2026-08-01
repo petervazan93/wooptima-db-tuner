@@ -65,6 +65,7 @@ integration_dbtune() {
 
     integration_compose exec -T "$service" env \
         DBTUNE_STATE_DIR=/var/lib/dbtune \
+        DBTUNE_CONFIG_ALLOWED_DIR=/etc/mysql/mariadb.conf.d \
         DBTUNE_SYSTEMD_DIR=/var/lib/dbtune-systemd \
         DBTUNE_SYSTEMCTL=/var/lib/dbtune-bin/systemctl \
         DBTUNE_PROGRAM_PATH=/usr/local/bin/dbtune \
@@ -123,10 +124,18 @@ integration_main() {
     local status=0
 
     if ! command -v docker >/dev/null 2>&1 || ! docker info >/dev/null 2>&1; then
+        if [[ -n ${CI:-} && ${CI:-} != 0 && ${CI:-} != false ]] || [[ ${DBTUNE_REQUIRE_INTEGRATION:-0} == 1 ]]; then
+            printf 'integration: FAIL (Docker engine nie je dostupny v povinnom rezime)\n' >&2
+            return 1
+        fi
         printf 'integration: SKIP (Docker engine nie je dostupny)\n'
         return 0
     fi
     if ! docker compose version >/dev/null 2>&1 && ! command -v docker-compose >/dev/null 2>&1; then
+        if [[ -n ${CI:-} && ${CI:-} != 0 && ${CI:-} != false ]] || [[ ${DBTUNE_REQUIRE_INTEGRATION:-0} == 1 ]]; then
+            printf 'integration: FAIL (Docker Compose nie je dostupny v povinnom rezime)\n' >&2
+            return 1
+        fi
         printf 'integration: SKIP (Docker alebo docker compose nie je dostupny)\n'
         return 0
     fi

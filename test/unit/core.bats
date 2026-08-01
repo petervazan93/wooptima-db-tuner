@@ -84,7 +84,11 @@ setup() {
 
     run dbtune_main version
     [ "$status" -eq 0 ]
-    [ "$output" = 'dbtune 0.1.0' ]
+    [ "$output" = 'dbtune 0.2.0' ]
+
+    run env DBTUNE_VERSION=9.9.9 "$BATS_TEST_DIRNAME/../../dist/dbtune" version
+    [ "$status" -eq 0 ]
+    [ "$output" = 'dbtune 0.2.0' ]
 }
 
 @test "internal tick always exits zero" {

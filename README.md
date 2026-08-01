@@ -4,22 +4,25 @@
 
 ## Instalacia
 
-Na podporovanom Ubuntu serveri:
+Odporucany auditovatelny postup pouziva pripnuty release. Najprv stiahnite a overte povod samotneho installera, potom ho precitajte a az nasledne spustite ako root:
 
 ```bash
-curl -fsSL https://github.com/petervazan93/wooptima-db-tuner/releases/latest/download/install.sh | sudo sh
-```
-
-Installer stiahne posledny GitHub Release, overi SHA-256 a Bash syntax a atomicky nainstaluje `/usr/local/bin/dbtune`. Nespusta audit ani nemeni MariaDB.
-
-Odporucany auditovatelny a pripnuty variant:
-
-```bash
+release=v0.2.0
 curl --proto '=https' --tlsv1.2 -fsSLo install.sh \
-  https://github.com/petervazan93/wooptima-db-tuner/releases/download/v0.1.0/install.sh
+  "https://github.com/petervazan93/wooptima-db-tuner/releases/download/$release/install.sh"
+curl --proto '=https' --tlsv1.2 -fsSLo dbtune-attestation.jsonl \
+  "https://github.com/petervazan93/wooptima-db-tuner/releases/download/$release/dbtune-attestation.jsonl"
+gh attestation verify install.sh \
+  --bundle dbtune-attestation.jsonl \
+  --repo petervazan93/wooptima-db-tuner \
+  --signer-workflow petervazan93/wooptima-db-tuner/.github/workflows/release.yml \
+  --source-ref "refs/tags/$release" \
+  --deny-self-hosted-runners
 less install.sh
-sudo sh install.sh --version v0.1.0
+sudo sh install.sh --version "$release"
 ```
+
+Installer vyzaduje `gh` CLI, stiahne zvoleny GitHub Release aj offline `dbtune-attestation.jsonl`, overi SHA-256, GitHub keyless artifact attestation pre `dbtune` voci explicitnemu repozitaru, signer workflowu a release tagu a Bash syntax. Overenie bundle nevyzaduje `gh auth login` ani API token. Az potom artefakt atomicky nainstaluje do `/usr/local/bin/dbtune`. Nespusta audit ani nemeni MariaDB. Download selector je `--version vX.Y.Z` alebo `DBTUNE_RELEASE=vX.Y.Z`; nema vplyv na immutable verziu vlozenu do artefaktu pri builde.
 
 Prvy read-only krok po instalacii:
 
@@ -31,10 +34,12 @@ sudo dbtune audit --json
 
 ```bash
 make build
+make check
 make test
+make integration
 ```
 
-Build zoradi `lib/*.sh`, vlozi subory z `templates/*` a `systemd/*` do funkcii `dbtune_embedded_list` a `dbtune_embedded_get`, vykona `bash -n`, volitelne `shellcheck` a vytvori `dist/dbtune.sha256`. Ak `bats` nie je nainstalovany, `make test` to oznaci ako `SKIP`.
+Build zoradi `lib/*.sh`, vlozi subory z `templates/*` a `systemd/*` do funkcii `dbtune_embedded_list` a `dbtune_embedded_get`, vykona `bash -n`, volitelne `shellcheck` a vytvori `dist/dbtune.sha256`. Ak `bats` nie je nainstalovany, `make test` to oznaci ako `SKIP`. Docker integration moze lokalne bez Dockera alebo Compose skoncit ako `SKIP`; pri `CI=1` alebo `DBTUNE_REQUIRE_INTEGRATION=1` je nedostupnost chyba.
 
 ## CLI
 
@@ -65,7 +70,7 @@ Backup sa z lokalneho cronu neodvodzuje. Autoritativna integracia moze atomicky 
 
 ## Spolocne kontrakty
 
-- Cesty sa odvodzuju od `DBTUNE_STATE_DIR` (default `/var/lib/dbtune`) cez `dbtune_state_file`, `dbtune_events_file`, `dbtune_auth_method_file` a `dbtune_path`. Adresar ma mode `700`.
+- Cesty sa odvodzuju od `DBTUNE_STATE_DIR` (default `/var/lib/dbtune`) cez `dbtune_state_file`, `dbtune_events_file`, `dbtune_auth_method_file` a `dbtune_path`. Adresar ma mode `700`. Config target musi byt priamy `.cnf` subor v explicitnom `DBTUNE_CONFIG_ALLOWED_DIR` (default `/etc/mysql/mariadb.conf.d`); apply odmieta symlink alebo dangling target, target s hardlinkmi, symlink parent komponent, vymeneny parent inode a existujuci target mimo ocakavaneho `root:root 0644` kontraktu.
 - `dbtune_state_read`, `dbtune_state_write`, `dbtune_state_transition`, `dbtune_state_guard` a `dbtune_require_state` implementuju lifecycle `idle -> audited -> collecting -> collected -> analyzed -> proposed -> applied -> verified`, vratane `rolled_back`, `recovery_required` a `rollback_failed`. Novy audit zacina novy cyklus v stave `audited`; pocas recovery stavov je blokovany a existujuca apply recovery historia ostava dostupna. Event log je best-effort a jeho zlyhanie nerusi uz atomicky commitnuty state.
 - Audit, collect start/stop, analyze, report, propose, apply, verify a rollback su cez dispatcher serializovane spolocnym exkluzivnym `flock`. Bezny prikaz na lock caka; timerovy `_tick` cakanie nerobi a pri contention bezpecne preskoci tick. Collector si ponechava vlastny interny lock, ktory dispatcher nenahradza.
 - `dbtune_atomic_write CESTA [MODE]` cita obsah zo stdin a publikuje ho cez docasny subor v rovnakom adresari.
