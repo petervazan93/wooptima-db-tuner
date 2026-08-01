@@ -194,6 +194,50 @@ dbtune_sha256_stream() {
     fi
 }
 
+dbtune_file_stat() {
+    local file=${1:-}
+
+    [[ -n $file ]] || return 64
+    if stat -c '%u %g %a' "$file" >/dev/null 2>&1; then
+        stat -c '%u %g %a' "$file"
+    else
+        stat -f '%u %g %Lp' "$file"
+    fi
+}
+
+dbtune_backup_evidence_file() {
+    printf '%s\n' "${DBTUNE_BACKUP_EVIDENCE_FILE:-$DBTUNE_STATE_DIR/backup-evidence.tsv}"
+}
+
+dbtune_backup_evidence_validate() {
+    local file=${1:-}
+    local uid gid mode expected_uid
+
+    [[ -f $file && ! -L $file ]] || return 66
+    read -r uid gid mode < <(dbtune_file_stat "$file") || return 1
+    expected_uid=${DBTUNE_BACKUP_EVIDENCE_UID:-0}
+    [[ $expected_uid =~ ^[0-9]+$ ]] || return 64
+    [[ $uid =~ ^[0-9]+$ && $gid =~ ^[0-9]+$ && $uid == "$expected_uid" && ($mode == 400 || $mode == 600) ]] || return 65
+    awk -F '\t' '
+        NF != 2 || seen[$1]++ { bad=1; next }
+        $1 == "schema" { schema=$2; next }
+        $1 == "status" { status=$2; next }
+        $1 == "source" { source=$2; next }
+        $1 == "checked_at" { checked=$2; next }
+        $1 == "last_success" { success=$2; next }
+        { bad=1 }
+        END {
+            timestamp="^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
+            if (bad || length(seen) != 5 || schema != "1" || checked !~ timestamp) exit 1
+            if (source == "" || source == "unknown") exit 1
+            if (status == "verified") exit !(success ~ timestamp)
+            if (status == "missing") exit !(success == "none")
+            if (status == "unknown") exit !(success == "unknown")
+            exit 1
+        }
+    ' "$file"
+}
+
 dbtune_run_id() {
     local stamp random
 
@@ -453,7 +497,7 @@ dbtune_event() {
 
 dbtune_state_is_valid() {
     case ${1:-} in
-        idle|audited|collecting|collected|analyzed|proposed|applied|verified|rolled_back) return 0 ;;
+        idle|audited|collecting|collected|analyzed|proposed|applied|verified|rolled_back|recovery_required|rollback_failed) return 0 ;;
         *) return 1 ;;
     esac
 }
@@ -491,7 +535,7 @@ dbtune_state_can_transition() {
 
     [[ $from == "$to" ]] && return 0
     case "$from:$to" in
-        idle:audited|audited:collecting|collecting:collected|collected:analyzed|analyzed:proposed|proposed:applied|analyzed:applied|applied:verified|applied:rolled_back|verified:rolled_back) return 0 ;;
+        idle:audited|audited:collecting|collecting:collected|collected:analyzed|analyzed:proposed|proposed:applied|analyzed:applied|applied:verified|applied:rolled_back|verified:rolled_back|recovery_required:rolled_back|rollback_failed:rolled_back|recovery_required:rollback_failed) return 0 ;;
         *) return 1 ;;
     esac
 }
@@ -506,7 +550,7 @@ dbtune_state_transition() {
         return 65
     fi
     dbtune_state_write "$target" || return
-    dbtune_event state_transition from "$current" to "$target"
+    dbtune_event state_transition from "$current" to "$target" || true
 }
 
 dbtune_state_record_audit() {
@@ -516,7 +560,7 @@ dbtune_state_record_audit() {
 
     current=$(dbtune_state_read) || return
     dbtune_state_write audited || return
-    dbtune_event audit_cycle_started previous_state "$current" run_id "$run_id" archive "${archive:-none}"
+    dbtune_event audit_cycle_started previous_state "$current" run_id "$run_id" archive "${archive:-none}" || true
 }
 
 dbtune_state_guard() {
@@ -525,7 +569,7 @@ dbtune_state_guard() {
 
     [[ -n $state ]] || state=$(dbtune_state_read) || return
     case $operation in
-        audit) [[ $state != collecting ]] ;;
+        audit) [[ $state != collecting && $state != recovery_required && $state != rollback_failed ]] ;;
         status|version|help|collect_status) return 0 ;;
         collect_start) [[ $state == audited ]] ;;
         collect_stop|_tick) [[ $state == collecting ]] ;;
@@ -535,7 +579,7 @@ dbtune_state_guard() {
         apply) [[ $state == proposed ]] ;;
         verify) [[ $state == applied || $state == verified ]] ;;
         rollback)
-            [[ $state == applied || $state == verified ]] ||
+            [[ $state == applied || $state == verified || $state == recovery_required || $state == rollback_failed ]] ||
                 { [[ $state != collecting && $state != rolled_back ]] && [[ -r $DBTUNE_STATE_DIR/apply/current ]]; }
             ;;
         *) return 64 ;;
@@ -604,7 +648,7 @@ dbtune_sql_probe() {
         DBTUNE_SQL_AUTH_METHOD=socket
         DBTUNE_SQL_DEFAULTS_FILE=''
         dbtune_sql_save_auth || return
-        dbtune_event sql_auth method socket
+        dbtune_event sql_auth method socket || true
         return 0
     fi
     if [[ -r $DBTUNE_ROOT_CNF ]] && "$client" --defaults-extra-file="$DBTUNE_ROOT_CNF" \
@@ -613,7 +657,7 @@ dbtune_sql_probe() {
         DBTUNE_SQL_AUTH_METHOD=defaults
         DBTUNE_SQL_DEFAULTS_FILE=$DBTUNE_ROOT_CNF
         dbtune_sql_save_auth || return
-        dbtune_event sql_auth method defaults file "$DBTUNE_ROOT_CNF"
+        dbtune_event sql_auth method defaults file "$DBTUNE_ROOT_CNF" || true
         return 0
     fi
     dbtune_log error "MariaDB root auth zlyhal cez unix_socket aj defaults-extra-file"

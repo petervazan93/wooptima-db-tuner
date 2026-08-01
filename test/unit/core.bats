@@ -60,6 +60,10 @@ setup() {
     [ "$status" -eq 0 ]
     run dbtune_state_guard audit applied
     [ "$status" -eq 0 ]
+    run dbtune_state_guard audit recovery_required
+    [ "$status" -ne 0 ]
+    run dbtune_state_guard audit rollback_failed
+    [ "$status" -ne 0 ]
 }
 
 @test "a new audit cycle resets advanced state without deleting apply recovery" {

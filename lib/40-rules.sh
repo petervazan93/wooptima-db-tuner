@@ -604,7 +604,7 @@ dbtune_rules_analyze() {
         setting("R-PINNED", "table_definition_cache", "2000", "low", "wordpress tables", "Viac WP databaz potrebuje rezervu definicii tabuliek.")
     }
 
-    function operational_rules(key_reads, backup_interval, bind, wildcard, configured, effective, backup_status, backup_evidence) {
+    function operational_rules(key_reads, backup_interval, bind, wildcard, configured, effective, backup_status, backup_source, backup_success, backup_evidence) {
         key_reads = numeric(ag("key_read_requests", "0"))
         if (key_reads > 0) emit("R-MYISAM", "server", "info", "KEEP", "", "", "Key_read_requests=" key_reads, "MyISAM sa pouziva, key buffer sa nesmie plosne zmensit.")
         else size_setting("R-MYISAM", "key_buffer_size", "32M", "low", "Key_read_requests=0", "Moderny WordPress MyISAM bezne nepouziva.")
@@ -633,10 +633,12 @@ dbtune_rules_analyze() {
 
         backup_interval = numeric(ag("backup_interval_hours", "0"))
         backup_status = tolower(trim(ag("backup_status", "unknown")))
-        backup_evidence = "status=" backup_status "; source=" ag("backup_source", "unknown") "; last_success=" ag("backup_last_success", "unknown") "; schedule_count=" ag("backup_schedule_count", "unknown") "; interval_hours=" backup_interval
-        if (backup_status == "missing")
+        backup_source = trim(ag("backup_source", "unknown"))
+        backup_success = trim(ag("backup_last_success", "unknown"))
+        backup_evidence = "status=" backup_status "; source=" backup_source "; checked_at=" ag("backup_checked_at", "unknown") "; last_success=" backup_success "; schedule_count=" ag("backup_schedule_count", "unknown") "; interval_hours=" backup_interval
+        if (backup_status == "missing" && backup_source != "" && backup_source != "unknown")
             emit("R-BACKUP", "server", "critical", "MISSING", "", "", backup_evidence, "Potvrdena absencia zalohy blokuje tuning.")
-        else if (backup_status != "verified")
+        else if (backup_status != "verified" || backup_source == "" || backup_source == "unknown" || backup_success == "" || backup_success == "unknown" || backup_success == "none")
             emit("R-BACKUP", "server", "medium", "UNKNOWN", "", "", backup_evidence, "Stav zalohy nie je autoritativne overeny; pocet lokalnych planov sam o sebe zalohu nepotvrdzuje.")
         else if (backup_interval > 0 && backup_interval <= 3)
             emit("R-BACKUP", "server", "medium", "FREQUENT", "", "", backup_evidence, "Casty mydumper full scan moze vytvarat IO spicky; over realnu potrebu.")
@@ -820,5 +822,5 @@ cmd_analyze() {
     audit_hash=$(dbtune_manifest_value "$manifest" audit_hash) || return
     samples_hash=$(dbtune_manifest_value "$manifest" samples_hash) || return
     dbtune_event analysis_completed samples_min "$min_samples" output "$output" \
-        run_id "$run_id" audit_hash "$audit_hash" samples_hash "$samples_hash"
+        run_id "$run_id" audit_hash "$audit_hash" samples_hash "$samples_hash" || true
 }

@@ -14,6 +14,14 @@ dbtune_lifecycle_force_phrase() {
     printf '%s\n' 'APLIKUJ BEZ MERANIA'
 }
 
+dbtune_lifecycle_backup_phrase() {
+    printf '%s\n' 'POTVRDZUJEM OBNOVITELNU ZALOHU'
+}
+
+dbtune_lifecycle_is_interactive() {
+    [[ -t 0 ]]
+}
+
 dbtune_lifecycle_parse_args() {
     local restart=0
     local force=0
@@ -36,7 +44,7 @@ dbtune_lifecycle_confirm_force() {
     local phrase answer
 
     phrase=$(dbtune_lifecycle_force_phrase)
-    if [[ ! -t 0 ]]; then
+    if ! dbtune_lifecycle_is_interactive; then
         dbtune_log error "--force je povoleny iba interaktivne na TTY"
         return 77
     fi
@@ -46,6 +54,46 @@ dbtune_lifecycle_confirm_force() {
         dbtune_log error "Potvrdzovacia fraza nesuhlasi"
         return 77
     fi
+}
+
+dbtune_lifecycle_confirm_backup() {
+    local phrase answer
+
+    phrase=$(dbtune_lifecycle_backup_phrase)
+    if ! dbtune_lifecycle_is_interactive; then
+        dbtune_log error "Apply vyzaduje overeny backup-evidence.tsv alebo interaktivne potvrdenie na TTY"
+        return 77
+    fi
+    printf 'Chyba autoritativny dokaz poslednej uspesnej zalohy. Overte obnovu mimo dbtune.\n' >&2
+    printf 'Pre pokracovanie napiste presne: %s\n> ' "$phrase" >&2
+    IFS= read -r answer || return 77
+    if [[ $answer != "$phrase" ]]; then
+        dbtune_log error "Potvrdenie obnovitelnej zalohy nesuhlasi"
+        return 77
+    fi
+}
+
+dbtune_lifecycle_check_backup() {
+    local evidence=${1:-}
+    local status
+
+    DBTUNE_APPLY_BACKUP_MODE=interactive
+    DBTUNE_APPLY_BACKUP_SOURCE=operator
+    DBTUNE_APPLY_BACKUP_LAST_SUCCESS=unknown
+    if [[ -n $evidence ]] && dbtune_backup_evidence_validate "$evidence"; then
+        status=$(dbtune_manifest_value "$evidence" status) || return 65
+        if [[ $status == verified ]]; then
+            DBTUNE_APPLY_BACKUP_MODE=artifact
+            DBTUNE_APPLY_BACKUP_SOURCE=$(dbtune_manifest_value "$evidence" source) || return 65
+            DBTUNE_APPLY_BACKUP_LAST_SUCCESS=$(dbtune_manifest_value "$evidence" last_success) || return 65
+            return 0
+        fi
+        if [[ $status == missing ]]; then
+            dbtune_log error "Apply je zablokovany: autoritativny backup evidence potvrdzuje absenciu zalohy"
+            return 65
+        fi
+    fi
+    dbtune_lifecycle_confirm_backup
 }
 
 dbtune_lifecycle_has_measurement() {
@@ -323,7 +371,9 @@ dbtune_lifecycle_prepare_history() {
     local history=${1:-}
     local target=${2:-}
     local proposal=${3:-}
+    local backup_evidence=${4:-}
     local had_original=0 proposal_hash expected_hash run_id=unmeasured audit_hash=unmeasured
+    local backup_hash=interactive
     local proposal_manifest="$DBTUNE_STATE_DIR/proposal-manifest.tsv"
 
     if [[ -e $target ]]; then
@@ -333,6 +383,20 @@ dbtune_lifecycle_prepare_history() {
     fi
     cp "$proposal" "$history/proposed.cnf" || return 1
     chmod 600 "$history/proposed.cnf" || return 1
+    if [[ $DBTUNE_APPLY_BACKUP_MODE == artifact ]]; then
+        cp "$backup_evidence" "$history/backup-evidence.tsv" || return 1
+        chmod 600 "$history/backup-evidence.tsv" || return 1
+        backup_hash=$(dbtune_sha256_file "$history/backup-evidence.tsv") || return
+    else
+        {
+            printf 'schema\t1\n'
+            printf 'status\tunknown\n'
+            printf 'source\toperator\n'
+            printf 'checked_at\t%s\n' "$(dbtune_now)"
+            printf 'last_success\tunknown\n'
+            printf 'guard\tinteractive-confirmation\n'
+        } | dbtune_atomic_write "$history/backup-confirmation.tsv" 600 || return 1
+    fi
     proposal_hash=$(dbtune_sha256_file "$history/proposed.cnf") || return
     expected_hash=$(dbtune_manifest_value "$proposal_manifest" proposal_hash 2>/dev/null || true)
     if [[ $expected_hash == "$proposal_hash" ]]; then
@@ -346,6 +410,10 @@ dbtune_lifecycle_prepare_history() {
         printf 'run_id\t%s\n' "$run_id"
         printf 'audit_hash\t%s\n' "$audit_hash"
         printf 'proposal_hash\t%s\n' "$proposal_hash"
+        printf 'backup_guard\t%s\n' "$DBTUNE_APPLY_BACKUP_MODE"
+        printf 'backup_source\t%s\n' "$DBTUNE_APPLY_BACKUP_SOURCE"
+        printf 'backup_last_success\t%s\n' "$DBTUNE_APPLY_BACKUP_LAST_SUCCESS"
+        printf 'backup_evidence_hash\t%s\n' "$backup_hash"
     } | dbtune_atomic_write "$history/manifest.tsv" 600 || return 1
     dbtune_lifecycle_write_rollback_instructions "$history" "$target" "$had_original" || return 1
     printf '%s\n' "$had_original"
@@ -530,6 +598,49 @@ dbtune_lifecycle_read_current() {
     printf '%s\n' "$history"
 }
 
+dbtune_lifecycle_mark_recovery_required() {
+    local history=${1:-}
+    local phase=${2:-unknown}
+
+    {
+        printf 'phase\t%s\n' "$phase"
+        printf 'created_at\t%s\n' "$(dbtune_now)"
+        printf 'instructions\t%s/ROLLBACK.txt\n' "$history"
+    } | dbtune_atomic_write "$history/RECOVERY_REQUIRED" 600 || true
+    dbtune_lifecycle_publish_current "$history" || true
+    dbtune_state_write recovery_required || true
+    dbtune_event recovery_required phase "$phase" history "$history" || true
+    dbtune_log error "KRITICKE: obnova konfiguracie zlyhala; pouzite $history/ROLLBACK.txt"
+}
+
+dbtune_lifecycle_restore_previous_pointer() {
+    local previous_current=${1:-}
+
+    if [[ -n $previous_current ]]; then
+        dbtune_lifecycle_publish_current "$previous_current"
+    else
+        rm -f "$(dbtune_lifecycle_current_file)"
+    fi
+}
+
+dbtune_lifecycle_recover_failed_apply() {
+    local history=${1:-}
+    local previous_state=${2:-}
+    local previous_current=${3:-}
+    local phase=${4:-unknown}
+
+    if ! dbtune_lifecycle_restore_config "$history"; then
+        dbtune_lifecycle_mark_recovery_required "$history" "$phase"
+        return 1
+    fi
+    rm -f "$history/RECOVERY_REQUIRED" "$history/ROLLBACK_FAILED"
+    if ! dbtune_lifecycle_restore_previous_pointer "$previous_current" || ! dbtune_state_write "$previous_state"; then
+        dbtune_lifecycle_mark_recovery_required "$history" "${phase}_bookkeeping"
+        return 1
+    fi
+    dbtune_event apply_restored phase "$phase" history "$history" || true
+}
+
 dbtune_lifecycle_mark_unmeasured() {
     local history=${1:-}
     local report="$DBTUNE_STATE_DIR/report.md"
@@ -542,7 +653,7 @@ dbtune_lifecycle_mark_unmeasured() {
     if [[ -f $report ]]; then
         printf '\n> **%s** - apply bol vynuteny bez kompletneho measurement/analysis artefaktu.\n' "$stamp" >>"$report" || return 1
     fi
-    dbtune_event apply_force measurement "$stamp"
+    dbtune_event apply_force measurement "$stamp" || true
 }
 
 dbtune_lifecycle_print_runcloud_instructions() {
@@ -564,12 +675,15 @@ dbtune_lifecycle_apply_snapshot() {
     local restart=${1:-0}
     local force=${2:-0}
     local proposal=${3:-}
-    local target history had_original previous_state unmeasured=0
+    local backup_evidence=${4:-}
+    local target history had_original previous_state previous_current='' unmeasured=0
+    local systemctl_command=${DBTUNE_SYSTEMCTL:-systemctl}
 
     dbtune_lifecycle_has_measurement || unmeasured=1
     if ((force == 1)); then
         dbtune_lifecycle_confirm_force || return
     fi
+    dbtune_lifecycle_check_backup "$backup_evidence" || return
     dbtune_lifecycle_check_time_window "$force" || return
 
     target=$(dbtune_lifecycle_target)
@@ -582,8 +696,11 @@ dbtune_lifecycle_apply_snapshot() {
     fi
 
     history=$(dbtune_lifecycle_new_history) || return
-    had_original=$(dbtune_lifecycle_prepare_history "$history" "$target" "$proposal") || return
     previous_state=$(dbtune_state_read) || return
+    if [[ -r $(dbtune_lifecycle_current_file) ]]; then
+        IFS= read -r previous_current <"$(dbtune_lifecycle_current_file)" || previous_current=''
+    fi
+    had_original=$(dbtune_lifecycle_prepare_history "$history" "$target" "$proposal" "$backup_evidence") || return
     dbtune_lifecycle_capture_baseline "$history" || {
         dbtune_log error "Nepodarilo sa ulozit baseline; config sa nezapisal"
         return 1
@@ -593,40 +710,39 @@ dbtune_lifecycle_apply_snapshot() {
         return 1
     fi
     if ! dbtune_lifecycle_validate_config; then
-        dbtune_lifecycle_restore_config "$history" || dbtune_log error "KRITICKE: obnova po validacii zlyhala; pouzite $history/ROLLBACK.txt"
-        dbtune_event apply_validation_failed target "$target" history "$history"
+        dbtune_lifecycle_recover_failed_apply "$history" "$previous_state" "$previous_current" validation || true
+        dbtune_event apply_validation_failed target "$target" history "$history" || true
         return 65
     fi
 
     if ((force == 1 && unmeasured == 1)); then
         if ! dbtune_lifecycle_mark_unmeasured "$history"; then
-            dbtune_lifecycle_restore_config "$history" || true
+            dbtune_lifecycle_recover_failed_apply "$history" "$previous_state" "$previous_current" force_report || true
             return 1
         fi
     fi
     if ! dbtune_lifecycle_publish_current "$history"; then
-        dbtune_lifecycle_restore_config "$history" || true
+        dbtune_lifecycle_recover_failed_apply "$history" "$previous_state" "$previous_current" current_publish || true
         return 1
     fi
     if [[ $previous_state == audited ]]; then
         dbtune_state_write applied || {
-            rm -f "$(dbtune_lifecycle_current_file)"
-            dbtune_lifecycle_restore_config "$history" || true
+            dbtune_lifecycle_recover_failed_apply "$history" "$previous_state" "$previous_current" state_commit || true
             return 1
         }
         dbtune_event state_transition from "$previous_state" to applied || true
     elif ! dbtune_state_transition applied; then
-        rm -f "$(dbtune_lifecycle_current_file)"
-        dbtune_lifecycle_restore_config "$history" || true
+        dbtune_lifecycle_recover_failed_apply "$history" "$previous_state" "$previous_current" state_commit || true
         return 1
     fi
     if ((restart == 1)); then
-        if ! systemctl restart mariadb || ! systemctl is-active --quiet mariadb; then
+        if ! "$systemctl_command" restart mariadb || ! "$systemctl_command" is-active --quiet mariadb; then
             dbtune_log error "Restart MariaDB zlyhal; obnovujem povodny config a spustam sluzbu"
-            dbtune_lifecycle_restore_config "$history" || dbtune_log error "KRITICKE: filesystem rollback zlyhal; pouzite $history/ROLLBACK.txt"
-            systemctl start mariadb || dbtune_log error "MariaDB sa po obnove nepodarilo spustit"
-            rm -f "$(dbtune_lifecycle_current_file)"
-            dbtune_state_write "$previous_state" || true
+            if dbtune_lifecycle_recover_failed_apply "$history" "$previous_state" "$previous_current" restart; then
+                if ! "$systemctl_command" start mariadb; then
+                    dbtune_lifecycle_mark_recovery_required "$history" service_start
+                fi
+            fi
             dbtune_event apply_restart_failed target "$target" history "$history" || true
             return 1
         fi
@@ -637,7 +753,7 @@ dbtune_lifecycle_apply_snapshot() {
 }
 
 cmd_apply() {
-    local parsed restart force proposal snapshot status=0
+    local parsed restart force proposal snapshot backup_file backup_snapshot='' status=0
 
     parsed=$(dbtune_lifecycle_parse_args "$@") || return
     IFS=$'\t' read -r restart force <<<"$parsed"
@@ -652,20 +768,32 @@ cmd_apply() {
         rm -f "$snapshot"
         return 1
     fi
+    backup_file=$(dbtune_backup_evidence_file)
+    if dbtune_backup_evidence_validate "$backup_file"; then
+        backup_snapshot=$(mktemp "$DBTUNE_STATE_DIR/.apply-backup-evidence.XXXXXX") || {
+            rm -f "$snapshot"
+            return 1
+        }
+        if ! cp "$backup_file" "$backup_snapshot" || ! chmod 400 "$backup_snapshot" ||
+            ! dbtune_backup_evidence_validate "$backup_snapshot"; then
+            rm -f "$snapshot" "$backup_snapshot"
+            return 1
+        fi
+    fi
     if dbtune_lifecycle_check_apply_inputs "$force" "$snapshot"; then
         :
     else
         status=$?
-        rm -f "$snapshot"
+        rm -f "$snapshot" "$backup_snapshot"
         return "$status"
     fi
     dbtune_lifecycle_after_manifest_check || {
         status=$?
-        rm -f "$snapshot"
+        rm -f "$snapshot" "$backup_snapshot"
         return "$status"
     }
-    dbtune_lifecycle_apply_snapshot "$restart" "$force" "$snapshot" || status=$?
-    rm -f "$snapshot"
+    dbtune_lifecycle_apply_snapshot "$restart" "$force" "$snapshot" "$backup_snapshot" || status=$?
+    rm -f "$snapshot" "$backup_snapshot"
     return "$status"
 }
 
@@ -697,6 +825,35 @@ dbtune_lifecycle_canonical_value() {
         return
     fi
     printf '%s\n' "${value,,}"
+}
+
+dbtune_lifecycle_verify_target() {
+    local history=${1:-}
+    local target expected_hash snapshot_hash actual_hash uid gid mode
+    local expected_uid=${DBTUNE_CONFIG_UID:-0}
+    local expected_gid=${DBTUNE_CONFIG_GID:-0}
+    local expected_mode=${DBTUNE_CONFIG_MODE:-644}
+
+    target=$(dbtune_lifecycle_manifest_value "$history" target) || return 65
+    expected_hash=$(dbtune_lifecycle_manifest_value "$history" proposal_hash) || return 65
+    if [[ ! -f $target || -L $target ]]; then
+        printf 'TARGET CHYBA: %s nie je regularny subor alebo je symlink\n' "$target"
+        return 1
+    fi
+    read -r uid gid mode < <(dbtune_file_stat "$target") || return 1
+    if [[ $uid != "$expected_uid" || $gid != "$expected_gid" || $mode != "$expected_mode" ]]; then
+        printf 'TARGET CHYBA: owner=%s:%s mode=%s, ocakavane=%s:%s %s\n' \
+            "$uid" "$gid" "$mode" "$expected_uid" "$expected_gid" "$expected_mode"
+        return 1
+    fi
+    [[ $expected_hash =~ ^[0-9a-f]{64}$ && -f $history/proposed.cnf && ! -L $history/proposed.cnf ]] || return 65
+    snapshot_hash=$(dbtune_sha256_file "$history/proposed.cnf") || return
+    actual_hash=$(dbtune_sha256_file "$target") || return
+    if [[ $snapshot_hash != "$expected_hash" || $actual_hash != "$expected_hash" ]]; then
+        printf 'TARGET CHYBA: hash nasadeneho configu nezodpoveda apply snapshotu\n'
+        return 1
+    fi
+    printf 'TARGET OK: %s owner=%s:%s mode=%s hash=%s\n' "$target" "$uid" "$gid" "$mode" "$actual_hash"
 }
 
 dbtune_lifecycle_verify_values() {
@@ -744,21 +901,43 @@ dbtune_lifecycle_tsv_value() {
 
 dbtune_lifecycle_verify_health() {
     local history=${1:-}
+    local mode=${2:---post}
+    local baseline_status="$history/baseline-status.tsv"
     local current_status="$history/verify-status.tsv"
     local current_memory="$history/verify-memory.tsv"
-    local metric value baseline_swap current_swap available total
+    local metric before value delta reset baseline_uptime current_uptime
+    local baseline_swap current_swap available total
     local status memory
     local failures=0
 
+    if [[ -r $history/post-status.tsv ]]; then
+        baseline_status="$history/post-status.tsv"
+    elif [[ $mode == --24h ]]; then
+        dbtune_log error "verify --24h vyzaduje uspesny verify --post po restarte"
+        return 66
+    fi
     status=$(dbtune_lifecycle_capture_status) || return 1
     memory=$(dbtune_lifecycle_capture_memory) || return 1
     [[ -n $status && -n $memory ]] || return 1
     printf '%s\n' "$status" | dbtune_atomic_write "$current_status" 600 || return 1
     printf '%s\n' "$memory" | dbtune_atomic_write "$current_memory" 600 || return 1
+    baseline_uptime=$(dbtune_lifecycle_tsv_value "$baseline_status" uptime)
+    current_uptime=$(dbtune_lifecycle_tsv_value "$current_status" uptime)
     for metric in innodb_buffer_pool_wait_free innodb_log_waits aborted_connects; do
+        before=$(dbtune_lifecycle_tsv_value "$baseline_status" "$metric")
         value=$(dbtune_lifecycle_tsv_value "$current_status" "$metric")
-        printf '%s=%s\n' "$metric" "${value:-CHYBA}"
-        if [[ ! $value =~ ^[0-9]+$ ]] || ((value != 0)); then
+        delta=CHYBA
+        reset=nie
+        if [[ $before =~ ^[0-9]+$ && $value =~ ^[0-9]+$ && $baseline_uptime =~ ^[0-9]+$ && $current_uptime =~ ^[0-9]+$ ]]; then
+            if ((current_uptime < baseline_uptime || value < before)); then
+                delta=$value
+                reset=ano
+            else
+                delta=$((value - before))
+            fi
+        fi
+        printf '%s baseline=%s current=%s delta=%s reset=%s\n' "$metric" "${before:-CHYBA}" "${value:-CHYBA}" "$delta" "$reset"
+        if [[ ! $delta =~ ^[0-9]+$ ]] || ((delta != 0)); then
             failures=1
         fi
     done
@@ -777,7 +956,7 @@ dbtune_lifecycle_verify_health() {
 
 dbtune_lifecycle_verify_24h_comparison() {
     local history=${1:-}
-    local baseline="$history/baseline-status.tsv"
+    local baseline="$history/post-status.tsv"
     local current="$history/verify-status.tsv"
     local metric before after delta
 
@@ -797,7 +976,7 @@ dbtune_lifecycle_verify_24h_comparison() {
 
 cmd_verify() {
     local mode=${1:-}
-    local history proposal failures=0
+    local history proposal state failures=0
 
     if (($# != 1)) || [[ $mode != --post && $mode != --24h ]]; then
         dbtune_log error "Pouzitie: dbtune verify --post|--24h"
@@ -806,21 +985,30 @@ cmd_verify() {
     history=$(dbtune_lifecycle_read_current) || return
     proposal="$history/proposed.cnf"
     [[ -s $proposal ]] || return 66
+    dbtune_lifecycle_verify_target "$history" || failures=1
     dbtune_lifecycle_verify_values "$proposal" || failures=1
-    dbtune_lifecycle_verify_health "$history" || failures=1
+    dbtune_lifecycle_verify_health "$history" "$mode" || failures=1
     if [[ $mode == --24h ]]; then
         dbtune_lifecycle_verify_24h_comparison "$history" || failures=1
     fi
     if ((failures != 0)); then
-        dbtune_event verify_failed mode "$mode" history "$history"
+        state=$(dbtune_state_read) || return
+        if [[ $state == verified ]]; then
+            dbtune_state_write applied || return
+        fi
+        dbtune_event verify_failed mode "$mode" history "$history" || true
         return 1
     fi
+    if [[ $mode == --post ]]; then
+        dbtune_atomic_write "$history/post-status.tsv" 600 <"$history/verify-status.tsv" || return 1
+    fi
     dbtune_state_transition verified || return
-    dbtune_event verify_completed mode "$mode" history "$history"
+    dbtune_event verify_completed mode "$mode" history "$history" || true
 }
 
 cmd_rollback() {
     local history start_status=0 restart_required=0
+    local systemctl_command=${DBTUNE_SYSTEMCTL:-systemctl}
 
     (($# == 0)) || {
         dbtune_log error "rollback nema volby"
@@ -828,20 +1016,29 @@ cmd_rollback() {
     }
     history=$(dbtune_lifecycle_read_current) || return
     if ! dbtune_lifecycle_restore_config "$history"; then
+        {
+            printf 'created_at\t%s\n' "$(dbtune_now)"
+            printf 'instructions\t%s/ROLLBACK.txt\n' "$history"
+        } | dbtune_atomic_write "$history/ROLLBACK_FAILED" 600 || true
+        dbtune_lifecycle_publish_current "$history" || true
+        dbtune_state_write rollback_failed || dbtune_state_write recovery_required || true
+        dbtune_event rollback_failed history "$history" || true
         dbtune_log error "Filesystem rollback zlyhal; pouzite $history/ROLLBACK.txt"
         return 1
     fi
-    if systemctl is-active --quiet mariadb; then
+    rm -f "$history/RECOVERY_REQUIRED" "$history/ROLLBACK_FAILED" "$history/SERVICE_START_FAILED"
+    if "$systemctl_command" is-active --quiet mariadb; then
         restart_required=1
         printf 'Config bol obnoveny. Restartujte MariaDB manualne cez RunCloud panel, aby sa obnovili aj efektivne hodnoty.\n'
         printf '%s\n' "$(dbtune_now)" | dbtune_atomic_write "$history/RESTART_REQUIRED" 600 || return 1
     else
-        systemctl start mariadb || start_status=$?
+        "$systemctl_command" start mariadb || start_status=$?
         rm -f "$history/RESTART_REQUIRED"
     fi
     dbtune_state_transition rolled_back || dbtune_state_write rolled_back || return
-    dbtune_event rollback_completed history "$history" service_start_status "$start_status" restart_required "$restart_required"
+    dbtune_event rollback_completed history "$history" service_start_status "$start_status" restart_required "$restart_required" || true
     if ((start_status != 0)); then
+        printf '%s\n' "$(dbtune_now)" | dbtune_atomic_write "$history/SERVICE_START_FAILED" 600 || true
         dbtune_log error "Config bol obnoveny, ale systemctl start mariadb zlyhal"
         return "$start_status"
     fi
@@ -849,6 +1046,8 @@ cmd_rollback() {
 
 cmd_status() {
     local state target current_file history='-' rollback='nie' baseline='nie' restart_required='nie'
+    local recovery='nie' recovery_instruction='-'
+    local candidate
 
     (($# == 0)) || {
         dbtune_log error "status nema volby"
@@ -859,9 +1058,25 @@ cmd_status() {
     current_file=$(dbtune_lifecycle_current_file)
     if [[ -r $current_file ]]; then
         IFS= read -r history <"$current_file" || history='-'
+    elif [[ $state == recovery_required || $state == rollback_failed ]]; then
+        for candidate in "$DBTUNE_STATE_DIR"/apply/*; do
+            [[ -d $candidate ]] || continue
+            if [[ -r $candidate/RECOVERY_REQUIRED || -r $candidate/ROLLBACK_FAILED ]]; then
+                history=$candidate
+            fi
+        done
+    fi
+    if [[ $history != - ]]; then
         [[ -r $history/ROLLBACK.txt ]] && rollback=ano
         [[ -r $history/baseline-status.tsv && -r $history/baseline-memory.tsv ]] && baseline=ano
         [[ -r $history/RESTART_REQUIRED ]] && restart_required=ano
+        if [[ $state == recovery_required || $state == rollback_failed || -r $history/RECOVERY_REQUIRED || -r $history/ROLLBACK_FAILED ]]; then
+            recovery=ano
+            recovery_instruction="sudo dbtune rollback; manualne: $history/ROLLBACK.txt"
+        elif [[ -r $history/SERVICE_START_FAILED ]]; then
+            recovery=ano
+            recovery_instruction='sudo systemctl start mariadb'
+        fi
     fi
     printf 'state: %s\n' "$state"
     printf 'config_target: %s\n' "$target"
@@ -871,4 +1086,6 @@ cmd_status() {
     printf 'rollback_instructions: %s\n' "$rollback"
     printf 'rollback_available: %s\n' "$rollback"
     printf 'runcloud_restart_required: %s\n' "$restart_required"
+    printf 'recovery_required: %s\n' "$recovery"
+    printf 'recovery_instruction: %s\n' "$recovery_instruction"
 }

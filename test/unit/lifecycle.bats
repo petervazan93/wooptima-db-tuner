@@ -6,6 +6,8 @@ setup() {
     export DBTUNE_LOG_LEVEL=error
     export DBTUNE_MIN_APPLY_SAMPLES=1
     export DBTUNE_SQL_AUTH_METHOD=socket
+    export DBTUNE_BACKUP_EVIDENCE_UID
+    DBTUNE_BACKUP_EVIDENCE_UID=$(id -u)
     export DBTUNE_FLOCK=fake_flock
     export DBTUNE_RACE_LOCK_DIR="$BATS_TEST_TMPDIR/lifecycle-held"
     export STUB_TIME=1200
@@ -15,7 +17,11 @@ setup() {
     export STUB_VALIDATE_STATUS=0
     export STUB_VALIDATE_OUTPUT=
     export STUB_RESTART_FAIL=0
+    export STUB_START_FAIL=0
     export STUB_SERVICE_ACTIVE=1
+    export STUB_FAIL_CP_MATCH=
+    export STUB_FAIL_MV_MATCH=
+    export STUB_FAIL_CHOWN_MATCH=
     export STUB_GLOBAL_NAMES=$'max_connections\nskip_name_resolve'
     export STUB_EFFECTIVE=$'max_connections\t300\nskip_name_resolve\tON'
     export STUB_STATUS=$'uptime\t100\ninnodb_buffer_pool_wait_free\t0\ninnodb_log_waits\t0\naborted_connects\t0'
@@ -27,6 +33,11 @@ setup() {
     source "$BATS_TEST_DIRNAME/../../lib/60-lifecycle.sh"
     source "$BATS_TEST_DIRNAME/../../lib/50-report.sh"
     source "$BATS_TEST_DIRNAME/../../lib/90-main.sh"
+    export DBTUNE_CONFIG_UID
+    export DBTUNE_CONFIG_GID
+    DBTUNE_CONFIG_UID=$(id -u)
+    DBTUNE_CONFIG_GID=$(id -g)
+    write_backup_evidence verified
     printf 'audit.hostname\ttest\n' >"$DBTUNE_STATE_DIR/audit.tsv"
     : >"$DBTUNE_STATE_DIR/apps.tsv"
     : >"$DBTUNE_STATE_DIR/databases.tsv"
@@ -91,6 +102,7 @@ STUB
 #!/usr/bin/env bash
 printf '%s\n' "$*" >>"$DBTUNE_STATE_DIR/systemctl.log"
 if [[ $1 == restart && $STUB_RESTART_FAIL == 1 ]]; then exit 1; fi
+if [[ $1 == start && $STUB_START_FAIL == 1 ]]; then exit 1; fi
 if [[ $1 == is-active && ($STUB_RESTART_FAIL == 1 || $STUB_SERVICE_ACTIVE == 0) ]]; then exit 3; fi
 exit 0
 STUB
@@ -105,7 +117,24 @@ esac
 STUB
     cat >"$BATS_TEST_TMPDIR/bin/chown" <<'STUB'
 #!/usr/bin/env bash
+if [[ -n $STUB_FAIL_CHOWN_MATCH && " $* " == *"$STUB_FAIL_CHOWN_MATCH"* ]]; then exit 1; fi
 exit 0
+STUB
+    cat >"$BATS_TEST_TMPDIR/bin/cp" <<'STUB'
+#!/usr/bin/env bash
+if [[ -n $STUB_FAIL_CP_MATCH && " $* " == *"$STUB_FAIL_CP_MATCH"* && ! -e $DBTUNE_STATE_DIR/.cp-failed ]]; then
+    touch "$DBTUNE_STATE_DIR/.cp-failed"
+    exit 1
+fi
+exec /bin/cp "$@"
+STUB
+    cat >"$BATS_TEST_TMPDIR/bin/mv" <<'STUB'
+#!/usr/bin/env bash
+if [[ -n $STUB_FAIL_MV_MATCH && " $* " == *"$STUB_FAIL_MV_MATCH"* && ! -e $DBTUNE_STATE_DIR/.mv-failed ]]; then
+    touch "$DBTUNE_STATE_DIR/.mv-failed"
+    exit 1
+fi
+exec /bin/mv "$@"
 STUB
     cat >"$BATS_TEST_TMPDIR/bin/free" <<'STUB'
 #!/usr/bin/env bash
@@ -117,7 +146,23 @@ OUT
 STUB
     chmod +x "$BATS_TEST_TMPDIR/bin/mariadb" "$BATS_TEST_TMPDIR/bin/mariadbd" \
         "$BATS_TEST_TMPDIR/bin/systemctl" "$BATS_TEST_TMPDIR/bin/date" "$BATS_TEST_TMPDIR/bin/chown" \
-        "$BATS_TEST_TMPDIR/bin/free"
+        "$BATS_TEST_TMPDIR/bin/cp" "$BATS_TEST_TMPDIR/bin/mv" "$BATS_TEST_TMPDIR/bin/free"
+}
+
+write_backup_evidence() {
+    local status=${1:-verified}
+    local success=2026-07-31T11:00:00Z
+
+    [[ $status != missing ]] || success=none
+    [[ $status != unknown ]] || success=unknown
+    {
+        printf 'schema\t1\n'
+        printf 'status\t%s\n' "$status"
+        printf 'source\tunit-test-backup-api\n'
+        printf 'checked_at\t2026-07-31T11:30:00Z\n'
+        printf 'last_success\t%s\n' "$success"
+    } >"$(dbtune_backup_evidence_file)"
+    chmod 600 "$(dbtune_backup_evidence_file)"
 }
 
 write_proposal() {
@@ -246,6 +291,29 @@ write_manifest() {
     [[ "$output" == *"TTY"* ]]
 }
 
+@test "apply requires independent backup evidence outside a TTY" {
+    rm "$(dbtune_backup_evidence_file)"
+    run cmd_apply
+    [ "$status" -eq 77 ]
+    [[ "$output" == *"backup-evidence.tsv"* ]]
+    [ ! -e "$DBTUNE_CONFIG_TARGET" ]
+}
+
+@test "confirmed missing backup cannot be overridden" {
+    write_backup_evidence missing
+    run cmd_apply
+    [ "$status" -eq 65 ]
+    [[ "$output" == *"potvrdzuje absenciu"* ]]
+    [ ! -e "$DBTUNE_CONFIG_TARGET" ]
+}
+
+@test "backup fallback requires its own exact interactive phrase" {
+    dbtune_lifecycle_is_interactive() { return 0; }
+    run dbtune_lifecycle_check_backup "" <<<"POTVRDZUJEM OBNOVITELNU ZALOHU"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"Chyba autoritativny dokaz"* ]]
+}
+
 @test "apply and verify post preserve lifecycle artifacts" {
     run cmd_apply
     [ "$status" -eq 0 ]
@@ -262,12 +330,164 @@ write_manifest() {
     [ "$(cat "$DBTUNE_STATE_DIR/state")" = verified ]
 }
 
-@test "verify 24h compares current counters with apply baseline" {
+@test "verify 24h compares current counters with the successful post-restart baseline" {
     cmd_apply >/dev/null
+    cmd_verify --post >/dev/null
+    history=$(cat "$DBTUNE_STATE_DIR/apply/current")
+    [ -s "$history/post-status.tsv" ]
     run cmd_verify --24h
     [ "$status" -eq 0 ]
     [[ "$output" == *$'METRIC\tBASELINE\tCURRENT\tDELTA_OR_RESET'* ]]
     [[ "$output" == *$'uptime\t100\t100\t0'* ]]
+}
+
+@test "verify 24h requires a successful post-restart baseline" {
+    cmd_apply >/dev/null
+    run cmd_verify --24h
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"verify --post"* ]]
+    [ "$(dbtune_state_read)" = applied ]
+}
+
+@test "verify rejects a missing changed or symlink target" {
+    cmd_apply >/dev/null
+    history=$(cat "$DBTUNE_STATE_DIR/apply/current")
+
+    rm "$DBTUNE_CONFIG_TARGET"
+    run cmd_verify --post
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"TARGET CHYBA"* ]]
+
+    cp "$history/proposed.cnf" "$DBTUNE_CONFIG_TARGET"
+    printf '# changed\n' >>"$DBTUNE_CONFIG_TARGET"
+    chmod 644 "$DBTUNE_CONFIG_TARGET"
+    run cmd_verify --post
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"hash nasadeneho configu"* ]]
+
+    rm "$DBTUNE_CONFIG_TARGET"
+    ln -s "$history/proposed.cnf" "$DBTUNE_CONFIG_TARGET"
+    run cmd_verify --post
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"symlink"* ]]
+    [ "$(dbtune_state_read)" = applied ]
+}
+
+@test "verify rejects an unexpected target mode" {
+    cmd_apply >/dev/null
+    cmd_verify --post >/dev/null
+    [ "$(dbtune_state_read)" = verified ]
+    chmod 600 "$DBTUNE_CONFIG_TARGET"
+    run cmd_verify --post
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"mode=600"* ]]
+    [ "$(dbtune_state_read)" = applied ]
+}
+
+@test "health counters use reset-aware deltas from the post-restart baseline" {
+    export STUB_STATUS=$'uptime\t100\ninnodb_buffer_pool_wait_free\t5\ninnodb_log_waits\t7\naborted_connects\t9'
+    cmd_apply >/dev/null
+
+    run cmd_verify --post
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"innodb_log_waits baseline=7 current=7 delta=0 reset=nie"* ]]
+
+    dbtune_state_write applied
+    export STUB_STATUS=$'uptime\t110\ninnodb_buffer_pool_wait_free\t5\ninnodb_log_waits\t8\naborted_connects\t9'
+    run cmd_verify --post
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"innodb_log_waits baseline=7 current=8 delta=1 reset=nie"* ]]
+
+    export STUB_STATUS=$'uptime\t10\ninnodb_buffer_pool_wait_free\t0\ninnodb_log_waits\t0\naborted_connects\t0'
+    run cmd_verify --post
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"innodb_log_waits baseline=7 current=0 delta=0 reset=ano"* ]]
+}
+
+@test "verify 24h does not hide growth equal to a pre-restart counter" {
+    export STUB_STATUS=$'uptime\t1000\ninnodb_buffer_pool_wait_free\t100\ninnodb_log_waits\t100\naborted_connects\t100'
+    cmd_apply >/dev/null
+    export STUB_STATUS=$'uptime\t10\ninnodb_buffer_pool_wait_free\t0\ninnodb_log_waits\t0\naborted_connects\t0'
+    cmd_verify --post >/dev/null
+
+    export STUB_STATUS=$'uptime\t1000\ninnodb_buffer_pool_wait_free\t100\ninnodb_log_waits\t100\naborted_connects\t100'
+    run cmd_verify --24h
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"innodb_log_waits baseline=0 current=100 delta=100 reset=nie"* ]]
+    [ "$(dbtune_state_read)" = applied ]
+}
+
+@test "event failure does not undo a committed apply state" {
+    dbtune_event() { return 1; }
+    run cmd_apply
+    [ "$status" -eq 0 ]
+    [ "$(dbtune_state_read)" = applied ]
+    [ -r "$DBTUNE_STATE_DIR/apply/current" ]
+}
+
+@test "copy mv and chown failures leave the previous state and target" {
+    export STUB_FAIL_CP_MATCH=/proposed.cnf
+    run cmd_apply
+    [ "$status" -ne 0 ]
+    [ "$(dbtune_state_read)" = proposed ]
+    [ ! -e "$DBTUNE_CONFIG_TARGET" ]
+
+    export STUB_FAIL_CP_MATCH=
+    export STUB_FAIL_MV_MATCH=.99-zz-tuning.cnf.tmp
+    rm -f "$DBTUNE_STATE_DIR/.mv-failed"
+    run cmd_apply
+    [ "$status" -ne 0 ]
+    [ "$(dbtune_state_read)" = proposed ]
+    [ ! -e "$DBTUNE_CONFIG_TARGET" ]
+
+    export STUB_FAIL_MV_MATCH=
+    export STUB_FAIL_CHOWN_MATCH=root:root
+    run cmd_apply
+    [ "$status" -ne 0 ]
+    [ "$(dbtune_state_read)" = proposed ]
+    [ ! -e "$DBTUNE_CONFIG_TARGET" ]
+}
+
+@test "failed restore preserves current and exposes recovery instructions" {
+    printf 'original\n' >"$DBTUNE_CONFIG_TARGET"
+    export STUB_RESTART_FAIL=1
+    export STUB_FAIL_MV_MATCH=.99-zz-restore
+    run cmd_apply --restart
+    [ "$status" -ne 0 ]
+    [ "$(dbtune_state_read)" = recovery_required ]
+    history=$(cat "$DBTUNE_STATE_DIR/apply/current")
+    [ -r "$history/RECOVERY_REQUIRED" ]
+    [ -r "$history/ROLLBACK.txt" ]
+
+    run cmd_status
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"recovery_required: ano"* ]]
+    [[ "$output" == *"sudo dbtune rollback"* ]]
+    [[ "$output" == *"$history/ROLLBACK.txt"* ]]
+}
+
+@test "systemctl start failure after restored restart remains recoverable" {
+    printf 'original\n' >"$DBTUNE_CONFIG_TARGET"
+    export STUB_RESTART_FAIL=1
+    export STUB_START_FAIL=1
+    run cmd_apply --restart
+    [ "$status" -ne 0 ]
+    [ "$(cat "$DBTUNE_CONFIG_TARGET")" = original ]
+    [ "$(dbtune_state_read)" = recovery_required ]
+    history=$(cat "$DBTUNE_STATE_DIR/apply/current")
+    [ -r "$history/RECOVERY_REQUIRED" ]
+}
+
+@test "rollback restore failure records rollback_failed and keeps its pointer" {
+    printf 'original\n' >"$DBTUNE_CONFIG_TARGET"
+    cmd_apply >/dev/null
+    history=$(cat "$DBTUNE_STATE_DIR/apply/current")
+    export STUB_FAIL_MV_MATCH=.99-zz-restore
+    run cmd_rollback
+    [ "$status" -ne 0 ]
+    [ "$(dbtune_state_read)" = rollback_failed ]
+    [ "$(cat "$DBTUNE_STATE_DIR/apply/current")" = "$history" ]
+    [ -r "$history/ROLLBACK_FAILED" ]
 }
 
 @test "status is filesystem-only and works without mariadb" {

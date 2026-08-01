@@ -780,6 +780,7 @@ dbtune_audit_collect_platform() {
     local out=${1:-}
     local runcloud=${DBTUNE_RUNCLOUD_CNF:-/etc/mysql/conf.d/runcloud.cnf}
     local key value limit=unknown fpm=0 backup=0 backup_schedules=0 grants rows count=0 listener=unknown
+    local evidence backup_status=unknown backup_source=unknown backup_checked=unknown backup_success=unknown
     local unattended=${DBTUNE_UNATTENDED_CONFIG:-/etc/apt/apt.conf.d/50unattended-upgrades}
 
     if [[ -r $runcloud ]]; then
@@ -826,6 +827,22 @@ dbtune_audit_collect_platform() {
         rm -f "$out.backup"
     fi
     dbtune_audit_put "$out" backup.schedule_count "$backup_schedules"
+    evidence=$(dbtune_backup_evidence_file)
+    if dbtune_backup_evidence_validate "$evidence"; then
+        backup_status=$(dbtune_manifest_value "$evidence" status)
+        backup_source=$(dbtune_manifest_value "$evidence" source)
+        backup_checked=$(dbtune_manifest_value "$evidence" checked_at)
+        backup_success=$(dbtune_manifest_value "$evidence" last_success)
+        dbtune_audit_put "$out" backup.evidence_file "$evidence"
+    elif [[ -e $evidence || -L $evidence ]]; then
+        dbtune_audit_put "$out" backup.evidence_error invalid
+    else
+        dbtune_audit_put "$out" backup.evidence_error missing
+    fi
+    dbtune_audit_put "$out" backup.status "$backup_status"
+    dbtune_audit_put "$out" backup.source "$backup_source"
+    dbtune_audit_put "$out" backup.checked_at "$backup_checked"
+    dbtune_audit_put "$out" backup.last_success "$backup_success"
 
     if command grep -RhsE '^[[:space:]]*pm\.max_children[[:space:]]*=' /etc/php/*/fpm/pool.d /etc/php*rc/fpm.d 2>/dev/null | command awk -F= '{ sum += $2 } END { print sum+0 }' >"$out.fpm"; then
         IFS= read -r fpm <"$out.fpm" || fpm=0

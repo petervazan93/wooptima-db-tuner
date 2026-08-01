@@ -86,6 +86,14 @@ integration_lifecycle() {
         printf "%s\n" "#!/bin/sh" "exit 0" >/var/lib/dbtune-bin/systemctl
         chmod 755 /var/lib/dbtune-bin/systemctl
         rm -rf /var/lib/dbtune
+        install -d -m 700 /var/lib/dbtune
+        printf "%b\n" \
+            "schema\t1" \
+            "status\tverified" \
+            "source\tdocker-integration-backup-fixture" \
+            "checked_at\t2026-08-01T10:00:00Z" \
+            "last_success\t2026-08-01T09:00:00Z" >/var/lib/dbtune/backup-evidence.tsv
+        chmod 600 /var/lib/dbtune/backup-evidence.tsv
     ' || return 1
     integration_dbtune "$service" audit >/dev/null || return 1
     integration_dbtune "$service" collect start --days 1 >/dev/null || return 1
@@ -106,6 +114,7 @@ integration_lifecycle() {
         test -s /var/lib/dbtune/report.md
         test -s /var/lib/dbtune/report.json
         test -s /var/lib/dbtune/proposal-manifest.tsv
+        test -s /var/lib/dbtune/backup-evidence.tsv
         test -s /etc/mysql/mariadb.conf.d/99-zz-tuning.cnf
     '
 }

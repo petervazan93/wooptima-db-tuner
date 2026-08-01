@@ -10,6 +10,8 @@ setup() {
     export DBTUNE_UNATTENDED_DIR="$BATS_TEST_TMPDIR/apt"
     export DBTUNE_CRON_ROOT="$BATS_TEST_TMPDIR/cron.d"
     export DBTUNE_ROOT_CNF="$BATS_TEST_TMPDIR/root.cnf"
+    export DBTUNE_BACKUP_EVIDENCE_UID
+    DBTUNE_BACKUP_EVIDENCE_UID=$(id -u)
     mkdir -p "$DBTUNE_STATE_DIR" "$DBTUNE_HOME_ROOT" "$DBTUNE_MYSQL_CONFIG_DIR" "$DBTUNE_UNATTENDED_DIR" "$DBTUNE_CRON_ROOT"
     source "$BATS_TEST_DIRNAME/../../lib/00-header.sh"
     source "$BATS_TEST_DIRNAME/../../lib/10-util.sh"
@@ -212,6 +214,35 @@ EOF
     [ "$status" -eq 0 ]
     run grep -F $'app.0\tautoload_bytes\t0' "$BATS_TEST_TMPDIR/databases.tsv"
     [ "$status" -ne 0 ]
+}
+
+@test "platform audit trusts only the independent backup evidence contract" {
+    evidence=$(dbtune_backup_evidence_file)
+    {
+        printf 'schema\t1\n'
+        printf 'status\tverified\n'
+        printf 'source\truncloud-api\n'
+        printf 'checked_at\t2026-08-01T10:00:00Z\n'
+        printf 'last_success\t2026-08-01T09:00:00Z\n'
+    } >"$evidence"
+    chmod 600 "$evidence"
+    dbtune_audit_sql() { return 1; }
+
+    dbtune_audit_collect_platform "$BATS_TEST_TMPDIR/platform.tsv"
+    run grep -F $'backup.status\tverified' "$BATS_TEST_TMPDIR/platform.tsv"
+    [ "$status" -eq 0 ]
+    run grep -F $'backup.source\truncloud-api' "$BATS_TEST_TMPDIR/platform.tsv"
+    [ "$status" -eq 0 ]
+    run grep -F $'backup.last_success\t2026-08-01T09:00:00Z' "$BATS_TEST_TMPDIR/platform.tsv"
+    [ "$status" -eq 0 ]
+
+    printf 'schema\t1\nstatus\tverified\nsource\truncloud-api\nchecked_at\t2026-08-01T10:00:00Z\nlast_success\tunknown\n' >"$evidence"
+    chmod 600 "$evidence"
+    dbtune_audit_collect_platform "$BATS_TEST_TMPDIR/invalid-platform.tsv"
+    run grep -F $'backup.status\tunknown' "$BATS_TEST_TMPDIR/invalid-platform.tsv"
+    [ "$status" -eq 0 ]
+    run grep -F $'backup.evidence_error\tinvalid' "$BATS_TEST_TMPDIR/invalid-platform.tsv"
+    [ "$status" -eq 0 ]
 }
 
 @test "shared database metrics cron and multisite remain app scoped" {

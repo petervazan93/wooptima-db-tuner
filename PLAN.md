@@ -37,7 +37,7 @@ dbtune status | version
 dbtune _tick                          # interné, volá systemd timer
 ```
 
-Stavy: `idle → audited → collecting → collected → analyzed → proposed → applied → verified` (+ `rolled_back`). Neplatný príkaz v danom stave = zrozumiteľné odmietnutie. **`apply` bez merania je zablokovaný** („preset bez merania je hádanie") — `--force` vyžaduje napísanie potvrdzovacej frázy a report dostane pečiatku „BEZ MERANIA".
+Stavy: `idle → audited → collecting → collected → analyzed → proposed → applied → verified` (+ `rolled_back`, `recovery_required`, `rollback_failed`). Neplatný príkaz v danom stave = zrozumiteľné odmietnutie. **`apply` bez merania je zablokovaný** („preset bez merania je hádanie") — `--force` vyžaduje napísanie potvrdzovacej frázy a report dostane pečiatku „BEZ MERANIA". Apply aj force navyše vyžadujú samostatný autoritatívny backup evidence alebo druhé explicitné TTY potvrdenie.
 
 ## Fáza AUDIT (read-only)
 
@@ -86,7 +86,7 @@ Report drží filozofiu MD: sekcia „aplikačná vrstva — rieš PRVÚ" ide pr
 3. Guard proti unattended-upgrades oknu (apply sa odmietne 05:30–07:30 bez --force) + kontrola bežiaceho mydumper backupu v processliste pred pokynom na reštart.
 4. Reštart decoupled: apply vypíše presné inštrukcie pre RunCloud panel + očakávania (dlhší prvý štart pri zmene redo logu) + **`ROLLBACK.txt` s doslovnými príkazmi** — recovery nevyžaduje ani samotný tool.
 5. `rollback` = čisto filesystem operácia (mv + systemctl start), žiadne SQL — funguje aj s ležiacou DB.
-6. `verify --post` (wait_free=0, log_waits=0, aborted=0, swap stabilný) a `verify --24h` (porovnanie proti baseline snapshotu z apply).
+6. `verify --post` (bez rastu wait_free, log_waits a aborted oproti reset-aware baseline, swap stabilný, ulozenie post-restart baseline) a `verify --24h` (porovnanie proti uspesnej post-restart baseline).
 
 ## Repo štruktúra a testy
 

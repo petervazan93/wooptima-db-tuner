@@ -340,15 +340,19 @@ EOF
     printf '%s\n' $'backup.status\tmissing' >>"$BATS_TEST_TMPDIR/missing.tsv"
     cp "$BATS_TEST_TMPDIR/verified.tsv" "$BATS_TEST_TMPDIR/unknown.tsv"
     printf '%s\n' $'backup.status\tunknown' >>"$BATS_TEST_TMPDIR/unknown.tsv"
+    awk -F '\t' '$1 != "backup.last_success" {print}' "$BATS_TEST_TMPDIR/verified.tsv" >"$BATS_TEST_TMPDIR/verified-no-success.tsv"
+    awk -F '\t' '$1 != "backup.source" {print}' "$BATS_TEST_TMPDIR/missing.tsv" >"$BATS_TEST_TMPDIR/missing-no-source.tsv"
     awk -F '\t' '$1 !~ /^backup[._](status|source|last_success)$/' "$BATS_TEST_TMPDIR/verified.tsv" >"$BATS_TEST_TMPDIR/schedule-only.tsv"
     printf '%s\n' $'backup.schedule_count\t4' >>"$BATS_TEST_TMPDIR/schedule-only.tsv"
 
-    for status in verified missing unknown schedule-only; do
+    for status in verified missing unknown verified-no-success missing-no-source schedule-only; do
         dbtune_rules_analyze "$BATS_TEST_TMPDIR/$status.tsv" "$BATS_TEST_TMPDIR/samples.tsv" "" "" "" 10 >"$BATS_TEST_TMPDIR/$status-analysis.tsv"
     done
     [ "$(awk -F '\t' '$1=="R-BACKUP" {print $3, $4}' "$BATS_TEST_TMPDIR/verified-analysis.tsv")" = 'info OK' ]
     [ "$(awk -F '\t' '$1=="R-BACKUP" {print $3, $4}' "$BATS_TEST_TMPDIR/missing-analysis.tsv")" = 'critical MISSING' ]
     [ "$(awk -F '\t' '$1=="R-BACKUP" {print $3, $4}' "$BATS_TEST_TMPDIR/unknown-analysis.tsv")" = 'medium UNKNOWN' ]
+    [ "$(awk -F '\t' '$1=="R-BACKUP" {print $3, $4}' "$BATS_TEST_TMPDIR/verified-no-success-analysis.tsv")" = 'medium UNKNOWN' ]
+    [ "$(awk -F '\t' '$1=="R-BACKUP" {print $3, $4}' "$BATS_TEST_TMPDIR/missing-no-source-analysis.tsv")" = 'medium UNKNOWN' ]
     [ "$(awk -F '\t' '$1=="R-BACKUP" {print $3, $4}' "$BATS_TEST_TMPDIR/schedule-only-analysis.tsv")" = 'medium UNKNOWN' ]
     run awk -F '\t' '$1=="R-BACKUP" {print $7}' "$BATS_TEST_TMPDIR/verified-analysis.tsv"
     [[ "$output" == *'source=unit-test'* ]]
