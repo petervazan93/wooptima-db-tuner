@@ -61,6 +61,13 @@ analysis_value() {
     awk -F '\t' -v rule="$rule" -v key="$key" '$1==rule && $5==key {print $6; exit}' "$file"
 }
 
+write_current_audit_manifest() {
+    : >"$DBTUNE_STATE_DIR/apps.tsv"
+    : >"$DBTUNE_STATE_DIR/databases.tsv"
+    dbtune_provenance_write_audit_manifest "$DBTUNE_STATE_DIR/audit-manifest.tsv" \
+        test-run "$DBTUNE_STATE_DIR/audit.tsv" "$DBTUNE_STATE_DIR/apps.tsv" "$DBTUNE_STATE_DIR/databases.tsv"
+}
+
 @test "nearest-rank percentile is deterministic" {
     make_samples "$BATS_TEST_TMPDIR/samples.tsv" 30 1 4
     awk -F '\t' 'NR>1 {$8=NR-1; print}' OFS='\t' "$BATS_TEST_TMPDIR/samples.tsv" >"$BATS_TEST_TMPDIR/body.tsv"
@@ -263,6 +270,7 @@ EOF
 @test "minimum samples rejects analysis and preserves collected state" {
     cp "$BATS_TEST_DIRNAME/../fixtures/audit-10.6.tsv" "$DBTUNE_STATE_DIR/audit.tsv"
     cp "$BATS_TEST_DIRNAME/../fixtures/samples-7d.tsv" "$DBTUNE_STATE_DIR/samples.tsv"
+    write_current_audit_manifest
     dbtune_state_write collected
 
     run cmd_analyze --min-samples 13
@@ -274,12 +282,15 @@ EOF
 @test "successful cmd_analyze transitions collected to analyzed" {
     cp "$BATS_TEST_DIRNAME/../fixtures/audit-10.6.tsv" "$DBTUNE_STATE_DIR/audit.tsv"
     cp "$BATS_TEST_DIRNAME/../fixtures/samples-7d.tsv" "$DBTUNE_STATE_DIR/samples.tsv"
+    write_current_audit_manifest
     dbtune_state_write collected
 
     run cmd_analyze --min-samples 10
     [ "$status" -eq 0 ]
     [ "$(dbtune_state_read)" = analyzed ]
     [ "$(awk -F '\t' 'NR==1 {print NF}' "$DBTUNE_STATE_DIR/analysis.tsv")" = 8 ]
+    [ "$(dbtune_manifest_value "$DBTUNE_STATE_DIR/analysis-manifest.tsv" run_id)" = test-run ]
+    [ "$(dbtune_manifest_value "$DBTUNE_STATE_DIR/analysis-manifest.tsv" samples_hash)" = "$(dbtune_sha256_file "$DBTUNE_STATE_DIR/samples.tsv")" ]
 }
 
 @test "per-app rules emit recommendations without server config proposals" {

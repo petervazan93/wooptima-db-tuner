@@ -54,6 +54,7 @@ dbtune_lifecycle_has_measurement() {
     local count
 
     [[ -s $samples && -s $analysis ]] || return 1
+    dbtune_provenance_validate_analysis >/dev/null 2>&1 || return 1
     IFS= read -r count < <(awk -F '\t' 'NR==1 {ok=($1=="timestamp" && $17=="restart_flag"); next} NF==17 {n++} END {if (!ok) exit 1; print n+0}' "$samples") || return 1
     ((count >= ${DBTUNE_MIN_APPLY_SAMPLES:-288})) || return 1
     awk -F '\t' 'NR==1 {exit !(NF==8 && $1=="rule_id" && $2=="scope" && $5=="proposed_key" && $8=="reason_sk")}' "$analysis"
@@ -68,31 +69,44 @@ dbtune_lifecycle_manifest_value_from() {
 
 dbtune_lifecycle_validate_proposal_manifest() {
     local manifest="$DBTUNE_STATE_DIR/proposal-manifest.tsv"
-    local name expected actual
+    local proposal=${1:-$DBTUNE_STATE_DIR/proposed-99-zz-tuning.cnf}
+    local analysis_manifest key expected actual
 
     [[ -r $manifest ]] || {
         dbtune_log error "Chyba proposal manifest: $manifest"
         return 66
     }
-    for name in audit.tsv samples.tsv analysis.tsv proposed-99-zz-tuning.cnf; do
-        expected=$(dbtune_lifecycle_manifest_value_from "$manifest" "$name") || {
-            dbtune_log error "Proposal manifest nema zaznam pre $name"
+    dbtune_provenance_validate_analysis || return
+    analysis_manifest=$(dbtune_analysis_manifest_file) || return
+    for key in run_id audit_hash samples_hash analysis_hash; do
+        expected=$(dbtune_manifest_value "$analysis_manifest" "$key") || return 65
+        actual=$(dbtune_manifest_value "$manifest" "$key") || {
+            dbtune_log error "Proposal manifest nema provenance zaznam $key"
             return 65
         }
-        [[ $expected =~ ^[0-9a-f]{64}$ && -r $DBTUNE_STATE_DIR/$name ]] || return 65
-        actual=$(dbtune_sha256_file "$DBTUNE_STATE_DIR/$name") || return
         if [[ $actual != "$expected" ]]; then
-            dbtune_log error "Artefakt $name sa zmenil po vytvoreni proposal"
+            dbtune_log error "Proposal patri inemu analysis runu ($key)"
             return 65
         fi
     done
+    expected=$(dbtune_manifest_value "$manifest" proposal_hash) || {
+        dbtune_log error "Proposal manifest nema proposal_hash"
+        return 65
+    }
+    [[ $expected =~ ^[0-9a-f]{64}$ && -r $proposal ]] || return 65
+    actual=$(dbtune_sha256_file "$proposal") || return
+    if [[ $actual != "$expected" ]]; then
+        dbtune_log error "Proposal snapshot sa zmenil alebo nezodpoveda manifestu"
+        return 65
+    fi
 }
 
 dbtune_lifecycle_check_apply_inputs() {
     local force=${1:-0}
-    local proposal state
+    local proposal=${2:-}
+    local state
 
-    proposal=$(dbtune_lifecycle_proposal)
+    [[ -n $proposal ]] || proposal=$(dbtune_lifecycle_proposal)
     state=$(dbtune_state_read) || return
     if ((force == 0)) && [[ $state != proposed ]]; then
         dbtune_log error "Apply vyzaduje aktualny stav proposed; aktualny stav je '$state'"
@@ -111,7 +125,7 @@ dbtune_lifecycle_check_apply_inputs() {
         return 65
     fi
     if ((force == 0)); then
-        dbtune_lifecycle_validate_proposal_manifest || return
+        dbtune_lifecycle_validate_proposal_manifest "$proposal" || return
     fi
 }
 
@@ -309,7 +323,8 @@ dbtune_lifecycle_prepare_history() {
     local history=${1:-}
     local target=${2:-}
     local proposal=${3:-}
-    local had_original=0
+    local had_original=0 proposal_hash expected_hash run_id=unmeasured audit_hash=unmeasured
+    local proposal_manifest="$DBTUNE_STATE_DIR/proposal-manifest.tsv"
 
     if [[ -e $target ]]; then
         cp -p "$target" "$history/original.cnf" || return 1
@@ -318,10 +333,19 @@ dbtune_lifecycle_prepare_history() {
     fi
     cp "$proposal" "$history/proposed.cnf" || return 1
     chmod 600 "$history/proposed.cnf" || return 1
+    proposal_hash=$(dbtune_sha256_file "$history/proposed.cnf") || return
+    expected_hash=$(dbtune_manifest_value "$proposal_manifest" proposal_hash 2>/dev/null || true)
+    if [[ $expected_hash == "$proposal_hash" ]]; then
+        run_id=$(dbtune_manifest_value "$proposal_manifest" run_id 2>/dev/null || printf unknown)
+        audit_hash=$(dbtune_manifest_value "$proposal_manifest" audit_hash 2>/dev/null || printf unknown)
+    fi
     {
         printf 'target\t%s\n' "$target"
         printf 'had_original\t%s\n' "$had_original"
         printf 'created_at\t%s\n' "$(dbtune_now)"
+        printf 'run_id\t%s\n' "$run_id"
+        printf 'audit_hash\t%s\n' "$audit_hash"
+        printf 'proposal_hash\t%s\n' "$proposal_hash"
     } | dbtune_atomic_write "$history/manifest.tsv" 600 || return 1
     dbtune_lifecycle_write_rollback_instructions "$history" "$target" "$had_original" || return 1
     printf '%s\n' "$had_original"
@@ -532,19 +556,22 @@ dbtune_lifecycle_print_runcloud_instructions() {
     printf 'Nudzove doslovne prikazy: %s/ROLLBACK.txt\n' "$history"
 }
 
-cmd_apply() {
-    local parsed restart force proposal target history had_original previous_state unmeasured=0
+dbtune_lifecycle_after_manifest_check() {
+    return 0
+}
 
-    parsed=$(dbtune_lifecycle_parse_args "$@") || return
-    IFS=$'\t' read -r restart force <<<"$parsed"
-    dbtune_lifecycle_check_apply_inputs "$force" || return
+dbtune_lifecycle_apply_snapshot() {
+    local restart=${1:-0}
+    local force=${2:-0}
+    local proposal=${3:-}
+    local target history had_original previous_state unmeasured=0
+
     dbtune_lifecycle_has_measurement || unmeasured=1
     if ((force == 1)); then
         dbtune_lifecycle_confirm_force || return
     fi
     dbtune_lifecycle_check_time_window "$force" || return
 
-    proposal=$(dbtune_lifecycle_proposal)
     target=$(dbtune_lifecycle_target)
     dbtune_init_state_dir || return 1
     dbtune_lifecycle_validate_variable_names "$proposal" || return
@@ -607,6 +634,39 @@ cmd_apply() {
         dbtune_lifecycle_print_runcloud_instructions "$history" "$target"
     fi
     dbtune_event apply_completed target "$target" history "$history" restart "$restart" force "$force" original "$had_original" || true
+}
+
+cmd_apply() {
+    local parsed restart force proposal snapshot status=0
+
+    parsed=$(dbtune_lifecycle_parse_args "$@") || return
+    IFS=$'\t' read -r restart force <<<"$parsed"
+    dbtune_init_state_dir || return 1
+    proposal=$(dbtune_lifecycle_proposal)
+    [[ -s $proposal ]] || {
+        dbtune_log error "Chyba navrh konfiguracie: $proposal"
+        return 66
+    }
+    snapshot=$(mktemp "$DBTUNE_STATE_DIR/.apply-proposal.XXXXXX") || return 1
+    if ! cp "$proposal" "$snapshot" || ! chmod 400 "$snapshot"; then
+        rm -f "$snapshot"
+        return 1
+    fi
+    if dbtune_lifecycle_check_apply_inputs "$force" "$snapshot"; then
+        :
+    else
+        status=$?
+        rm -f "$snapshot"
+        return "$status"
+    fi
+    dbtune_lifecycle_after_manifest_check || {
+        status=$?
+        rm -f "$snapshot"
+        return "$status"
+    }
+    dbtune_lifecycle_apply_snapshot "$restart" "$force" "$snapshot" || status=$?
+    rm -f "$snapshot"
+    return "$status"
 }
 
 dbtune_lifecycle_canonical_value() {
@@ -809,5 +869,6 @@ cmd_status() {
     printf 'apply_history: %s\n' "$history"
     printf 'baseline_present: %s\n' "$baseline"
     printf 'rollback_instructions: %s\n' "$rollback"
+    printf 'rollback_available: %s\n' "$rollback"
     printf 'runcloud_restart_required: %s\n' "$restart_required"
 }

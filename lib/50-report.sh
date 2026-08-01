@@ -484,6 +484,10 @@ dbtune_render_markdown() {
 
     printf '# dbtune report\n\n'
     printf '_Vygenerované: %s | dbtune %s_\n\n' "$(dbtune_markdown_escape "$generated_at")" "$(dbtune_markdown_escape "$DBTUNE_VERSION")"
+    printf "_Run: \`%s\` | audit SHA-256: \`%s\` | samples SHA-256: \`%s\`_\n\n" \
+        "$(dbtune_markdown_escape "$DBTUNE_RUN_ID")" \
+        "$(dbtune_markdown_escape "$DBTUNE_AUDIT_HASH")" \
+        "$(dbtune_markdown_escape "$DBTUNE_SAMPLES_HASH")"
     printf '## Executive summary\n\n'
     printf '**Nálezy:** critical %s, high %s, medium %s, low %s.\n\n' "$critical" "$high" "$medium" "$low"
     dbtune_render_executive_actions
@@ -528,6 +532,9 @@ dbtune_render_json() {
         schema_version fleet-v2
         generated_at "$generated_at"
         dbtune_version "$DBTUNE_VERSION"
+        run_id "$DBTUNE_RUN_ID"
+        audit_hash "$DBTUNE_AUDIT_HASH"
+        samples_hash "$DBTUNE_SAMPLES_HASH"
         findings.critical "$(dbtune_analysis_count all critical)"
         findings.high "$(dbtune_analysis_count all high)"
         findings.medium "$(dbtune_analysis_count all medium)"
@@ -639,7 +646,7 @@ dbtune_render_proposal() {
 # Funkciu vola CLI dispatcher aj collector bez argumentov.
 # shellcheck disable=SC2120
 cmd_report() {
-    local generated_at markdown json report_file json_file
+    local generated_at markdown json report_file json_file analysis_manifest
 
     dbtune_report_no_arguments report "$@" || return
     dbtune_init_state_dir || return
@@ -648,6 +655,11 @@ cmd_report() {
     DBTUNE_DATABASES_FILE=$(dbtune_path databases.tsv) || return
     DBTUNE_SAMPLES_FILE=$(dbtune_path samples.tsv) || return
     DBTUNE_ANALYSIS_FILE=$(dbtune_path analysis.tsv) || return
+    dbtune_provenance_validate_analysis || return
+    analysis_manifest=$(dbtune_analysis_manifest_file) || return
+    DBTUNE_RUN_ID=$(dbtune_manifest_value "$analysis_manifest" run_id) || return 65
+    DBTUNE_AUDIT_HASH=$(dbtune_manifest_value "$analysis_manifest" audit_hash) || return 65
+    DBTUNE_SAMPLES_HASH=$(dbtune_manifest_value "$analysis_manifest" samples_hash) || return 65
     for report_file in "$DBTUNE_AUDIT_FILE" "$DBTUNE_SAMPLES_FILE" "$DBTUNE_ANALYSIS_FILE"; do
         if [[ ! -r $report_file ]]; then
             dbtune_log error "Chyba povinny vstup: $report_file"
@@ -669,8 +681,8 @@ cmd_report() {
 }
 
 cmd_propose() {
-    local analysis_file proposal_file generated_at proposal state manifest_file
-    local audit_file samples_file audit_hash samples_hash analysis_hash proposal_hash
+    local analysis_file proposal_file generated_at proposal state manifest_file analysis_manifest
+    local temporary temporary_manifest run_id audit_hash samples_hash analysis_hash proposal_hash
 
     dbtune_report_no_arguments propose "$@" || return
     state=$(dbtune_state_read) || return
@@ -679,6 +691,7 @@ cmd_propose() {
         return 65
     fi
     dbtune_init_state_dir || return
+    dbtune_provenance_validate_analysis || return
     analysis_file=$(dbtune_path analysis.tsv) || return
     if [[ ! -r $analysis_file ]]; then
         dbtune_log error "Chyba povinny vstup: $analysis_file"
@@ -688,32 +701,44 @@ cmd_propose() {
     generated_at=$(dbtune_now)
     proposal=$(dbtune_render_proposal "$generated_at") || return
     proposal_file=$(dbtune_proposal_file) || return
-    printf '%s\n' "$proposal" | dbtune_atomic_write "$proposal_file" 600 || return
-    audit_file=$(dbtune_path audit.tsv) || return
-    samples_file=$(dbtune_path samples.tsv) || return
-    for manifest_file in "$audit_file" "$samples_file" "$analysis_file" "$proposal_file"; do
-        if [[ ! -r $manifest_file ]]; then
-            dbtune_log error "Proposal manifest nemoze overit vstup: $manifest_file"
-            rm -f "$proposal_file"
-            return 66
-        fi
-    done
-    audit_hash=$(dbtune_sha256_file "$audit_file") || return
-    samples_hash=$(dbtune_sha256_file "$samples_file") || return
-    analysis_hash=$(dbtune_sha256_file "$analysis_file") || return
-    proposal_hash=$(dbtune_sha256_file "$proposal_file") || return
-    manifest_file=$(dbtune_path proposal-manifest.tsv) || return
-    {
-        printf 'audit.tsv\t%s\n' "$audit_hash"
-        printf 'samples.tsv\t%s\n' "$samples_hash"
-        printf 'analysis.tsv\t%s\n' "$analysis_hash"
-        printf 'proposed-99-zz-tuning.cnf\t%s\n' "$proposal_hash"
-    } | dbtune_atomic_write "$manifest_file" 600 || {
-        rm -f "$proposal_file"
+    temporary=$(mktemp "$DBTUNE_STATE_DIR/.proposal.tmp.XXXXXX") || return 1
+    temporary_manifest=$(mktemp "$DBTUNE_STATE_DIR/.proposal-manifest.tmp.XXXXXX") || {
+        rm -f "$temporary"
         return 1
     }
+    printf '%s\n' "$proposal" >"$temporary" || {
+        rm -f "$temporary" "$temporary_manifest"
+        return 1
+    }
+    chmod 600 "$temporary" "$temporary_manifest" || {
+        rm -f "$temporary" "$temporary_manifest"
+        return 1
+    }
+    analysis_manifest=$(dbtune_analysis_manifest_file) || return
+    run_id=$(dbtune_manifest_value "$analysis_manifest" run_id) || return 65
+    audit_hash=$(dbtune_manifest_value "$analysis_manifest" audit_hash) || return 65
+    samples_hash=$(dbtune_manifest_value "$analysis_manifest" samples_hash) || return 65
+    analysis_hash=$(dbtune_manifest_value "$analysis_manifest" analysis_hash) || return 65
+    proposal_hash=$(dbtune_sha256_file "$temporary") || return
+    manifest_file=$(dbtune_path proposal-manifest.tsv) || return
+    {
+        printf 'schema\t1\n'
+        printf 'run_id\t%s\n' "$run_id"
+        printf 'audit_hash\t%s\n' "$audit_hash"
+        printf 'samples_hash\t%s\n' "$samples_hash"
+        printf 'analysis_hash\t%s\n' "$analysis_hash"
+        printf 'proposal_hash\t%s\n' "$proposal_hash"
+    } >"$temporary_manifest"
+    if ! dbtune_atomic_write "$proposal_file" 600 <"$temporary" ||
+        ! dbtune_atomic_write "$manifest_file" 600 <"$temporary_manifest"; then
+        rm -f "$temporary" "$temporary_manifest" "$proposal_file" "$manifest_file"
+        return 1
+    fi
+    rm -f "$temporary" "$temporary_manifest"
     if [[ $state == analyzed ]]; then
         dbtune_state_transition proposed || return
     fi
+    dbtune_event proposal_completed run_id "$run_id" audit_hash "$audit_hash" \
+        samples_hash "$samples_hash" analysis_hash "$analysis_hash" proposal_hash "$proposal_hash" || true
     printf 'Návrh uložený: %s\n' "$proposal_file"
 }

@@ -51,12 +51,17 @@ dbtune status | version
 dbtune _tick
 ```
 
-Dispatcher vola funkcie `cmd_audit`, `cmd_collect`, `cmd_analyze`, `cmd_report`, `cmd_propose`, `cmd_apply`, `cmd_verify`, `cmd_rollback`, `cmd_status` a `cmd_tick`, ktore dodaju dalsie moduly. `audit`, `status` a `version` su povolene kedykolvek. Bezny `apply` vyzaduje stav `proposed`, minimalny pocet validnych vzoriek a SHA-256 manifest viazuci proposal na aktualny audit, samples a analysis. Interaktivny `--force` moze pouzit rucne pripraveny proposal v stave `audited`, `analyzed` alebo `proposed`, ale neobchadza live validaciu, Galera ani backup guardy.
+Dispatcher vola funkcie `cmd_audit`, `cmd_collect`, `cmd_analyze`, `cmd_report`, `cmd_propose`, `cmd_apply`, `cmd_verify`, `cmd_rollback`, `cmd_status` a `cmd_tick`, ktore dodaju dalsie moduly. `status` a `version` su povolene kedykolvek; novy audit nie je povoleny pocas aktivneho collectu. Bezny `apply` vyzaduje stav `proposed`, minimalny pocet validnych vzoriek a SHA-256 manifest viazuci proposal na aktualny audit, samples a analysis. Interaktivny `--force` moze pouzit rucne pripraveny proposal v stave `audited`, `analyzed` alebo `proposed`, ale neobchadza live validaciu, Galera ani backup guardy.
+
+Kazdy uspesny `audit` je stale read-only voci MariaDB a systemovej konfiguracii, ale zacina novy immutable meraci cyklus. Dostane jedinecny `run_id`; `audit_hash` pokryva `audit.tsv`, `apps.tsv` aj `databases.tsv`. Predchadzajuci cyklus sa skopiruje do `$DBTUNE_STATE_DIR/runs/<run_id>/`, jeho collect/analysis/report/proposal subory sa z aktivneho priestoru odstrania a stav sa nastavi na `audited`. `apply/` a `apply/current` sa nearchivuju ani nemazu, preto zostava dostupny rollback predchadzajuceho apply. Explicitny `audit --new-run` nie je potrebny.
+
+`analysis-manifest.tsv` nesie povodny `run_id`, `audit_hash`, presny `samples_hash` a `analysis_hash`. Report tieto hodnoty publikuje, proposal manifest ich prebera a doplna `proposal_hash`; apply history ich zaznamena spolu s hashom skutocne nasadeneho snapshotu. Ak sa ktorykolvek vstup zmeni alebo zmiesa s inym runom, `report`, `propose` a bezny `apply` ho odmietnu.
 
 ## Spolocne kontrakty
 
 - Cesty sa odvodzuju od `DBTUNE_STATE_DIR` (default `/var/lib/dbtune`) cez `dbtune_state_file`, `dbtune_events_file`, `dbtune_auth_method_file` a `dbtune_path`. Adresar ma mode `700`.
-- `dbtune_state_read`, `dbtune_state_write`, `dbtune_state_transition`, `dbtune_state_guard` a `dbtune_require_state` implementuju lifecycle `idle -> audited -> collecting -> collected -> analyzed -> proposed -> applied -> verified`, vratane `rolled_back`. Po uspesnom audite modul vola `dbtune_state_record_audit`, ktory pokrocily stav nikdy neznizi.
+- `dbtune_state_read`, `dbtune_state_write`, `dbtune_state_transition`, `dbtune_state_guard` a `dbtune_require_state` implementuju lifecycle `idle -> audited -> collecting -> collected -> analyzed -> proposed -> applied -> verified`, vratane `rolled_back`. Novy audit zacina novy cyklus v stave `audited`; existujuca apply recovery historia ostava dostupna.
+- Audit, collect start/stop, analyze, report, propose, apply, verify a rollback su cez dispatcher serializovane spolocnym exkluzivnym `flock`. Bezny prikaz na lock caka; timerovy `_tick` cakanie nerobi a pri contention bezpecne preskoci tick. Collector si ponechava vlastny interny lock, ktory dispatcher nenahradza.
 - `dbtune_atomic_write CESTA [MODE]` cita obsah zo stdin a publikuje ho cez docasny subor v rovnakom adresari.
 - `dbtune_is_uint HODNOTA` a `dbtune_require_uint NAZOV HODNOTA [MIN] [MAX]` validuju integer argumenty bez implicitnych Bash konverzii.
 - `dbtune_json_escape TEXT` a `dbtune_json_emit KLUC HODNOTA ...` su jediny podporovany sposob tvorby flat JSON. Vsetky emitovane hodnoty su JSON stringy.

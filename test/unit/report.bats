@@ -41,6 +41,13 @@ timestamp	uptime	bp_hit_pct	bp_misses_s	data_read_s	rnd_next_s	tmp_disk_pct	thre
 2026-07-01T10:05:00Z	1300	80	200	4096000	9000	40	12	20	10	1	0	75	9000000	64	4.2	0
 2026-07-01T10:10:00Z	1600	95	40	2048000	3000	25	7	12	22	0	0	30	10000000	64	2.1	0
 EOF
+    dbtune_provenance_write_audit_manifest "$DBTUNE_STATE_DIR/audit-manifest.tsv" \
+        report-run "$DBTUNE_STATE_DIR/audit.tsv" "$DBTUNE_STATE_DIR/apps.tsv" "$DBTUNE_STATE_DIR/databases.tsv"
+}
+
+write_analysis_manifest() {
+    dbtune_provenance_write_analysis_manifest "$DBTUNE_STATE_DIR/analysis-manifest.tsv" \
+        "$DBTUNE_STATE_DIR/analysis.tsv" "$DBTUNE_STATE_DIR/samples.tsv"
 }
 
 write_analysis() {
@@ -53,6 +60,7 @@ R-SEC	server	high	MariaDB počúva verejne			bind-address=0.0.0.0	Obmedzte bind-
 R-APP-SQL	app:shop-a	high	Nikdy do CNF	query_cache_type	DROP TABLE wp_posts	app SQL	Iba aplikačné odporúčanie.
 R-DUP	server	low	Duplicitný návrh	max-connections	300	duplicitný kľúč	Musí sa preskočiť.
 EOF
+    write_analysis_manifest
 }
 
 @test "report is valid escaped flat JSON and keeps app section first" {
@@ -70,6 +78,8 @@ EOF
     grep -F 'dataset 4 GB; burst 80 %' "$DBTUNE_STATE_DIR/report.md"
     grep -F 'Zapnite Redis object cache \"hneď\".' "$DBTUNE_STATE_DIR/report.json"
     grep -F '"schema_version":"fleet-v2"' "$DBTUNE_STATE_DIR/report.json"
+    grep -F '"run_id":"report-run"' "$DBTUNE_STATE_DIR/report.json"
+    grep -F '_Run: `report-run`' "$DBTUNE_STATE_DIR/report.md"
     grep -F '"apps.count":"1"' "$DBTUNE_STATE_DIR/report.json"
     grep -F '"databases.count":"1"' "$DBTUNE_STATE_DIR/report.json"
     grep -F '"metrics.cpu_pct.p95":"75.00"' "$DBTUNE_STATE_DIR/report.json"
@@ -83,6 +93,9 @@ EOF
     write_analysis
     printf 'password\tdont-print-me\n' >>"$DBTUNE_STATE_DIR/audit.tsv"
     printf 'R-ESC\tapp:shop-a\tmedium\tPipe | tick ` and slash \\\t\t\tevidence | cell\tpassword=secret\n' >>"$DBTUNE_STATE_DIR/analysis.tsv"
+    dbtune_provenance_write_audit_manifest "$DBTUNE_STATE_DIR/audit-manifest.tsv" \
+        report-run "$DBTUNE_STATE_DIR/audit.tsv" "$DBTUNE_STATE_DIR/apps.tsv" "$DBTUNE_STATE_DIR/databases.tsv"
+    write_analysis_manifest
 
     cmd_report >/dev/null
     expected="Pipe \\| tick \\\` and slash \\\\"
@@ -104,6 +117,7 @@ EOF
     run cmd_propose
     [ "$status" -eq 0 ]
     [ "$(dbtune_state_read)" = proposed ]
+    [ "$(dbtune_manifest_value "$DBTUNE_STATE_DIR/proposal-manifest.tsv" run_id)" = report-run ]
     proposal="$DBTUNE_STATE_DIR/proposed-99-zz-tuning.cnf"
     grep -Fx '[mysqld]' "$proposal"
     grep -F 'innodb_buffer_pool_size = 4G' "$proposal"
@@ -125,4 +139,17 @@ EOF
     [ "$(dbtune_state_read)" = proposed ]
     second_keys=$(awk -F= '/^[[:space:]]*[A-Za-z][A-Za-z0-9_-]*[[:space:]]*=/{gsub(/[[:space:]]/,"",$1); print $1"="$2}' "$DBTUNE_STATE_DIR/proposed-99-zz-tuning.cnf")
     [ "$first_keys" = "$second_keys" ]
+}
+
+@test "report and propose reject analysis after an audit input changes" {
+    write_analysis
+    dbtune_state_write analyzed
+    printf 'hw.ram_bytes\t34359738368\n' >>"$DBTUNE_STATE_DIR/audit.tsv"
+
+    run cmd_report
+    [ "$status" -eq 65 ]
+    [ ! -e "$DBTUNE_STATE_DIR/report.md" ]
+    run cmd_propose
+    [ "$status" -eq 65 ]
+    [ ! -e "$DBTUNE_STATE_DIR/proposed-99-zz-tuning.cnf" ]
 }

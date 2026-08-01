@@ -957,7 +957,8 @@ dbtune_audit_summary() {
 }
 
 cmd_audit() {
-    local json=0 argument scratch audit apps databases version
+    local json=0 argument scratch audit apps databases manifest version
+    local run_id old_run_id archive='' current_manifest audit_hash
 
     for argument in "$@"; do
         case $argument in
@@ -977,11 +978,17 @@ cmd_audit() {
     audit="$scratch/audit.tsv"
     apps="$scratch/apps.tsv"
     databases="$scratch/databases.tsv"
+    manifest="$scratch/audit-manifest.tsv"
     : >"$audit"
     : >"$apps"
     : >"$databases"
     chmod 600 "$audit" "$apps" "$databases"
 
+    run_id=$(dbtune_run_id) || {
+        rm -rf "$scratch"
+        return 1
+    }
+    dbtune_audit_put "$audit" audit.run_id "$run_id"
     dbtune_audit_put "$audit" audit.timestamp "$(dbtune_now)"
     dbtune_audit_put "$audit" audit.hostname "$(hostname 2>/dev/null || printf unknown)"
     dbtune_audit_put "$audit" audit.sql_connect_timeout_seconds "${DBTUNE_SQL_CONNECT_TIMEOUT:-5}"
@@ -994,15 +1001,35 @@ cmd_audit() {
     version=$(command awk -F '\t' '$1=="mariadb.version" { print $2; exit }' "$audit")
     dbtune_audit_add_findings "$audit" "${version:-0}"
 
+    dbtune_provenance_write_audit_manifest "$manifest" "$run_id" "$audit" "$apps" "$databases" || {
+        rm -rf "$scratch"
+        dbtune_log error "Audit provenance sa nepodarilo vytvorit"
+        return 1
+    }
+    current_manifest=$(dbtune_audit_manifest_file) || {
+        rm -rf "$scratch"
+        return 1
+    }
+    old_run_id=$(dbtune_manifest_value "$current_manifest" run_id 2>/dev/null || printf 'legacy-%s' "$$")
+    archive=$(dbtune_cycle_archive "$old_run_id") || {
+        rm -rf "$scratch"
+        dbtune_log error "Predchadzajuci meraci cyklus sa nepodarilo archivovat"
+        return 1
+    }
+
     if ! dbtune_atomic_write "$DBTUNE_STATE_DIR/audit.tsv" 600 <"$audit" ||
         ! dbtune_atomic_write "$DBTUNE_STATE_DIR/apps.tsv" 600 <"$apps" ||
-        ! dbtune_atomic_write "$DBTUNE_STATE_DIR/databases.tsv" 600 <"$databases"; then
+        ! dbtune_atomic_write "$DBTUNE_STATE_DIR/databases.tsv" 600 <"$databases" ||
+        ! dbtune_atomic_write "$current_manifest" 600 <"$manifest"; then
         rm -rf "$scratch"
         dbtune_log error "Audit data sa nepodarilo atomicky zapisat"
         return 1
     fi
     rm -rf "$scratch"
-    dbtune_state_record_audit || return
+    dbtune_cycle_invalidate_downstream || return
+    dbtune_state_record_audit "$run_id" "$archive" || return
+    audit_hash=$(dbtune_manifest_value "$current_manifest" audit_hash) || return
+    dbtune_event audit_completed run_id "$run_id" audit_hash "$audit_hash" || true
 
     if ((json)); then
         dbtune_audit_json "$DBTUNE_STATE_DIR/audit.tsv" "$DBTUNE_STATE_DIR/apps.tsv" "$DBTUNE_STATE_DIR/databases.tsv"

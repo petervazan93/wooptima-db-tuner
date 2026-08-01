@@ -88,8 +88,6 @@ integration_lifecycle() {
         rm -rf /var/lib/dbtune
     ' || return 1
     integration_dbtune "$service" audit >/dev/null || return 1
-    integration_compose exec -T "$service" sh -eu -c \
-        "printf 'backup.schedule_count\\t1\\n' >>/var/lib/dbtune/audit.tsv" || return 1
     integration_dbtune "$service" collect start --days 1 >/dev/null || return 1
     for _ in 1 2 3 4 5; do
         integration_dbtune "$service" _tick >/dev/null || return 1

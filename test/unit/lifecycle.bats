@@ -6,6 +6,8 @@ setup() {
     export DBTUNE_LOG_LEVEL=error
     export DBTUNE_MIN_APPLY_SAMPLES=1
     export DBTUNE_SQL_AUTH_METHOD=socket
+    export DBTUNE_FLOCK=fake_flock
+    export DBTUNE_RACE_LOCK_DIR="$BATS_TEST_TMPDIR/lifecycle-held"
     export STUB_TIME=1200
     export STUB_WSREP_ON=OFF
     export STUB_WSREP_ADDRESS=
@@ -23,13 +25,33 @@ setup() {
     source "$BATS_TEST_DIRNAME/../../lib/00-header.sh"
     source "$BATS_TEST_DIRNAME/../../lib/10-util.sh"
     source "$BATS_TEST_DIRNAME/../../lib/60-lifecycle.sh"
+    source "$BATS_TEST_DIRNAME/../../lib/50-report.sh"
+    source "$BATS_TEST_DIRNAME/../../lib/90-main.sh"
     printf 'audit.hostname\ttest\n' >"$DBTUNE_STATE_DIR/audit.tsv"
+    : >"$DBTUNE_STATE_DIR/apps.tsv"
+    : >"$DBTUNE_STATE_DIR/databases.tsv"
     printf 'rule_id\tscope\tseverity\tverdict\tproposed_key\tproposed_value\tevidence\treason_sk\n' >"$DBTUNE_STATE_DIR/analysis.tsv"
     printf 'timestamp\tuptime\tbp_hit_pct\tbp_misses_s\tdata_read_s\trnd_next_s\ttmp_disk_pct\tthreads_running\tthreads_connected\tqcache_hit_pct\tlog_waits_delta\twait_free_delta\tcpu_pct\tmem_available_kb\tswap_used_kb\tload1\trestart_flag\n' >"$DBTUNE_STATE_DIR/samples.tsv"
     printf '2026-07-31T12:00:00Z\t100\t99\t0\t0\t0\t0\t1\t1\t30\t0\t0\t1\t1000\t0\t1\t0\n' >>"$DBTUNE_STATE_DIR/samples.tsv"
+    dbtune_provenance_write_audit_manifest "$DBTUNE_STATE_DIR/audit-manifest.tsv" \
+        lifecycle-run "$DBTUNE_STATE_DIR/audit.tsv" "$DBTUNE_STATE_DIR/apps.tsv" "$DBTUNE_STATE_DIR/databases.tsv"
+    dbtune_provenance_write_analysis_manifest "$DBTUNE_STATE_DIR/analysis-manifest.tsv" \
+        "$DBTUNE_STATE_DIR/analysis.tsv" "$DBTUNE_STATE_DIR/samples.tsv"
     printf 'proposed\n' >"$DBTUNE_STATE_DIR/state"
     write_proposal
     write_manifest
+}
+
+fake_flock() {
+    case $1 in
+        -n) mkdir "$DBTUNE_RACE_LOCK_DIR" 2>/dev/null ;;
+        -x)
+            while ! mkdir "$DBTUNE_RACE_LOCK_DIR" 2>/dev/null; do
+                sleep 0.01
+            done
+            ;;
+        -u) rmdir "$DBTUNE_RACE_LOCK_DIR" 2>/dev/null || true ;;
+    esac
 }
 
 file_mode() {
@@ -41,7 +63,7 @@ file_mode() {
 }
 
 bats::on_failure() {
-    printf '%s\n' "$output" >&3
+    printf '%s\n' "${output:-}" >&3
 }
 
 make_stubs() {
@@ -107,11 +129,17 @@ CNF
 }
 
 write_manifest() {
+    local analysis_manifest="$DBTUNE_STATE_DIR/analysis-manifest.tsv"
+
+    dbtune_provenance_write_analysis_manifest "$analysis_manifest" \
+        "$DBTUNE_STATE_DIR/analysis.tsv" "$DBTUNE_STATE_DIR/samples.tsv"
     {
-        printf 'audit.tsv\t%s\n' "$(dbtune_sha256_file "$DBTUNE_STATE_DIR/audit.tsv")"
-        printf 'samples.tsv\t%s\n' "$(dbtune_sha256_file "$DBTUNE_STATE_DIR/samples.tsv")"
-        printf 'analysis.tsv\t%s\n' "$(dbtune_sha256_file "$DBTUNE_STATE_DIR/analysis.tsv")"
-        printf 'proposed-99-zz-tuning.cnf\t%s\n' "$(dbtune_sha256_file "$DBTUNE_STATE_DIR/proposed-99-zz-tuning.cnf")"
+        printf 'schema\t1\n'
+        printf 'run_id\t%s\n' "$(dbtune_manifest_value "$analysis_manifest" run_id)"
+        printf 'audit_hash\t%s\n' "$(dbtune_manifest_value "$analysis_manifest" audit_hash)"
+        printf 'samples_hash\t%s\n' "$(dbtune_manifest_value "$analysis_manifest" samples_hash)"
+        printf 'analysis_hash\t%s\n' "$(dbtune_manifest_value "$analysis_manifest" analysis_hash)"
+        printf 'proposal_hash\t%s\n' "$(dbtune_sha256_file "$DBTUNE_STATE_DIR/proposed-99-zz-tuning.cnf")"
     } >"$DBTUNE_STATE_DIR/proposal-manifest.tsv"
 }
 
@@ -223,6 +251,10 @@ write_manifest() {
     [ "$status" -eq 0 ]
     [[ "$output" == *"RunCloud"* ]]
     [ "$(file_mode "$DBTUNE_CONFIG_TARGET")" = 644 ]
+    history=$(cat "$DBTUNE_STATE_DIR/apply/current")
+    [ "$(dbtune_lifecycle_manifest_value "$history" run_id)" = lifecycle-run ]
+    [ "$(dbtune_lifecycle_manifest_value "$history" proposal_hash)" = \
+        "$(dbtune_sha256_file "$history/proposed.cnf")" ]
 
     run cmd_verify --post
     [ "$status" -eq 0 ]
@@ -244,4 +276,36 @@ write_manifest() {
     [ "$status" -eq 0 ]
     [[ "$output" == *"state: proposed"* ]]
     [[ "$output" == *"config_present: nie"* ]]
+}
+
+@test "paused apply deploys its verified snapshot and serializes concurrent propose" {
+    local apply_pid propose_pid propose_status=0
+    cp "$DBTUNE_STATE_DIR/proposed-99-zz-tuning.cnf" "$BATS_TEST_TMPDIR/expected.cnf"
+    dbtune_lifecycle_after_manifest_check() {
+        touch "$BATS_TEST_TMPDIR/apply-paused"
+        while [[ ! -e $BATS_TEST_TMPDIR/apply-release ]]; do
+            sleep 0.01
+        done
+    }
+
+    dbtune_dispatch apply >"$BATS_TEST_TMPDIR/apply.out" 2>&1 &
+    apply_pid=$!
+    for _ in {1..200}; do
+        [[ -e $BATS_TEST_TMPDIR/apply-paused ]] && break
+        sleep 0.01
+    done
+    [ -e "$BATS_TEST_TMPDIR/apply-paused" ]
+
+    dbtune_dispatch propose >"$BATS_TEST_TMPDIR/propose.out" 2>&1 &
+    propose_pid=$!
+    sleep 0.1
+    kill -0 "$propose_pid"
+    printf '# external mutable change after manifest check\n' >>"$DBTUNE_STATE_DIR/proposed-99-zz-tuning.cnf"
+    touch "$BATS_TEST_TMPDIR/apply-release"
+    wait "$apply_pid"
+    wait "$propose_pid" || propose_status=$?
+
+    [ "$propose_status" -ne 0 ]
+    cmp "$BATS_TEST_TMPDIR/expected.cnf" "$DBTUNE_CONFIG_TARGET"
+    [ "$(dbtune_state_read)" = applied ]
 }

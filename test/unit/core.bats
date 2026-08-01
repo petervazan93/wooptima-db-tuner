@@ -62,10 +62,15 @@ setup() {
     [ "$status" -eq 0 ]
 }
 
-@test "repeated audit preserves an advanced state" {
+@test "a new audit cycle resets advanced state without deleting apply recovery" {
     dbtune_state_write applied
-    dbtune_state_record_audit
-    [ "$(dbtune_state_read)" = applied ]
+    mkdir -p "$DBTUNE_STATE_DIR/apply/history"
+    printf '%s\n' "$DBTUNE_STATE_DIR/apply/history" >"$DBTUNE_STATE_DIR/apply/current"
+    dbtune_state_record_audit run-2
+    [ "$(dbtune_state_read)" = audited ]
+    [ -r "$DBTUNE_STATE_DIR/apply/current" ]
+    run dbtune_state_guard rollback audited
+    [ "$status" -eq 0 ]
 }
 
 @test "CLI help and version are always available" {

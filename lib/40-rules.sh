@@ -763,7 +763,7 @@ dbtune_rules_emit_server_proposal() {
 # shellcheck disable=SC2120
 cmd_analyze() {
     local min_samples=288
-    local output temporary
+    local output temporary manifest temporary_manifest run_id audit_hash samples_hash
     local audit_file samples_file dbsize_file apps_file databases_file
 
     while [[ $# -gt 0 ]]; do
@@ -793,18 +793,32 @@ cmd_analyze() {
     apps_file=$(dbtune_path apps.tsv) || return
     databases_file=$(dbtune_path databases.tsv) || return
     output=$(dbtune_path analysis.tsv) || return
+    manifest=$(dbtune_analysis_manifest_file) || return
+    dbtune_provenance_validate_audit || return
     temporary=$(mktemp "$DBTUNE_STATE_DIR/.analysis.tmp.XXXXXX") || return 1
+    temporary_manifest=$(mktemp "$DBTUNE_STATE_DIR/.analysis-manifest.tmp.XXXXXX") || {
+        rm -f "$temporary"
+        return 1
+    }
 
     if ! dbtune_rules_analyze "$audit_file" "$samples_file" "$dbsize_file" "$apps_file" "$databases_file" "$min_samples" >"$temporary"; then
-        rm -f "$temporary"
+        rm -f "$temporary" "$temporary_manifest"
         dbtune_log error "Analyza zlyhala; analysis.tsv nebol zmeneny"
         return 65
     fi
-    if ! dbtune_atomic_write "$output" 600 <"$temporary"; then
-        rm -f "$temporary"
+    if ! dbtune_provenance_write_analysis_manifest "$temporary_manifest" "$temporary" "$samples_file" ||
+        ! dbtune_atomic_write "$output" 600 <"$temporary" ||
+        ! dbtune_atomic_write "$manifest" 600 <"$temporary_manifest"; then
+        rm -f "$temporary" "$temporary_manifest"
         return 1
     fi
-    rm -f "$temporary"
+    rm -f "$temporary" "$temporary_manifest"
+    rm -f "$DBTUNE_STATE_DIR/report.md" "$DBTUNE_STATE_DIR/report.json" \
+        "$DBTUNE_STATE_DIR/proposed-99-zz-tuning.cnf" "$DBTUNE_STATE_DIR/proposal-manifest.tsv"
     dbtune_state_transition analyzed || return
-    dbtune_event analysis_completed samples_min "$min_samples" output "$output"
+    run_id=$(dbtune_manifest_value "$manifest" run_id) || return
+    audit_hash=$(dbtune_manifest_value "$manifest" audit_hash) || return
+    samples_hash=$(dbtune_manifest_value "$manifest" samples_hash) || return
+    dbtune_event analysis_completed samples_min "$min_samples" output "$output" \
+        run_id "$run_id" audit_hash "$audit_hash" samples_hash "$samples_hash"
 }

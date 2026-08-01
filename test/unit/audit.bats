@@ -327,11 +327,33 @@ EOF
     [ "$(file_mode "$DBTUNE_STATE_DIR/audit.tsv")" = 600 ]
     [ "$(file_mode "$DBTUNE_STATE_DIR/apps.tsv")" = 600 ]
     [ "$(file_mode "$DBTUNE_STATE_DIR/databases.tsv")" = 600 ]
+    [ "$(file_mode "$DBTUNE_STATE_DIR/audit-manifest.tsv")" = 600 ]
+    [ "$(dbtune_manifest_value "$DBTUNE_STATE_DIR/audit-manifest.tsv" audit_hash)" = \
+        "$(dbtune_provenance_audit_hash \
+            "$(dbtune_sha256_file "$DBTUNE_STATE_DIR/audit.tsv")" \
+            "$(dbtune_sha256_file "$DBTUNE_STATE_DIR/apps.tsv")" \
+            "$(dbtune_sha256_file "$DBTUNE_STATE_DIR/databases.tsv")")" ]
     [ "$(dbtune_state_read)" = audited ]
+
+    old_run=$(dbtune_manifest_value "$DBTUNE_STATE_DIR/audit-manifest.tsv" run_id)
+    printf 'sample\n' >"$DBTUNE_STATE_DIR/samples.tsv"
+    printf 'analysis\n' >"$DBTUNE_STATE_DIR/analysis.tsv"
+    printf 'proposal\n' >"$DBTUNE_STATE_DIR/proposed-99-zz-tuning.cnf"
+    printf 'manifest\n' >"$DBTUNE_STATE_DIR/proposal-manifest.tsv"
+    mkdir -p "$DBTUNE_STATE_DIR/apply/history"
+    printf '%s\n' "$DBTUNE_STATE_DIR/apply/history" >"$DBTUNE_STATE_DIR/apply/current"
+    dbtune_state_write proposed
 
     run cmd_audit
     [ "$status" -eq 0 ]
     [[ "$output" == *'DBTune audit bol dokonceny.'* ]]
     [[ "$output" == *'Kriticke nalezy:'* ]]
     [[ "$output" != *secret* ]]
+    [ "$(dbtune_state_read)" = audited ]
+    [ "$(dbtune_manifest_value "$DBTUNE_STATE_DIR/audit-manifest.tsv" run_id)" != "$old_run" ]
+    [ -s "$DBTUNE_STATE_DIR/runs/$old_run/analysis.tsv" ]
+    [ -s "$DBTUNE_STATE_DIR/runs/$old_run/proposed-99-zz-tuning.cnf" ]
+    [ ! -e "$DBTUNE_STATE_DIR/analysis.tsv" ]
+    [ ! -e "$DBTUNE_STATE_DIR/proposed-99-zz-tuning.cnf" ]
+    [ "$(cat "$DBTUNE_STATE_DIR/apply/current")" = "$DBTUNE_STATE_DIR/apply/history" ]
 }

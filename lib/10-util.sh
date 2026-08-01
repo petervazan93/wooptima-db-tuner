@@ -183,6 +183,241 @@ dbtune_sha256_file() {
     fi
 }
 
+dbtune_sha256_stream() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum | awk '{print $1}'
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 | awk '{print $1}'
+    else
+        dbtune_log error "Chyba sha256sum aj shasum"
+        return 69
+    fi
+}
+
+dbtune_run_id() {
+    local stamp random
+
+    stamp=$(date -u '+%Y%m%dT%H%M%SZ') || return 1
+    printf -v random '%05d%05d' "$RANDOM" "$RANDOM"
+    printf '%s-%s-%s\n' "$stamp" "$$" "$random"
+}
+
+dbtune_manifest_value() {
+    local manifest=${1:-}
+    local key=${2:-}
+
+    [[ -r $manifest && -n $key ]] || return 1
+    awk -F '\t' -v wanted="$key" '$1 == wanted {sub(/^[^\t]*\t/, ""); print; found=1; exit} END {if (!found) exit 1}' "$manifest"
+}
+
+dbtune_audit_manifest_file() {
+    dbtune_path audit-manifest.tsv
+}
+
+dbtune_analysis_manifest_file() {
+    dbtune_path analysis-manifest.tsv
+}
+
+dbtune_provenance_audit_hash() {
+    local audit_hash=${1:-}
+    local apps_hash=${2:-}
+    local databases_hash=${3:-}
+
+    printf 'audit.tsv\t%s\napps.tsv\t%s\ndatabases.tsv\t%s\n' \
+        "$audit_hash" "$apps_hash" "$databases_hash" | dbtune_sha256_stream
+}
+
+dbtune_provenance_write_audit_manifest() {
+    local output=${1:-}
+    local run_id=${2:-}
+    local audit=${3:-}
+    local apps=${4:-}
+    local databases=${5:-}
+    local audit_file_hash apps_hash databases_hash audit_hash
+
+    [[ -n $output && $run_id =~ ^[A-Za-z0-9._-]+$ ]] || return 64
+    audit_file_hash=$(dbtune_sha256_file "$audit") || return
+    apps_hash=$(dbtune_sha256_file "$apps") || return
+    databases_hash=$(dbtune_sha256_file "$databases") || return
+    audit_hash=$(dbtune_provenance_audit_hash "$audit_file_hash" "$apps_hash" "$databases_hash") || return
+    {
+        printf 'schema\t1\n'
+        printf 'run_id\t%s\n' "$run_id"
+        printf 'audit_hash\t%s\n' "$audit_hash"
+        printf 'audit.tsv\t%s\n' "$audit_file_hash"
+        printf 'apps.tsv\t%s\n' "$apps_hash"
+        printf 'databases.tsv\t%s\n' "$databases_hash"
+    } | dbtune_atomic_write "$output" 600
+}
+
+dbtune_provenance_validate_audit() {
+    local manifest audit apps databases run_id expected actual
+    local audit_file_hash apps_hash databases_hash audit_hash
+
+    manifest=$(dbtune_audit_manifest_file) || return
+    audit=$(dbtune_path audit.tsv) || return
+    apps=$(dbtune_path apps.tsv) || return
+    databases=$(dbtune_path databases.tsv) || return
+    [[ -r $manifest ]] || {
+        dbtune_log error "Chyba audit provenance manifest: $manifest"
+        return 66
+    }
+    run_id=$(dbtune_manifest_value "$manifest" run_id) || return 65
+    [[ $run_id =~ ^[A-Za-z0-9._-]+$ ]] || return 65
+    for expected in audit.tsv apps.tsv databases.tsv; do
+        actual=$(dbtune_manifest_value "$manifest" "$expected") || return 65
+        [[ $actual =~ ^[0-9a-f]{64}$ && -r $DBTUNE_STATE_DIR/$expected ]] || return 65
+        if [[ $(dbtune_sha256_file "$DBTUNE_STATE_DIR/$expected") != "$actual" ]]; then
+            dbtune_log error "Audit artefakt $expected nezodpoveda runu $run_id"
+            return 65
+        fi
+    done
+    audit_file_hash=$(dbtune_manifest_value "$manifest" audit.tsv) || return 65
+    apps_hash=$(dbtune_manifest_value "$manifest" apps.tsv) || return 65
+    databases_hash=$(dbtune_manifest_value "$manifest" databases.tsv) || return 65
+    audit_hash=$(dbtune_provenance_audit_hash "$audit_file_hash" "$apps_hash" "$databases_hash") || return
+    expected=$(dbtune_manifest_value "$manifest" audit_hash) || return 65
+    if [[ $expected != "$audit_hash" ]]; then
+        dbtune_log error "Audit hash nezodpoveda artefaktom runu $run_id"
+        return 65
+    fi
+}
+
+dbtune_provenance_write_analysis_manifest() {
+    local output=${1:-}
+    local analysis=${2:-}
+    local samples=${3:-}
+    local audit_manifest run_id audit_hash samples_hash analysis_hash
+
+    audit_manifest=$(dbtune_audit_manifest_file) || return
+    run_id=$(dbtune_manifest_value "$audit_manifest" run_id) || return 65
+    audit_hash=$(dbtune_manifest_value "$audit_manifest" audit_hash) || return 65
+    samples_hash=$(dbtune_sha256_file "$samples") || return
+    analysis_hash=$(dbtune_sha256_file "$analysis") || return
+    {
+        printf 'schema\t1\n'
+        printf 'run_id\t%s\n' "$run_id"
+        printf 'audit_hash\t%s\n' "$audit_hash"
+        printf 'samples_hash\t%s\n' "$samples_hash"
+        printf 'analysis_hash\t%s\n' "$analysis_hash"
+    } | dbtune_atomic_write "$output" 600
+}
+
+dbtune_provenance_validate_analysis() {
+    local audit_manifest analysis_manifest samples analysis
+    local key audit_value analysis_value actual
+
+    dbtune_provenance_validate_audit || return
+    audit_manifest=$(dbtune_audit_manifest_file) || return
+    analysis_manifest=$(dbtune_analysis_manifest_file) || return
+    samples=$(dbtune_path samples.tsv) || return
+    analysis=$(dbtune_path analysis.tsv) || return
+    [[ -r $analysis_manifest && -r $samples && -r $analysis ]] || {
+        dbtune_log error "Chyba analysis provenance alebo jeho vstup"
+        return 66
+    }
+    for key in run_id audit_hash; do
+        audit_value=$(dbtune_manifest_value "$audit_manifest" "$key") || return 65
+        analysis_value=$(dbtune_manifest_value "$analysis_manifest" "$key") || return 65
+        if [[ $analysis_value != "$audit_value" ]]; then
+            dbtune_log error "Analysis patri inemu audit runu ($key)"
+            return 65
+        fi
+    done
+    for key in samples_hash analysis_hash; do
+        analysis_value=$(dbtune_manifest_value "$analysis_manifest" "$key") || return 65
+        [[ $analysis_value =~ ^[0-9a-f]{64}$ ]] || return 65
+        if [[ $key == samples_hash ]]; then
+            actual=$(dbtune_sha256_file "$samples") || return
+        else
+            actual=$(dbtune_sha256_file "$analysis") || return
+        fi
+        if [[ $actual != "$analysis_value" ]]; then
+            dbtune_log error "Stale alebo zmeneny analysis vstup: $key"
+            return 65
+        fi
+    done
+}
+
+dbtune_cycle_archive() {
+    local run_id=${1:-legacy}
+    local root archive name found=0 suffix=0
+    local -a artifacts=(
+        audit.tsv apps.tsv databases.tsv audit-manifest.tsv
+        collect.tsv samples.tsv dbsize.tsv dbsize-date collect-health.tsv collect-last-uptime
+        analysis.tsv analysis-manifest.tsv report.md report.json
+        proposed-99-zz-tuning.cnf proposal-manifest.tsv
+    )
+
+    [[ $run_id =~ ^[A-Za-z0-9._-]+$ ]] || run_id=legacy
+    root="$DBTUNE_STATE_DIR/runs"
+    archive="$root/$run_id"
+    for name in "${artifacts[@]}"; do
+        [[ -e $DBTUNE_STATE_DIR/$name ]] && found=1
+    done
+    ((found)) || return 0
+    install -d -m 700 "$root" || return 1
+    while [[ -e $archive ]]; do
+        suffix=$((suffix + 1))
+        archive="$root/$run_id-$suffix"
+    done
+    install -d -m 700 "$archive" || return 1
+    for name in "${artifacts[@]}"; do
+        [[ ! -e $DBTUNE_STATE_DIR/$name ]] || cp -p "$DBTUNE_STATE_DIR/$name" "$archive/$name" || return 1
+    done
+    printf '%s\n' "$archive"
+}
+
+dbtune_cycle_invalidate_downstream() {
+    rm -f \
+        "$DBTUNE_STATE_DIR/collect.tsv" \
+        "$DBTUNE_STATE_DIR/samples.tsv" \
+        "$DBTUNE_STATE_DIR/dbsize.tsv" \
+        "$DBTUNE_STATE_DIR/dbsize-date" \
+        "$DBTUNE_STATE_DIR/collect-health.tsv" \
+        "$DBTUNE_STATE_DIR/collect-last-uptime" \
+        "$DBTUNE_STATE_DIR/analysis.tsv" \
+        "$DBTUNE_STATE_DIR/analysis-manifest.tsv" \
+        "$DBTUNE_STATE_DIR/report.md" \
+        "$DBTUNE_STATE_DIR/report.json" \
+        "$DBTUNE_STATE_DIR/proposed-99-zz-tuning.cnf" \
+        "$DBTUNE_STATE_DIR/proposal-manifest.tsv"
+}
+
+dbtune_lifecycle_lock_file() {
+    printf '%s/.lifecycle.lock\n' "$DBTUNE_STATE_DIR"
+}
+
+dbtune_with_lifecycle_lock() {
+    local mode=${1:-wait}
+    local operation=${2:-operation}
+    local function_name=${3:-}
+    local lock_fd status=0 flock_command=${DBTUNE_FLOCK:-flock}
+    shift 3 || true
+
+    dbtune_init_state_dir || return 1
+    if ! command -v "$flock_command" >/dev/null 2>&1; then
+        dbtune_log error "Lifecycle lock vyzaduje flock"
+        [[ $mode == skip ]] && return 75
+        return 69
+    fi
+    exec {lock_fd}>"$(dbtune_lifecycle_lock_file)" || return 1
+    if [[ $mode == skip ]]; then
+        if ! "$flock_command" -n "$lock_fd"; then
+            exec {lock_fd}>&-
+            return 75
+        fi
+    elif ! "$flock_command" -x "$lock_fd"; then
+        exec {lock_fd}>&-
+        dbtune_log error "Nepodarilo sa ziskat lifecycle lock pre $operation"
+        return 1
+    fi
+    "$function_name" "$@" || status=$?
+    "$flock_command" -u "$lock_fd" >/dev/null 2>&1 || true
+    exec {lock_fd}>&-
+    return "$status"
+}
+
 dbtune_event() {
     local event_type=${1:-}
     local line lock_file
@@ -275,14 +510,13 @@ dbtune_state_transition() {
 }
 
 dbtune_state_record_audit() {
+    local run_id=${1:-unknown}
+    local archive=${2:-}
     local current
 
     current=$(dbtune_state_read) || return
-    if [[ $current == idle ]]; then
-        dbtune_state_transition audited
-    else
-        dbtune_event audit_completed state "$current"
-    fi
+    dbtune_state_write audited || return
+    dbtune_event audit_cycle_started previous_state "$current" run_id "$run_id" archive "${archive:-none}"
 }
 
 dbtune_state_guard() {
@@ -291,7 +525,8 @@ dbtune_state_guard() {
 
     [[ -n $state ]] || state=$(dbtune_state_read) || return
     case $operation in
-        audit|status|version|help|collect_status) return 0 ;;
+        audit) [[ $state != collecting ]] ;;
+        status|version|help|collect_status) return 0 ;;
         collect_start) [[ $state == audited ]] ;;
         collect_stop|_tick) [[ $state == collecting ]] ;;
         analyze) [[ $state == collected ]] ;;
@@ -299,7 +534,10 @@ dbtune_state_guard() {
         propose) [[ $state == analyzed || $state == proposed ]] ;;
         apply) [[ $state == proposed ]] ;;
         verify) [[ $state == applied || $state == verified ]] ;;
-        rollback) [[ $state == applied || $state == verified ]] ;;
+        rollback)
+            [[ $state == applied || $state == verified ]] ||
+                { [[ $state != collecting && $state != rolled_back ]] && [[ -r $DBTUNE_STATE_DIR/apply/current ]]; }
+            ;;
         *) return 64 ;;
     esac
 }

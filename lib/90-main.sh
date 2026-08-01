@@ -3,7 +3,7 @@ dbtune_usage() {
 Pouzitie: dbtune <prikaz> [volby]
 
 Prikazy:
-  audit [--json]                  Read-only audit (kedykolvek)
+  audit [--json]                  Read-only audit a novy meraci cyklus
   collect start [--days N]       Zber metrik, predvolene 7 dni
   collect status | stop          Stav alebo zastavenie zberu
   analyze [--min-samples N]      Analyza nazbieranych metrik
@@ -43,6 +43,26 @@ dbtune_collect_operation() {
     esac
 }
 
+dbtune_dispatch_guarded() {
+    local operation=${1:-}
+    local function_name=${2:-}
+    shift 2 || true
+
+    dbtune_require_state "$operation" || return
+    dbtune_call_command "$function_name" "$@"
+}
+
+dbtune_dispatch_tick() {
+    if ! dbtune_require_state _tick; then
+        dbtune_event tick_skipped state "$(dbtune_state_read 2>/dev/null || printf unknown)" || true
+        return 0
+    fi
+    if ! dbtune_call_command cmd_tick "$@"; then
+        dbtune_event tick_failed state collecting || true
+    fi
+    return 0
+}
+
 dbtune_dispatch() {
     local command=${1:-}
     local operation
@@ -60,31 +80,39 @@ dbtune_dispatch() {
             dbtune_version
             ;;
         audit)
-            dbtune_require_state audit || return
-            dbtune_call_command cmd_audit "$@"
+            dbtune_with_lifecycle_lock wait audit dbtune_dispatch_guarded audit cmd_audit "$@"
             ;;
         collect)
             operation=$(dbtune_collect_operation "${1:-}") || {
                 dbtune_log error "Pouzitie: dbtune collect start|status|stop"
                 return 64
             }
-            dbtune_require_state "$operation" || return
-            dbtune_call_command cmd_collect "$@"
+            if [[ $operation == collect_status ]]; then
+                dbtune_dispatch_guarded "$operation" cmd_collect "$@"
+            else
+                dbtune_with_lifecycle_lock wait "$operation" dbtune_dispatch_guarded "$operation" cmd_collect "$@"
+            fi
             ;;
         apply)
-            dbtune_call_command cmd_apply "$@"
+            dbtune_with_lifecycle_lock wait apply dbtune_call_command cmd_apply "$@"
             ;;
         analyze|report|propose|verify|rollback|status)
-            dbtune_require_state "$command" || return
-            dbtune_call_command "cmd_$command" "$@"
+            if [[ $command == status ]]; then
+                dbtune_dispatch_guarded "$command" "cmd_$command" "$@"
+            else
+                dbtune_with_lifecycle_lock wait "$command" dbtune_dispatch_guarded "$command" "cmd_$command" "$@"
+            fi
             ;;
         _tick)
-            if ! dbtune_require_state _tick; then
-                dbtune_event tick_skipped state "$(dbtune_state_read 2>/dev/null || printf unknown)" || true
+            if dbtune_with_lifecycle_lock skip _tick dbtune_dispatch_tick "$@"; then
                 return 0
+            else
+                operation=$?
             fi
-            if ! dbtune_call_command cmd_tick "$@"; then
-                dbtune_event tick_failed state collecting || true
+            if ((operation == 75)); then
+                dbtune_event tick_skipped reason lifecycle_locked || true
+            else
+                dbtune_event tick_failed reason lifecycle_lock || true
             fi
             return 0
             ;;
