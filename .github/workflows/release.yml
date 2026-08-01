@@ -1,0 +1,24 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*.*.*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install test tools
+        run: sudo apt-get update && sudo apt-get install -y bats shellcheck
+      - name: Verify, test and build
+        run: make check && make test && make integration && make build
+      - name: Verify tag matches artifact version
+        run: test "v$(dist/dbtune version | awk '{print $2}')" = "$GITHUB_REF_NAME"
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/dbtune dist/dbtune.sha256 install.sh --verify-tag --generate-notes --title "$GITHUB_REF_NAME"

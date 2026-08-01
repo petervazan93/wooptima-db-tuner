@@ -1,0 +1,41 @@
+=== classic ===
+<?php
+define('DB_NAME', 'woo_classic');
+define('DB_PASSWORD', 'classic-secret-must-never-appear');
+$table_prefix = 'wp_';
+define('DISABLE_WP_CRON', true);
+
+=== whitespace-and-double-quotes ===
+<?php
+define ( "DB_NAME" , "woo_custom" );
+define ( "DB_PASSWORD" , "second-secret-must-never-appear" );
+$table_prefix   = "shop_";
+define ( "DISABLE_WP_CRON" , false );
+
+=== const ===
+<?php
+const DB_NAME = 'woo_const';
+const DB_PASSWORD = 'const-secret-must-never-appear';
+const DISABLE_WP_CRON = true;
+$table_prefix = 'network_2_';
+
+=== environment ===
+<?php
+define('DB_NAME', getenv('WORDPRESS_DB_NAME'));
+define('DB_PASSWORD', getenv('WORDPRESS_DB_PASSWORD'));
+$table_prefix = 'env_';
+define('DISABLE_WP_CRON', false);
+
+=== multiline ===
+<?php
+define(
+    'DB_NAME',
+    'woo_multiline'
+);
+define('DB_PASSWORD', 'multiline-secret-must-never-appear');
+$table_prefix =
+    'multi_';
+define(
+    'DISABLE_WP_CRON',
+    true
+);

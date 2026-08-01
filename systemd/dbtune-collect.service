@@ -1,0 +1,7 @@
+[Unit]
+Description=dbtune MariaDB metrics collection tick
+After=mariadb.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/dbtune _tick

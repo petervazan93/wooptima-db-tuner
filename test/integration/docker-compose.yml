@@ -1,0 +1,30 @@
+services:
+  mariadb106:
+    image: mariadb:10.6
+    environment:
+      MARIADB_ALLOW_EMPTY_ROOT_PASSWORD: "1"
+      MARIADB_DATABASE: dbtune
+    healthcheck:
+      test: ["CMD", "mariadb-admin", "ping", "--silent"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    tmpfs:
+      - /tmp
+    volumes:
+      - ../../dist/dbtune:/usr/local/bin/dbtune:ro
+
+  mariadb114:
+    image: mariadb:11.4
+    environment:
+      MARIADB_ALLOW_EMPTY_ROOT_PASSWORD: "1"
+      MARIADB_DATABASE: dbtune
+    healthcheck:
+      test: ["CMD", "mariadb-admin", "ping", "--silent"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    tmpfs:
+      - /tmp
+    volumes:
+      - ../../dist/dbtune:/usr/local/bin/dbtune:ro
