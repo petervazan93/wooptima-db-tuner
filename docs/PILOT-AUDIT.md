@@ -53,6 +53,8 @@ ssh root@SERVER '(cd /root/dbtune-pilot && sha256sum -c dbtune.sha256) && chmod 
 
 GNU `timeout` ukonci cely audit, ak by trval viac ako 15 minut. JSON sa zachyti lokalne; stderr zostane viditelny operatorovi.
 
+Query budget auditu je 5 sekund na connect a 5 sekund `max_statement_time` na kazdy read-only SQL statement. Presne full-table pocty su vypnute; velkosti a pocty velkych tabuliek pouzivaju metadata odhady a selektivne WordPress dotazy zostavaju pod rovnakym statement budgetom. Timeout alebo SQL chyba musi byt v TSV ako `unknown` a `audit_error.*`, nie ako nula. Efektivne hodnoty su zapisane v `audit.sql_connect_timeout_seconds`, `audit.sql_statement_timeout_seconds` a `audit.exact_full_table_counts`.
+
 ```bash
 install -d -m 700 pilot-artifacts
 ssh root@SERVER 'timeout --signal=TERM 15m /root/dbtune-pilot/dbtune audit --json' >pilot-artifacts/audit.json

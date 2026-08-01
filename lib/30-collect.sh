@@ -27,6 +27,10 @@ dbtune_collect_last_uptime_file() {
     printf '%s\n' "${DBTUNE_LAST_UPTIME_FILE:-$DBTUNE_STATE_DIR/collect-last-uptime}"
 }
 
+dbtune_collect_lock_file() {
+    printf '%s\n' "${DBTUNE_COLLECT_LOCK_FILE:-$DBTUNE_STATE_DIR/collect.lock}"
+}
+
 dbtune_collect_value() {
     local key=${1:-}
     local file
@@ -207,7 +211,7 @@ dbtune_collect_start() {
         rm -f "$(dbtune_collect_config_file)"
         return 1
     fi
-    rm -f "$(dbtune_collect_last_uptime_file)"
+    rm -f "$(dbtune_collect_last_uptime_file)" "$(dbtune_collect_health_file)"
     if ! dbtune_state_transition collecting; then
         dbtune_collect_restore_slow_log >/dev/null 2>&1 || true
         rm -f "$(dbtune_collect_config_file)"
@@ -227,7 +231,10 @@ dbtune_collect_start() {
 }
 
 dbtune_collect_status() {
-    local state key value
+    local state key value health_timestamp=unknown health_status=unknown health_detail=''
+    local now sample_epoch='' sample_age=unknown sample_state=missing guard_state=none sample_count=0
+    local stale_seconds=${DBTUNE_STALE_SAMPLE_SECONDS:-900}
+    local identity_file samples_file
 
     (($# == 0)) || { dbtune_collect_usage >&2; return 64; }
     state=$(dbtune_state_read) || return
@@ -238,23 +245,100 @@ dbtune_collect_status() {
             printf '%s\t%s\n' "$key" "$value"
         done
     fi
+    if [[ -r $(dbtune_collect_health_file) ]]; then
+        IFS=$'\t' read -r health_timestamp health_status health_detail _ <"$(dbtune_collect_health_file)" || true
+    fi
+    printf 'health_timestamp\t%s\n' "${health_timestamp:-unknown}"
+    printf 'health_status\t%s\n' "${health_status:-unknown}"
+    printf 'health_detail\t%s\n' "${health_detail:-}"
+
+    identity_file=$(dbtune_collect_last_uptime_file)
+    if [[ -r $identity_file ]]; then
+        IFS=$'\t' read -r _ _ sample_epoch _ _ <"$identity_file" || sample_epoch=''
+    fi
+    samples_file=$(dbtune_collect_samples_file)
+    sample_count=$(dbtune_collect_sample_count 2>/dev/null) || sample_count=0
+    if ! dbtune_is_uint "$sample_epoch" && ((sample_count > 0)); then
+        sample_epoch=$(dbtune_collect_file_epoch "$samples_file" 2>/dev/null) || sample_epoch=''
+    fi
+    now=$(dbtune_collect_epoch 2>/dev/null) || now=''
+    if dbtune_is_uint "$sample_epoch" && dbtune_is_uint "$now"; then
+        if ((now >= sample_epoch)); then
+            sample_age=$((now - sample_epoch))
+        else
+            sample_age=0
+        fi
+        dbtune_is_uint "$stale_seconds" || stale_seconds=900
+        if ((sample_age > stale_seconds)); then
+            sample_state=stale
+        else
+            sample_state=fresh
+        fi
+    fi
+    case $health_status in
+        guard) guard_state=triggered ;;
+        restore_pending) guard_state=restore_pending ;;
+        incomplete) guard_state=deadline_incomplete ;;
+    esac
+    printf 'last_sample_age_seconds\t%s\n' "$sample_age"
+    printf 'sample_state\t%s\n' "$sample_state"
+    printf 'guard_state\t%s\n' "$guard_state"
+}
+
+dbtune_collect_disable_timer() {
+    local systemctl_command=${DBTUNE_SYSTEMCTL:-systemctl}
+    local timer_unit=${DBTUNE_COLLECT_TIMER_UNIT:-dbtune-collect.timer}
+
+    "$systemctl_command" disable --now "$timer_unit"
+}
+
+dbtune_collect_finish_locked() {
+    local result=$1
+    local detail=$2
+    local restore_result=0 transition_result=0 restore_label=ok
+
+    if ! dbtune_collect_restore_slow_log; then
+        dbtune_log error "Nepodarilo sa obnovit povodne runtime slow-log hodnoty"
+        restore_result=1
+    fi
+    if ((restore_result == 0)) && [[ $(dbtune_state_read) == collecting ]]; then
+        dbtune_state_transition collected || transition_result=1
+    fi
+    if ((restore_result != 0)); then
+        restore_label=failed
+        dbtune_collect_health restore_pending "$detail restore=failed" || true
+        dbtune_event collect_restore_pending result "$result" detail "$detail" || true
+    else
+        dbtune_collect_health "$result" "$detail restore=ok" || true
+    fi
+    dbtune_event collect_finished result "$result" detail "$detail" restore "$restore_label" || true
+    ((restore_result == 0 && transition_result == 0))
 }
 
 dbtune_collect_stop() {
-    local systemctl_command timer_unit result=0
+    local result=0 lock_file lock_fd timer_result=ok
 
     (($# == 0)) || { dbtune_collect_usage >&2; return 64; }
     dbtune_require_state collect_stop || return
-    systemctl_command=${DBTUNE_SYSTEMCTL:-systemctl}
-    timer_unit=${DBTUNE_COLLECT_TIMER_UNIT:-dbtune-collect.timer}
-    "$systemctl_command" disable --now "$timer_unit" || result=1
-    if ! dbtune_collect_restore_slow_log; then
-        dbtune_log error "Nepodarilo sa obnovit povodne runtime slow-log hodnoty"
+    if ! dbtune_collect_disable_timer; then
         result=1
+        timer_result=failed
     fi
-    ((result == 0)) || return 1
-    dbtune_state_transition collected || return
+    lock_file=$(dbtune_collect_lock_file)
+    exec {lock_fd}>"$lock_file" || {
+        dbtune_collect_health error stop_lock_open || true
+        return 1
+    }
+    if ! "${DBTUNE_FLOCK:-flock}" -x "$lock_fd"; then
+        dbtune_collect_health error stop_lock || true
+        exec {lock_fd}>&-
+        return 1
+    fi
+    dbtune_collect_finish_locked stopped "reason=manual timer=$timer_result" || result=1
+    "${DBTUNE_FLOCK:-flock}" -u "$lock_fd" >/dev/null 2>&1 || true
+    exec {lock_fd}>&-
     dbtune_event collect_stopped || true
+    ((result == 0)) || return 1
     printf 'Zber zastaveny.\n'
 }
 
@@ -275,8 +359,15 @@ dbtune_collect_health() {
     local status=$1
     local detail=${2:-}
 
-    printf '%s\t%s\t%s\n' "$(dbtune_now)" "$status" "$detail" |
+    printf '%s\t%s\t%s\t%s\n' "$(dbtune_now)" "$status" "$detail" "$(dbtune_collect_epoch)" |
         dbtune_atomic_write "$(dbtune_collect_health_file)" 600
+}
+
+dbtune_collect_file_epoch() {
+    local file=$1
+
+    "${DBTUNE_STAT:-stat}" -c %Y "$file" 2>/dev/null ||
+        "${DBTUNE_STAT:-stat}" -f %m "$file" 2>/dev/null
 }
 
 dbtune_collect_file_bytes() {
@@ -295,6 +386,18 @@ dbtune_collect_available_kb() {
     "${DBTUNE_DF:-df}" -Pk "$path" | awk 'NR > 1 { value=$4 } END { if (value == "") exit 1; print value }'
 }
 
+dbtune_collect_guard_stop() {
+    local reason=$1
+    local detail=${2:-}
+    local timer_result=ok
+
+    dbtune_collect_disable_timer || timer_result=failed
+    dbtune_event collect_guard reason "$reason" detail "$detail" timer "$timer_result" || true
+    dbtune_collect_finish_locked guard "reason=$reason $detail timer=$timer_result" || true
+    dbtune_log warn "Collect watchdog ukoncil zber: $reason"
+    return 1
+}
+
 dbtune_collect_guards() {
     local samples slow_log slow_path free_state free_slow samples_bytes slow_bytes
     local min_free=${DBTUNE_MIN_FREE_KB:-1048576}
@@ -303,13 +406,28 @@ dbtune_collect_guards() {
     local reason=''
 
     samples=$(dbtune_collect_samples_file)
-    slow_log=$(dbtune_collect_value slow_log_file) || return 1
+    slow_log=$(dbtune_collect_value slow_log_file) || {
+        dbtune_collect_guard_stop guard_check_failed step=config
+        return 1
+    }
     slow_path=${slow_log%/*}
     [[ -d $slow_path ]] || slow_path=$DBTUNE_STATE_DIR
-    free_state=$(dbtune_collect_available_kb "$DBTUNE_STATE_DIR") || return 1
-    free_slow=$(dbtune_collect_available_kb "$slow_path") || return 1
-    samples_bytes=$(dbtune_collect_file_bytes "$samples") || return 1
-    slow_bytes=$(dbtune_collect_file_bytes "$slow_log") || return 1
+    free_state=$(dbtune_collect_available_kb "$DBTUNE_STATE_DIR") || {
+        dbtune_collect_guard_stop guard_check_failed step=state_disk
+        return 1
+    }
+    free_slow=$(dbtune_collect_available_kb "$slow_path") || {
+        dbtune_collect_guard_stop guard_check_failed step=slow_log_disk
+        return 1
+    }
+    samples_bytes=$(dbtune_collect_file_bytes "$samples") || {
+        dbtune_collect_guard_stop guard_check_failed step=samples_size
+        return 1
+    }
+    slow_bytes=$(dbtune_collect_file_bytes "$slow_log") || {
+        dbtune_collect_guard_stop guard_check_failed step=slow_log_size
+        return 1
+    }
 
     if awk -v a="$free_state" -v b="$free_slow" -v limit="$min_free" 'BEGIN { exit !(a < limit || b < limit) }'; then
         reason=low_disk
@@ -320,11 +438,7 @@ dbtune_collect_guards() {
     fi
     [[ -z $reason ]] && return 0
 
-    dbtune_sql 'SET GLOBAL slow_query_log=OFF;' >/dev/null 2>&1 || true
-    dbtune_event collect_guard reason "$reason" samples_bytes "$samples_bytes" slow_log_bytes "$slow_bytes" || true
-    dbtune_collect_health guard "$reason" || true
-    dbtune_log warn "Collect watchdog zastavil slow log: $reason"
-    return 1
+    dbtune_collect_guard_stop "$reason" "samples_bytes=$samples_bytes slow_log_bytes=$slow_bytes"
 }
 
 dbtune_collect_status_snapshot() {
@@ -353,16 +467,94 @@ dbtune_collect_status_snapshot() {
 }
 
 dbtune_collect_cpu_snapshot() {
-    local pid stat_file ticks
+    local pid stat_file values
 
     pid=$("${DBTUNE_PGREP:-pgrep}" -xo mariadbd 2>/dev/null) || {
-        printf '0\t0\n'
+        printf '0\t0\t0\n'
         return 0
     }
     stat_file="${DBTUNE_PROC_ROOT:-/proc}/$pid/stat"
-    [[ -r $stat_file ]] || { printf '0\t0\n'; return 0; }
-    ticks=$(awk '{ print $14 + $15 }' "$stat_file") || return
-    printf '%s\t%s\n' "$pid" "$ticks"
+    [[ -r $stat_file ]] || { printf '0\t0\t0\n'; return 0; }
+    values=$(awk '{ print $14 + $15 "\t" $22 }' "$stat_file") || return
+    printf '%s\t%s\n' "$pid" "$values"
+}
+
+dbtune_collect_monotonic() {
+    local value
+
+    if [[ -n ${DBTUNE_MONOTONIC:-} ]]; then
+        printf '%s\n' "$DBTUNE_MONOTONIC"
+        return 0
+    fi
+    read -r value _ <"${DBTUNE_PROC_ROOT:-/proc}/uptime" || return
+    printf '%s\n' "$value"
+}
+
+dbtune_collect_restart_detected() {
+    local previous_uptime=$1 previous_monotonic=$2 previous_epoch=$3
+    local previous_pid=$4 previous_start=$5 uptime_first=$6 uptime_second=$7
+    local monotonic_now=$8 now=$9 cpu_first=${10} cpu_second=${11}
+    local current_pid current_start second_pid second_start elapsed='' skew
+
+    IFS=$'\t' read -r current_pid _ current_start <<<"$cpu_first"
+    IFS=$'\t' read -r second_pid _ second_start <<<"$cpu_second"
+    if [[ $previous_pid =~ ^[1-9][0-9]*$ && $previous_start =~ ^[1-9][0-9]*$ &&
+        $current_pid =~ ^[1-9][0-9]*$ && $current_start =~ ^[1-9][0-9]*$ ]] &&
+        [[ $previous_pid != "$current_pid" || $previous_start != "$current_start" ]]; then
+        return 0
+    fi
+    if [[ $current_pid =~ ^[1-9][0-9]*$ && $current_start =~ ^[1-9][0-9]*$ &&
+        $second_pid =~ ^[1-9][0-9]*$ && $second_start =~ ^[1-9][0-9]*$ ]] &&
+        [[ $current_pid != "$second_pid" || $current_start != "$second_start" ]]; then
+        return 0
+    fi
+    if awk -v first="$uptime_first" -v second="$uptime_second" 'BEGIN { exit !(second <= first) }'; then
+        return 0
+    fi
+    if [[ $previous_uptime =~ ^[0-9]+([.][0-9]+)?$ ]] &&
+        awk -v previous="$previous_uptime" -v current="$uptime_first" 'BEGIN { exit !(current < previous) }'; then
+        return 0
+    fi
+
+    if [[ $previous_uptime =~ ^[0-9]+([.][0-9]+)?$ && $previous_monotonic =~ ^[0-9]+([.][0-9]+)?$ &&
+        $monotonic_now =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+        elapsed=$(awk -v current="$monotonic_now" -v previous="$previous_monotonic" 'BEGIN { if (current >= previous) print current-previous }')
+    elif [[ $previous_uptime =~ ^[0-9]+([.][0-9]+)?$ ]] && dbtune_is_uint "$previous_epoch" && dbtune_is_uint "$now" &&
+        ((now >= previous_epoch)); then
+        elapsed=$((now - previous_epoch))
+    fi
+    skew=${DBTUNE_RESTART_SKEW_SECONDS:-5}
+    [[ $skew =~ ^[0-9]+([.][0-9]+)?$ ]] || skew=5
+    if [[ -n $elapsed ]] && awk -v previous="$previous_uptime" -v current="$uptime_first" \
+        -v elapsed="$elapsed" -v skew="$skew" 'BEGIN { exit !(current + skew < previous + elapsed) }'; then
+        return 0
+    fi
+    return 1
+}
+
+dbtune_collect_ensure_slow_log() {
+    local trigger=$1 slow_log long_query_time runtime runtime_enabled runtime_file runtime_long
+    local needs_heal=0 verification=ok
+
+    slow_log=$(dbtune_collect_value slow_log_file) || return 1
+    long_query_time=$(dbtune_collect_value long_query_time) || return 1
+    if runtime=$(dbtune_sql 'SELECT @@GLOBAL.slow_query_log, @@GLOBAL.slow_query_log_file, @@GLOBAL.long_query_time;'); then
+        IFS=$'\t' read -r runtime_enabled runtime_file runtime_long <<<"$runtime"
+        [[ $runtime_enabled == 1 && $runtime_file == "$slow_log" ]] || needs_heal=1
+        if ! awk -v actual="$runtime_long" -v wanted="$long_query_time" 'BEGIN { exit !(actual == wanted) }'; then
+            needs_heal=1
+        fi
+    else
+        needs_heal=1
+        verification=failed
+    fi
+    if ((needs_heal == 0)); then
+        printf 'ok\n'
+        return 0
+    fi
+    dbtune_collect_set_slow_log "$slow_log" "$long_query_time" || return 1
+    dbtune_event collect_slow_log_self_healed trigger "$trigger" verification "$verification" || true
+    printf 'healed\n'
 }
 
 dbtune_collect_memory_snapshot() {
@@ -451,7 +643,10 @@ dbtune_collect_daily_dbsize() {
 }
 
 dbtune_collect_finalize() {
-    if ! dbtune_collect_stop; then
+    local samples=$1 timer_result=ok
+
+    dbtune_collect_disable_timer || timer_result=failed
+    if ! dbtune_collect_finish_locked complete "reason=deadline samples=$samples timer=$timer_result"; then
         dbtune_log error "Automaticke zastavenie collect zlyhalo"
         dbtune_event collect_finalize_failed step stop || true
         return 0
@@ -474,10 +669,20 @@ dbtune_collect_finalize() {
 
 dbtune_collect_tick_body() {
     local now deadline sample_seconds first second cpu_first cpu_second memory load1
-    local uptime_first uptime_second restart_flag=0 clock_ticks line slow_log long_query_time
-    local previous_uptime='' last_uptime_file sample_count min_auto_samples
+    local uptime_first uptime_second restart_flag=0 clock_ticks line
+    local previous_uptime='' previous_monotonic='' previous_epoch='' previous_pid='' previous_start=''
+    local current_pid current_start monotonic_first='' monotonic_second='' sample_epoch
+    local last_uptime_file sample_count min_auto_samples slow_log_result=failed restart_trigger=periodic timer_result
+    local health_status=''
 
     [[ $(dbtune_state_read) == collecting ]] || return 0
+    if [[ -r $(dbtune_collect_health_file) ]]; then
+        IFS=$'\t' read -r _ health_status _ _ <"$(dbtune_collect_health_file)" || health_status=''
+    fi
+    if [[ $health_status == restore_pending ]]; then
+        dbtune_event tick_skipped reason restore_pending || true
+        return 0
+    fi
     now=$(dbtune_collect_epoch) || { dbtune_collect_health error epoch; return 0; }
     deadline=$(dbtune_collect_value deadline_epoch) || { dbtune_collect_health error config; return 0; }
     if awk -v now="$now" -v deadline="$deadline" 'BEGIN { exit !(now >= deadline) }'; then
@@ -485,10 +690,14 @@ dbtune_collect_tick_body() {
         min_auto_samples=${DBTUNE_MIN_AUTO_SAMPLES:-288}
         dbtune_is_uint "$min_auto_samples" || min_auto_samples=288
         if ((sample_count >= min_auto_samples)); then
-            dbtune_collect_finalize
+            dbtune_collect_finalize "$sample_count"
             return 0
         fi
-        dbtune_event collect_deadline_extended samples "$sample_count" minimum "$min_auto_samples" || true
+        timer_result=ok
+        dbtune_collect_disable_timer || timer_result=failed
+        dbtune_collect_finish_locked incomplete "reason=deadline samples=$sample_count minimum=$min_auto_samples timer=$timer_result" || true
+        dbtune_event collect_deadline_incomplete samples "$sample_count" minimum "$min_auto_samples" || true
+        return 0
     fi
     dbtune_collect_guards || return 0
     sample_seconds=${DBTUNE_SAMPLE_SECONDS:-60}
@@ -499,28 +708,31 @@ dbtune_collect_tick_body() {
 
     first=$(dbtune_collect_status_snapshot) || { dbtune_collect_health error sql_first; return 0; }
     cpu_first=$(dbtune_collect_cpu_snapshot) || { dbtune_collect_health error cpu_first; return 0; }
+    monotonic_first=$(dbtune_collect_monotonic 2>/dev/null) || monotonic_first=''
     last_uptime_file=$(dbtune_collect_last_uptime_file)
     if [[ -r $last_uptime_file ]]; then
-        IFS= read -r previous_uptime <"$last_uptime_file" || previous_uptime=''
+        IFS=$'\t' read -r previous_uptime previous_monotonic previous_epoch previous_pid previous_start <"$last_uptime_file" || previous_uptime=''
     fi
     "${DBTUNE_SLEEP:-sleep}" "$sample_seconds" || { dbtune_collect_health error sleep; return 0; }
     second=$(dbtune_collect_status_snapshot) || { dbtune_collect_health error sql_second; return 0; }
     cpu_second=$(dbtune_collect_cpu_snapshot) || { dbtune_collect_health error cpu_second; return 0; }
+    monotonic_second=$(dbtune_collect_monotonic 2>/dev/null) || monotonic_second=$monotonic_first
     memory=$(dbtune_collect_memory_snapshot) || { dbtune_collect_health error memory; return 0; }
     load1=$(dbtune_collect_load1) || { dbtune_collect_health error loadavg; return 0; }
 
     IFS=$'\t' read -r uptime_first _ <<<"$first"
     IFS=$'\t' read -r uptime_second _ <<<"$second"
-    if awk -v previous="$previous_uptime" -v first="$uptime_first" -v second="$uptime_second" \
-        'BEGIN { exit !((previous != "" && first < previous) || second <= first) }'; then
+    if dbtune_collect_restart_detected "$previous_uptime" "$previous_monotonic" "$previous_epoch" \
+        "$previous_pid" "$previous_start" "$uptime_first" "$uptime_second" "$monotonic_first" \
+        "$now" "$cpu_first" "$cpu_second"; then
         restart_flag=1
-        slow_log=$(dbtune_collect_value slow_log_file) || slow_log=${DBTUNE_SLOW_LOG:-/var/log/mysql/slow.log}
-        long_query_time=$(dbtune_collect_value long_query_time) || long_query_time=2
-        if dbtune_collect_set_slow_log "$slow_log" "$long_query_time"; then
-            dbtune_event db_restart_detected previous_uptime "$uptime_first" uptime "$uptime_second" || true
-        else
-            dbtune_event db_restart_detected previous_uptime "$uptime_first" uptime "$uptime_second" slow_log_reenable failed || true
-        fi
+        restart_trigger=restart
+        dbtune_event db_restart_detected previous_uptime "${previous_uptime:-unknown}" uptime "$uptime_second" \
+            previous_pid "${previous_pid:-unknown}" current_pid "${cpu_second%%$'\t'*}" || true
+    fi
+    if ! slow_log_result=$(dbtune_collect_ensure_slow_log "$restart_trigger"); then
+        slow_log_result=failed
+        dbtune_event collect_slow_log_self_heal_failed trigger "$restart_trigger" || true
     fi
     clock_ticks=${DBTUNE_CLK_TCK:-$("${DBTUNE_GETCONF:-getconf}" CLK_TCK 2>/dev/null || printf '100')}
     line=$(dbtune_collect_delta "$(dbtune_now)" "$first" "$second" "$sample_seconds" \
@@ -529,12 +741,19 @@ dbtune_collect_tick_body() {
         return 0
     }
     dbtune_collect_append_sample "$line" || { dbtune_collect_health error append; return 0; }
-    printf '%s\n' "$uptime_second" | dbtune_atomic_write "$last_uptime_file" 600 || {
+    sample_epoch=$(dbtune_collect_epoch) || sample_epoch=$now
+    IFS=$'\t' read -r current_pid _ current_start <<<"$cpu_second"
+    printf '%s\t%s\t%s\t%s\t%s\n' "$uptime_second" "$monotonic_second" "$sample_epoch" \
+        "${current_pid:-0}" "${current_start:-0}" | dbtune_atomic_write "$last_uptime_file" 600 || {
         dbtune_collect_health error uptime_write
         return 0
     }
     dbtune_collect_daily_dbsize || dbtune_event dbsize_snapshot_failed || true
-    dbtune_collect_health ok "restart_flag=$restart_flag" || true
+    if [[ $slow_log_result == failed ]]; then
+        dbtune_collect_health error "restart_flag=$restart_flag slow_log=failed" || true
+    else
+        dbtune_collect_health ok "restart_flag=$restart_flag slow_log=$slow_log_result" || true
+    fi
     return 0
 }
 
@@ -545,7 +764,7 @@ cmd_tick() {
         dbtune_log warn "_tick ignoruje argumenty"
     fi
     dbtune_init_state_dir || return 0
-    lock_file=${DBTUNE_COLLECT_LOCK_FILE:-$DBTUNE_STATE_DIR/collect.lock}
+    lock_file=$(dbtune_collect_lock_file)
     exec {lock_fd}>"$lock_file" || { dbtune_collect_health error lock_open || true; return 0; }
     if ! "${DBTUNE_FLOCK:-flock}" -n "$lock_fd"; then
         dbtune_event tick_skipped reason locked || true

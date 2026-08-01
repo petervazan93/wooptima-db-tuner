@@ -248,13 +248,13 @@ app.0	object_cache_dropin	0
 app.0	disable_wp_cron	true
 EOF
     cat >"$BATS_TEST_TMPDIR/databases.tsv" <<'EOF'
-shop_db	autoload_bytes	4194304
-shop_db	legacy_order_count	90000
-shop_db	hpos.woocommerce_custom_orders_table_enabled	no
-shop_db	woocommerce_sessions_count	600000
-shop_db	action_scheduler.failed	12
-shop_db	log_table.0	email_log:1000:26214400:25.0
-shop_db	rogue_meta_value_index	idx_meta_value
+app.0	autoload_bytes	4194304
+app.0	legacy_order_count	90000
+app.0	hpos.woocommerce_custom_orders_table_enabled	no
+app.0	woocommerce_sessions_count	600000
+app.0	action_scheduler.failed	12
+app.0	log_table.0	email_log:1000:26214400:25.0
+app.0	rogue_meta_value_index	idx_meta_value
 EOF
 
     dbtune_rules_analyze "$BATS_TEST_TMPDIR/audit.tsv" "$BATS_TEST_TMPDIR/samples.tsv" "" "$BATS_TEST_TMPDIR/apps.tsv" "$BATS_TEST_TMPDIR/databases.tsv" 10 >"$BATS_TEST_TMPDIR/analysis.tsv"
@@ -266,4 +266,34 @@ EOF
     [ "$output" = yes ]
     run awk -F '\t' '$1=="R-VERSION" && $4=="REMOVED" || $1=="R-SEC" && $4=="EXPOSED" {n++} END {print n+0}' "$BATS_TEST_TMPDIR/analysis.tsv"
     [ "$output" = 2 ]
+}
+
+@test "app scoped database metrics do not collide for a shared database" {
+    make_audit "$BATS_TEST_TMPDIR/audit.tsv"
+    make_samples "$BATS_TEST_TMPDIR/samples.tsv" 30 2 10
+    cat >"$BATS_TEST_TMPDIR/apps.tsv" <<'EOF'
+app.0	type	wordpress
+app.0	database	shared
+app.0	table_prefix	a_
+app.0	disable_wp_cron	true
+app.0	system_wp_cron	1
+app.1	type	wordpress
+app.1	database	shared
+app.1	table_prefix	b_
+app.1	disable_wp_cron	true
+app.1	system_wp_cron	unknown
+EOF
+    cat >"$BATS_TEST_TMPDIR/databases.tsv" <<'EOF'
+app.0	autoload_bytes	4194304
+app.1	autoload_bytes	512
+EOF
+
+    dbtune_rules_analyze "$BATS_TEST_TMPDIR/audit.tsv" "$BATS_TEST_TMPDIR/samples.tsv" "" "$BATS_TEST_TMPDIR/apps.tsv" "$BATS_TEST_TMPDIR/databases.tsv" 10 >"$BATS_TEST_TMPDIR/analysis.tsv"
+
+    run awk -F '\t' '$1=="R-APP-AUTOLOAD" { print $2 ":" $4 } $1=="R-APP-WPCRON" { print $2 ":" $4 }' "$BATS_TEST_TMPDIR/analysis.tsv"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *'app:app.0:TOO-LARGE'* ]]
+    [[ "$output" != *'app:app.1:TOO-LARGE'* ]]
+    [[ "$output" == *'app:app.1:UNKNOWN'* ]]
+    [[ "$output" != *'app:app.0:UNKNOWN'* ]]
 }

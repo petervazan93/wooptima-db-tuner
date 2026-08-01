@@ -34,11 +34,64 @@ file_mode() {
     [[ "$output" == *$'DB_NAME\twoo_classic'* ]]
     [[ "$output" == *$'DB_NAME\twoo_custom'* ]]
     [[ "$output" == *$'DB_NAME\twoo_const'* ]]
-    [[ "$output" == *$'DB_NAME\twoo_environment'* ]]
+    [[ "$output" == *$'DB_NAME\tunresolved'* ]]
     [[ "$output" == *$'DB_NAME\twoo_multiline'* ]]
     [[ "$output" == *$'table_prefix\tshop_'* ]]
     [[ "$output" != *secret* ]]
     [[ "$output" != *DB_PASSWORD* ]]
+}
+
+@test "wp-config parser ignores all PHP comments and never dereferences root env" {
+    export ROOT_DATABASE_SECRET=root-environment-secret
+
+    run dbtune_wp_config_parse "$BATS_TEST_DIRNAME/../fixtures/wp-config-hardened.php"
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *$'DB_NAME\tshop//primary#blue/*literal*/'* ]]
+    [[ "$output" == *$'table_prefix\tsecure_'* ]]
+    [[ "$output" == *$'MULTISITE\tfalse'* ]]
+    [[ "$output" == *$'WP_CACHE\ttrue'* ]]
+    [[ "$output" != *commented_before* ]]
+    [[ "$output" != *commented_after* ]]
+    [[ "$output" != *secret* ]]
+    [[ "$output" != *DB_PASSWORD* ]]
+
+    run dbtune_wp_config_value "getenv('ROOT_DATABASE_SECRET')"
+    [ "$status" -ne 0 ]
+    [[ "$output" != *root-environment-secret* ]]
+}
+
+@test "redaction covers whitespace around password separators" {
+    run dbtune_redact 'password = first DB_PASSWORD   :   second passwd=third'
+    [ "$status" -eq 0 ]
+    [[ "$output" != *first* ]]
+    [[ "$output" != *second* ]]
+    [[ "$output" != *third* ]]
+}
+
+@test "SQL wrapper applies connect and read-only statement timeouts but preserves SET GLOBAL" {
+    local stub_dir="$BATS_TEST_TMPDIR/sql-stubs"
+    mkdir -p "$stub_dir"
+    cat >"$stub_dir/mariadb" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$DBTUNE_STATE_DIR/client-args.log"
+command cat >>"$DBTUNE_STATE_DIR/client-input.log"
+EOF
+    chmod +x "$stub_dir/mariadb"
+    PATH="$stub_dir:$PATH"
+    DBTUNE_SQL_AUTH_METHOD=socket
+
+    dbtune_sql 'SELECT 1'
+    dbtune_sql 'SET GLOBAL slow_query_log=OFF;'
+
+    run grep -F -- '--connect-timeout=5' "$DBTUNE_STATE_DIR/client-args.log"
+    [ "$status" -eq 0 ]
+    [ "${#lines[@]}" -eq 2 ]
+    run grep -F 'SET SESSION max_statement_time=5;' "$DBTUNE_STATE_DIR/client-input.log"
+    [ "$status" -eq 0 ]
+    [ "${#lines[@]}" -eq 1 ]
+    run grep -F 'SET GLOBAL slow_query_log=OFF;' "$DBTUNE_STATE_DIR/client-input.log"
+    [ "$status" -eq 0 ]
 }
 
 @test "autoload audit includes yes on and auto values" {
@@ -61,11 +114,11 @@ file_mode() {
         esac
     }
 
-    dbtune_audit_database_metrics "$BATS_TEST_TMPDIR/databases.tsv" shop wp_
+    dbtune_audit_database_metrics "$BATS_TEST_TMPDIR/databases.tsv" app.0 shop wp_
 
-    run grep -F $'shop\tautoload_bytes\t3145728' "$BATS_TEST_TMPDIR/databases.tsv"
+    run grep -F $'app.0\tautoload_bytes\t3145728' "$BATS_TEST_TMPDIR/databases.tsv"
     [ "$status" -eq 0 ]
-    run grep -F $'shop\tautoload_count\t42' "$BATS_TEST_TMPDIR/databases.tsv"
+    run grep -F $'app.0\tautoload_count\t42' "$BATS_TEST_TMPDIR/databases.tsv"
     [ "$status" -eq 0 ]
 }
 
@@ -88,7 +141,7 @@ EOF
     [[ "$output" == *$'landmine.innodb_change_buffering.severity\tcritical'* ]]
 }
 
-@test "hardware audit uses command stubs and resolves NVMe md slaves" {
+@test "hardware audit ignores unrelated NVMe and classifies the datadir HDD RAID" {
     local stub_dir="$BATS_TEST_TMPDIR/stubs"
     mkdir -p "$stub_dir"
     cat >"$stub_dir/nproc" <<'EOF'
@@ -103,30 +156,124 @@ printf 'Swap:    4294967296  536870912 3758096384\n'
 EOF
     cat >"$stub_dir/lsblk" <<'EOF'
 #!/usr/bin/env bash
-if [[ $* == *'/dev/md2'* ]]; then
+if [[ $* == *'-s'* && $* == *'/dev/md2'* ]]; then
+    printf 'md2 raid1 1 raid\n'
+    printf 'sda disk 1 ST_HDD\n'
+    printf 'sdb disk 1 ST_HDD\n'
+elif [[ $* == *'/dev/md2'* ]]; then
     printf 'md2 raid1 0 raid\n'
-    printf 'nvme0n1 disk 0 Samsung_NVMe\n'
-    printf 'nvme1n1 disk 0 Samsung_NVMe\n'
+    printf 'sda disk 1 ST_HDD\n'
+    printf 'sdb disk 1 ST_HDD\n'
 else
+    printf 'nvme0n1 disk 0 Samsung_NVMe\n'
     printf 'md2 raid1 0 raid\n'
 fi
+EOF
+    cat >"$stub_dir/findmnt" <<'EOF'
+#!/usr/bin/env bash
+printf '/dev/md2\n'
 EOF
     cat >"$stub_dir/df" <<'EOF'
 #!/usr/bin/env bash
 printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\n'
 printf '/dev/md2 500000000 100000000 400000000 20%% /\n'
 EOF
-    chmod +x "$stub_dir/nproc" "$stub_dir/free" "$stub_dir/lsblk" "$stub_dir/df"
+    chmod +x "$stub_dir/nproc" "$stub_dir/free" "$stub_dir/lsblk" "$stub_dir/findmnt" "$stub_dir/df"
     PATH="$stub_dir:$PATH"
 
     dbtune_audit_collect_hw "$BATS_TEST_TMPDIR/hardware.tsv"
 
     run grep -F $'hw.cpu_count\t12' "$BATS_TEST_TMPDIR/hardware.tsv"
     [ "$status" -eq 0 ]
-    run grep -F $'hw.storage_class\tnvme' "$BATS_TEST_TMPDIR/hardware.tsv"
+    run grep -F $'hw.storage_class\thdd' "$BATS_TEST_TMPDIR/hardware.tsv"
     [ "$status" -eq 0 ]
-    run grep -F 'nvme0n1:disk:0:Samsung_NVMe' "$BATS_TEST_TMPDIR/hardware.tsv"
+    run grep -F $'hw.datadir_leaf.0\tsda:disk:1:ST_HDD' "$BATS_TEST_TMPDIR/hardware.tsv"
     [ "$status" -eq 0 ]
+}
+
+@test "audit query failure emits unknown and audit_error instead of zero" {
+    dbtune_audit_sql() {
+        case $1 in
+            *"TABLE_NAME='wp_options'"*) printf '1\n' ;;
+            *"SUM(LENGTH(option_value))"*) return 124 ;;
+            *"SELECT option_name, LENGTH(option_value)"*) printf '' ;;
+            *"option_name IN"*) printf '' ;;
+            *"option_name LIKE"*) printf '0\t0\n' ;;
+            *"information_schema.TABLES"*) printf '0\n' ;;
+            *) printf '' ;;
+        esac
+    }
+
+    dbtune_audit_database_metrics "$BATS_TEST_TMPDIR/databases.tsv" app.0 shop wp_
+
+    run grep -F $'app.0\tautoload_bytes\tunknown' "$BATS_TEST_TMPDIR/databases.tsv"
+    [ "$status" -eq 0 ]
+    run grep -F $'app.0\taudit_error.autoload\tquery_failed' "$BATS_TEST_TMPDIR/databases.tsv"
+    [ "$status" -eq 0 ]
+    run grep -F $'app.0\tautoload_bytes\t0' "$BATS_TEST_TMPDIR/databases.tsv"
+    [ "$status" -ne 0 ]
+}
+
+@test "shared database metrics cron and multisite remain app scoped" {
+    local app_a="$DBTUNE_HOME_ROOT/runcloud/webapps/a"
+    local app_b="$DBTUNE_HOME_ROOT/runcloud/webapps/b"
+    local app_c="$DBTUNE_HOME_ROOT/runcloud/webapps/c"
+    mkdir -p "$app_a/wp-content/plugins/woocommerce" "$app_b/wp-content/plugins/woocommerce" "$app_c"
+    touch "$app_a/wp-content/plugins/woocommerce/woocommerce.php" "$app_b/wp-content/plugins/woocommerce/woocommerce.php"
+    cat >"$app_a/wp-config.php" <<'EOF'
+<?php
+define('DB_NAME', 'shared');
+$table_prefix = 'a_';
+define('DISABLE_WP_CRON', true);
+EOF
+    cat >"$app_b/wp-config.php" <<'EOF'
+<?php
+define('DB_NAME', 'shared');
+$table_prefix = 'b_';
+define('DISABLE_WP_CRON', true);
+EOF
+    cat >"$app_c/wp-config.php" <<'EOF'
+<?php
+define('DB_NAME', 'network');
+$table_prefix = 'wp_';
+define('MULTISITE', true);
+EOF
+    printf '* * * * * php %s/wp-cron.php\n' "$app_a" >"$DBTUNE_CRON_ROOT/apps"
+    export DBTUNE_CRONTAB_FILE="$BATS_TEST_TMPDIR/no-crontab"
+    dbtune_audit_sql() { return 1; }
+    dbtune_audit_database_metrics() {
+        if [[ $4 == a_ ]]; then
+            dbtune_audit_scope_put "$1" "$2" autoload_bytes 100
+        else
+            dbtune_audit_scope_put "$1" "$2" autoload_bytes 200
+        fi
+    }
+
+    dbtune_audit_collect_apps "$BATS_TEST_TMPDIR/audit.tsv" "$BATS_TEST_TMPDIR/apps.tsv" "$BATS_TEST_TMPDIR/databases.tsv"
+
+    run grep -F $'app.0\tautoload_bytes\t100' "$BATS_TEST_TMPDIR/databases.tsv"
+    [ "$status" -eq 0 ]
+    run grep -F $'app.1\tautoload_bytes\t200' "$BATS_TEST_TMPDIR/databases.tsv"
+    [ "$status" -eq 0 ]
+    run grep -F $'app.0\tsystem_wp_cron\t1' "$BATS_TEST_TMPDIR/apps.tsv"
+    [ "$status" -eq 0 ]
+    run grep -F $'app.1\tsystem_wp_cron\tunknown' "$BATS_TEST_TMPDIR/apps.tsv"
+    [ "$status" -eq 0 ]
+    run grep -F $'app.2\tmultisite_metrics\tunsupported' "$BATS_TEST_TMPDIR/apps.tsv"
+    [ "$status" -eq 0 ]
+    run grep -F $'app.2\tautoload_bytes' "$BATS_TEST_TMPDIR/databases.tsv"
+    [ "$status" -ne 0 ]
+}
+
+@test "flat audit JSON suppresses duplicate keys" {
+    printf 'same\tfirst\nsame\tsecond\n' >"$BATS_TEST_TMPDIR/audit.tsv"
+    printf 'app.0\ttype\twordpress\napp.0\ttype\tduplicate\n' >"$BATS_TEST_TMPDIR/apps.tsv"
+    : >"$BATS_TEST_TMPDIR/databases.tsv"
+
+    run dbtune_audit_json "$BATS_TEST_TMPDIR/audit.tsv" "$BATS_TEST_TMPDIR/apps.tsv" "$BATS_TEST_TMPDIR/databases.tsv"
+
+    [ "$status" -eq 0 ]
+    [ "$output" = '{"same":"first","app.0.type":"wordpress"}' ]
 }
 
 @test "cmd_audit writes mode 600 TSV files and emits one flat JSON object" {
@@ -175,7 +322,7 @@ EOF
     [ "${#lines[@]}" -eq 1 ]
     [[ "$output" == \{*\} ]]
     [[ "$output" == *'"mariadb.version":"11.4.12-MariaDB"'* ]]
-    [[ "$output" == *'"database.shopdb.autoload_bytes":"2097152"'* ]]
+    [[ "$output" == *'"database.app.0.autoload_bytes":"2097152"'* ]]
     [[ "$output" != *secret* ]]
     [ "$(file_mode "$DBTUNE_STATE_DIR/audit.tsv")" = 600 ]
     [ "$(file_mode "$DBTUNE_STATE_DIR/apps.tsv")" = 600 ]

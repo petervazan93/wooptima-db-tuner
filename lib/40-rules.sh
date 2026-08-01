@@ -270,22 +270,21 @@ dbtune_rules_analyze() {
         close(file)
     }
 
-    function load_scoped(kind, scope, key, value, i, id, parts, kbrow) {
+    function load_scoped(kind, scope, key, value, parts, kbrow) {
         key = norm(key)
         if (kind == "app") {
             add_app(scope, key, value)
             if (key == "type" && tolower(value) == "wordpress") add_app(scope, "is_wp", "1")
             return
         }
-        for (i = 1; i <= app_count; i++) {
-            id = app_ids[i]
-            if (av(id, "database") != scope) continue
-            add_app(id, key, value)
+        if (scope in app_seen) {
+            add_app(scope, key, value)
             if (key ~ /^log_table_/) {
                 split(value, parts, ":")
                 kbrow = numeric(parts[4])
-                if (kbrow > numeric(av(id, "max_log_kb_per_row"))) add_app(id, "max_log_kb_per_row", kbrow)
+                if (kbrow > numeric(av(scope, "max_log_kb_per_row"))) add_app(scope, "max_log_kb_per_row", kbrow)
             }
+            return
         }
     }
 
@@ -582,13 +581,17 @@ dbtune_rules_analyze() {
         emit(rule, "app:" id, severity, verdict, "", "", evidence, reason)
     }
 
-    function app_rules(i, id, is_wp, is_woo, redis, cache, disabled_cron, system_cron, autoload, autoload_mb, hpos, orders, sync, kbrow, sessions, failed, retention, transient_count, transient_bytes, policy, meta_index) {
+    function app_rules(i, id, is_wp, is_woo, redis, cache, disabled_cron, system_cron, autoload, autoload_mb, hpos, orders, sync, kbrow, sessions, failed, retention, transient_count, transient_bytes, policy, meta_index, multisite) {
         for (i = 1; i <= app_count; i++) {
             id = app_ids[i]
             is_wp = av(id, "is_wp", "wordpress", "wp_detected", "type")
             is_woo = av(id, "is_woocommerce", "woocommerce", "woo_detected")
             if (tolower(is_wp) == "wordpress") is_wp = 1
             if (!truth(is_wp) && !truth(is_woo)) continue
+
+            multisite = av(id, "multisite_metrics")
+            if (tolower(multisite) == "unsupported" || tolower(multisite) == "unknown")
+                app_emit("R-APP-MULTISITE", id, "medium", "UNKNOWN", "multisite_metrics=" multisite, "Multisite site prefixy neboli enumerovane; aplikacne DB metriky sa nesmu hodnotit ako zdrave.")
 
             redis = av(id, "redis_active", "redis_running", "redis")
             if (redis == "") redis = ag("app_redis_ping", ag("app_redis_service_active", ""))
@@ -602,6 +605,7 @@ dbtune_rules_analyze() {
             system_cron = av(id, "system_wp_cron", "wp_cron_system", "cron_present")
             if (system_cron == "") system_cron = ag("app_system_wp_cron", "")
             if (truth(disabled_cron) && falsehood(system_cron)) app_emit("R-APP-WPCRON", id, "critical", "DISABLED", "DISABLE_WP_CRON=true; system_cron=false", "WP cron nebezi vobec, co ohrozuje objednavky a Action Scheduler.")
+            else if (truth(disabled_cron) && tolower(system_cron) == "unknown") app_emit("R-APP-WPCRON", id, "medium", "UNKNOWN", "DISABLE_WP_CRON=true; app cron mapping=unknown", "Globalny cron nie je dokaz pre tuto aplikaciu; namapuj URL alebo webroot konkretneho wp-cron behu.")
 
             autoload = bytes(av(id, "autoload_bytes", "autoload_size_bytes"))
             autoload_mb = numeric(av(id, "autoload_mb", "autoload_size_mb"))

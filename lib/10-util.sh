@@ -36,7 +36,7 @@ dbtune_now() {
 
 dbtune_redact() {
     printf '%s' "${1:-}" | sed -E \
-        -e 's/((password|passwd|pwd)[=:])[[:space:]]*[^[:space:]]+/\1[REDACTED]/Ig' \
+        -e 's/(((db[_-]?)?password|passwd|pwd)[[:space:]]*[=:][[:space:]]*)[^[:space:]]+/\1[REDACTED]/Ig' \
         -e 's/(--password([=[:space:]]+))[^[:space:]]+/\1[REDACTED]/g' \
         -e 's/(^|[[:space:]])-p[^[:space:]]+/\1-p[REDACTED]/g'
 }
@@ -354,17 +354,24 @@ dbtune_sql_save_auth() {
 }
 
 dbtune_sql_probe() {
-    local client
+    local client connect_timeout=${DBTUNE_SQL_CONNECT_TIMEOUT:-5}
+    local statement_timeout=${DBTUNE_SQL_STATEMENT_TIMEOUT:-5}
 
+    [[ $connect_timeout =~ ^[1-9][0-9]*$ && $statement_timeout =~ ^[1-9][0-9]*([.][0-9]+)?$ ]] || return 64
+    command awk -v connect="$connect_timeout" -v statement="$statement_timeout" \
+        'BEGIN { exit !(connect <= 30 && statement <= 60) }' || return 64
     client=$(dbtune_sql_client) || return
-    if "$client" --protocol=socket --user=root --batch --skip-column-names --execute='SELECT 1' >/dev/null 2>&1; then
+    if "$client" --connect-timeout="$connect_timeout" --protocol=socket --user=root --batch --skip-column-names \
+        --execute="SET SESSION max_statement_time=$statement_timeout; SELECT 1" >/dev/null 2>&1; then
         DBTUNE_SQL_AUTH_METHOD=socket
         DBTUNE_SQL_DEFAULTS_FILE=''
         dbtune_sql_save_auth || return
         dbtune_event sql_auth method socket
         return 0
     fi
-    if [[ -r $DBTUNE_ROOT_CNF ]] && "$client" --defaults-extra-file="$DBTUNE_ROOT_CNF" --protocol=socket --batch --skip-column-names --execute='SELECT 1' >/dev/null 2>&1; then
+    if [[ -r $DBTUNE_ROOT_CNF ]] && "$client" --defaults-extra-file="$DBTUNE_ROOT_CNF" \
+        --connect-timeout="$connect_timeout" --protocol=socket --batch --skip-column-names \
+        --execute="SET SESSION max_statement_time=$statement_timeout; SELECT 1" >/dev/null 2>&1; then
         DBTUNE_SQL_AUTH_METHOD=defaults
         DBTUNE_SQL_DEFAULTS_FILE=$DBTUNE_ROOT_CNF
         dbtune_sql_save_auth || return
@@ -383,32 +390,43 @@ dbtune_sql_ensure_auth() {
 dbtune_sql() {
     local query=${1:-}
     local database=${2:-}
-    local client
+    local client normalized
+    local connect_timeout=${DBTUNE_SQL_CONNECT_TIMEOUT:-5}
+    local statement_timeout=${DBTUNE_SQL_STATEMENT_TIMEOUT:-5}
+    local -a options=()
 
     [[ -n $query ]] || {
         dbtune_log error "SQL wrapper vyzaduje query"
         return 64
     }
+    if [[ ! $connect_timeout =~ ^[1-9][0-9]*$ || ! $statement_timeout =~ ^[1-9][0-9]*([.][0-9]+)?$ ]]; then
+        dbtune_log error "SQL timeout musi byt kladne cislo"
+        return 64
+    fi
+    if ! command awk -v connect="$connect_timeout" -v statement="$statement_timeout" \
+        'BEGIN { exit !(connect <= 30 && statement <= 60) }'; then
+        dbtune_log error "SQL connect timeout moze byt najviac 30s a statement timeout 60s"
+        return 64
+    fi
     dbtune_sql_ensure_auth || return
     client=$(dbtune_sql_client) || return
+    normalized=${query^^}
+    if [[ $normalized =~ ^[[:space:]]*(SELECT|SHOW|EXPLAIN|WITH)([[:space:]\(]|$) ]]; then
+        query="SET SESSION max_statement_time=$statement_timeout;
+$query"
+    fi
     case $DBTUNE_SQL_AUTH_METHOD in
         socket)
-            if [[ -n $database ]]; then
-                printf '%s\n' "$query" | "$client" --protocol=socket --user=root --batch --skip-column-names "$database"
-            else
-                printf '%s\n' "$query" | "$client" --protocol=socket --user=root --batch --skip-column-names
-            fi
+            options=(--connect-timeout="$connect_timeout" --protocol=socket --user=root --batch --skip-column-names)
             ;;
         defaults)
-            if [[ -n $database ]]; then
-                printf '%s\n' "$query" | "$client" --defaults-extra-file="$DBTUNE_SQL_DEFAULTS_FILE" --protocol=socket --batch --skip-column-names "$database"
-            else
-                printf '%s\n' "$query" | "$client" --defaults-extra-file="$DBTUNE_SQL_DEFAULTS_FILE" --protocol=socket --batch --skip-column-names
-            fi
+            options=(--defaults-extra-file="$DBTUNE_SQL_DEFAULTS_FILE" --connect-timeout="$connect_timeout" --protocol=socket --batch --skip-column-names)
             ;;
         *)
             dbtune_log error "Neznamy SQL auth kontrakt"
             return 70
             ;;
     esac
+    [[ -z $database ]] || options+=("$database")
+    printf '%s\n' "$query" | "$client" "${options[@]}"
 }

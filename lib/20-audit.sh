@@ -69,14 +69,26 @@ dbtune_sql_quote_identifier() {
 
 dbtune_wp_config_value() {
     local expression=${1:-}
-    local value variable
+    local quote char previous='' output='' index
 
-    expression=${expression%%;*}
     expression=${expression#"${expression%%[![:space:]]*}"}
     expression=${expression%"${expression##*[![:space:]]}"}
-    if [[ $expression =~ ^\'([^\']*)\' ]] || [[ $expression =~ ^\"([^\"]*)\" ]]; then
-        printf '%s' "${BASH_REMATCH[1]}"
-        return 0
+    quote=${expression:0:1}
+    if [[ $quote == "'" || $quote == '"' ]]; then
+        for ((index = 1; index < ${#expression}; index++)); do
+            char=${expression:index:1}
+            if [[ $char == "$quote" && $previous != \\ ]]; then
+                printf '%s' "$output"
+                return 0
+            fi
+            output+=$char
+            if [[ $char == \\ && $previous == \\ ]]; then
+                previous=''
+            else
+                previous=$char
+            fi
+        done
+        return 1
     fi
     if [[ $expression =~ ^(true|TRUE)$ ]]; then
         printf 'true'
@@ -86,21 +98,40 @@ dbtune_wp_config_value() {
         printf 'false'
         return 0
     fi
-    if [[ $expression =~ ^getenv[[:space:]]*\([[:space:]]*[\'\"]([A-Za-z_][A-Za-z0-9_]*)[\'\"] ]]; then
-        variable=${BASH_REMATCH[1]}
-        value=${!variable-}
-        [[ -n $value ]] || return 1
-        printf '%s' "$value"
-        return 0
-    fi
-    if [[ $expression =~ ^\$_ENV\[[[:space:]]*[\'\"]([A-Za-z_][A-Za-z0-9_]*)[\'\"][[:space:]]*\] ]]; then
-        variable=${BASH_REMATCH[1]}
-        value=${!variable-}
-        [[ -n $value ]] || return 1
-        printf '%s' "$value"
-        return 0
-    fi
     return 1
+}
+
+dbtune_wp_config_code() {
+    local file=${1:-}
+
+    [[ -r $file ]] || return 1
+    command awk '
+        BEGIN { quote=""; block=0; escape=0 }
+        {
+            line=$0; output=""; line_comment=0
+            for (i=1; i<=length(line); i++) {
+                char=substr(line,i,1); next_char=substr(line,i+1,1)
+                if (line_comment) break
+                if (block) {
+                    if (char=="*" && next_char=="/") { block=0; i++ }
+                    continue
+                }
+                if (quote != "") {
+                    output=output char
+                    if (escape) escape=0
+                    else if (char=="\\") escape=1
+                    else if (char==quote) quote=""
+                    continue
+                }
+                if (char=="\"" || char=="\047") { quote=char; output=output char; continue }
+                if (char=="/" && next_char=="*") { block=1; i++; continue }
+                if (char=="/" && next_char=="/") { line_comment=1; continue }
+                if (char=="#") { line_comment=1; continue }
+                output=output char
+            }
+            print output
+        }
+    ' "$file"
 }
 
 dbtune_wp_config_parse() {
@@ -110,10 +141,9 @@ dbtune_wp_config_parse() {
     [[ -r $file ]] || return 1
     while IFS= read -r line || [[ -n $line ]]; do
         line=${line//$'\r'/}
-        [[ $line =~ ^[[:space:]]*(//|#) ]] && continue
         statement+=" $line"
         [[ $line == *';'* ]] || continue
-        if [[ $statement =~ define[[:space:]]*\([[:space:]]*[\'\"](DB_NAME|DISABLE_WP_CRON)[\'\"][[:space:]]*,[[:space:]]*(.*)\)[[:space:]]*\; ]]; then
+        if [[ $statement =~ define[[:space:]]*\([[:space:]]*[\'\"](DB_NAME|DISABLE_WP_CRON|MULTISITE|WP_CACHE)[\'\"][[:space:]]*,[[:space:]]*(.*)\)[[:space:]]*\; ]]; then
             key=${BASH_REMATCH[1]}
             expression=${BASH_REMATCH[2]}
             if value=$(dbtune_wp_config_value "$expression"); then
@@ -121,7 +151,7 @@ dbtune_wp_config_parse() {
             else
                 printf '%s\t%s\n' "$key" unresolved
             fi
-        elif [[ $statement =~ const[[:space:]]+(DB_NAME|DISABLE_WP_CRON)[[:space:]]*=[[:space:]]*(.*)\; ]]; then
+        elif [[ $statement =~ const[[:space:]]+(DB_NAME|DISABLE_WP_CRON|MULTISITE|WP_CACHE)[[:space:]]*=[[:space:]]*(.*)\; ]]; then
             key=${BASH_REMATCH[1]}
             expression=${BASH_REMATCH[2]}
             if value=$(dbtune_wp_config_value "$expression"); then
@@ -138,7 +168,7 @@ dbtune_wp_config_parse() {
             fi
         fi
         statement=''
-    done <"$file"
+    done < <(dbtune_wp_config_code "$file")
 }
 
 dbtune_audit_find_wp_config() {
@@ -206,14 +236,39 @@ dbtune_audit_parse_cnf() {
 }
 
 dbtune_audit_sql() {
-    dbtune_sql "$1" 2>/dev/null
+    DBTUNE_SQL_STATEMENT_TIMEOUT="${DBTUNE_AUDIT_QUERY_TIMEOUT_SECONDS:-5}" dbtune_sql "$1" 2>/dev/null
+}
+
+dbtune_audit_storage_class() {
+    local datadir=${1:-/var/lib/mysql}
+    local source rows name type rota model class=unknown uncertain=0
+
+    command -v findmnt >/dev/null 2>&1 || return 1
+    source=$(findmnt -n -o SOURCE --target "$datadir" 2>/dev/null) || return 1
+    source=${source%%\[*}
+    [[ $source == /dev/* ]] || return 1
+    rows=$(lsblk -nr -s -o NAME,TYPE,ROTA,MODEL "$source" 2>/dev/null) || return 1
+    while read -r name type rota model; do
+        [[ $type == disk ]] || continue
+        if [[ $rota == 1 ]]; then
+            class=hdd
+        elif [[ $rota == 0 && $class != hdd && ($name == nvme* || ${model,,} == *nvme*) ]]; then
+            [[ $class == unknown ]] && class=nvme
+        elif [[ $rota == 0 && $class != hdd ]]; then
+            class=ssd
+        else
+            uncertain=1
+        fi
+    done <<<"$rows"
+    ((uncertain == 0)) || class=unknown
+    printf '%s\t%s\n' "$source" "$class"
 }
 
 dbtune_audit_collect_hw() {
     local out=${1:-}
     local cpu=0 mem_total=0 mem_available=0 swap_total=0 swap_used=0
     local name type rota model device_line class=unknown index=0 child child_type child_rota child_model
-    local df_line path key
+    local df_line path key storage_result mount_source leaf_index=0
 
     if command -v nproc >/dev/null 2>&1; then
         cpu=$(nproc 2>/dev/null || printf 0)
@@ -250,22 +305,7 @@ dbtune_audit_collect_hw() {
                 while read -r child child_type child_rota child_model; do
                     [[ -n $child && $child != "$name" && $child_type == disk ]] || continue
                     device_line+=",$child:$child_type:$child_rota:$child_model"
-                    if [[ $child == nvme* || ${child_model,,} == *nvme* ]]; then
-                        class=nvme
-                    elif [[ $class != nvme && $child_rota == 1 ]]; then
-                        class=hdd
-                    elif [[ $class == unknown ]]; then
-                        class=ssd
-                    fi
                 done < <(lsblk -nr -o NAME,TYPE,ROTA,MODEL "/dev/$name" 2>/dev/null || true)
-            elif [[ $type == disk ]]; then
-                if [[ $name == nvme* || ${model,,} == *nvme* ]]; then
-                    class=nvme
-                elif [[ $class != nvme && $rota == 1 ]]; then
-                    class=hdd
-                elif [[ $class == unknown ]]; then
-                    class=ssd
-                fi
             fi
             dbtune_audit_put "$out" "hw.disk.$index" "$device_line"
             index=$((index + 1))
@@ -283,24 +323,21 @@ dbtune_audit_collect_hw() {
                 child_rota=unknown
                 IFS= read -r child_rota <"/sys/block/$child/queue/rotational" 2>/dev/null || true
                 device_line+=",$child:disk:$child_rota:unknown"
-                if [[ $child == nvme* ]]; then
-                    class=nvme
-                elif [[ $class != nvme && $child_rota == 1 ]]; then
-                    class=hdd
-                elif [[ $class == unknown ]]; then
-                    class=ssd
-                fi
             done
-            if [[ $name == nvme* ]]; then
-                class=nvme
-            elif [[ $class != nvme && $rota == 1 ]]; then
-                class=hdd
-            elif [[ $class == unknown ]]; then
-                class=ssd
-            fi
             dbtune_audit_put "$out" "hw.disk.$index" "$device_line"
             index=$((index + 1))
         done
+    fi
+    if storage_result=$(dbtune_audit_storage_class "${DBTUNE_MYSQL_DATADIR:-/var/lib/mysql}"); then
+        IFS=$'\t' read -r mount_source class <<<"$storage_result"
+        dbtune_audit_put "$out" hw.datadir_mount_source "$mount_source"
+        while read -r name type rota model; do
+            [[ $type == disk ]] || continue
+            dbtune_audit_put "$out" "hw.datadir_leaf.$leaf_index" "$name:$type:$rota:$model"
+            leaf_index=$(command awk -v n="$leaf_index" 'BEGIN { print n+1 }')
+        done < <(lsblk -nr -s -o NAME,TYPE,ROTA,MODEL "$mount_source" 2>/dev/null || true)
+    else
+        dbtune_audit_put "$out" hw.datadir_mount_source unknown
     fi
     dbtune_audit_put "$out" hw.storage_class "$class"
     dbtune_audit_put "$out" hw.disk_count "$index"
@@ -319,8 +356,8 @@ dbtune_audit_collect_mariadb() {
     local out=${1:-}
     local dbout=${2:-}
     local version rows name value key schema total data indexes tables
-    local qcache_hits=0 com_select=0 hit_rate=0
-    local variables status
+    local qcache_hits=unknown com_select=unknown hit_rate=unknown
+    local variables status dataset_ok=0
 
     if ! version=$(dbtune_audit_sql 'SELECT VERSION()'); then
         dbtune_audit_put "$out" mariadb.available 0
@@ -366,7 +403,9 @@ dbtune_audit_collect_mariadb() {
     fi
     dbtune_audit_put "$out" mariadb.query_cache_hit_pct "$hit_rate"
 
-    if ! rows=$(dbtune_audit_sql "SELECT TABLE_SCHEMA, COALESCE(SUM(DATA_LENGTH+INDEX_LENGTH),0), COALESCE(SUM(DATA_LENGTH),0), COALESCE(SUM(INDEX_LENGTH),0), COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA NOT IN ('information_schema','mysql','performance_schema','sys') GROUP BY TABLE_SCHEMA ORDER BY TABLE_SCHEMA"); then
+    if rows=$(dbtune_audit_sql "SELECT TABLE_SCHEMA, COALESCE(SUM(DATA_LENGTH+INDEX_LENGTH),0), COALESCE(SUM(DATA_LENGTH),0), COALESCE(SUM(INDEX_LENGTH),0), COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA NOT IN ('information_schema','mysql','performance_schema','sys') GROUP BY TABLE_SCHEMA ORDER BY TABLE_SCHEMA"); then
+        dataset_ok=1
+    else
         rows=''
         dbtune_audit_put "$out" finding.dataset_query_failed warning
     fi
@@ -376,12 +415,20 @@ dbtune_audit_collect_mariadb() {
             dbtune_audit_scope_put "$dbout" "$schema" audit_error invalid_identifier
             continue
         fi
-        dbtune_audit_scope_put "$dbout" "$schema" size_bytes "${total:-0}"
-        dbtune_audit_scope_put "$dbout" "$schema" data_bytes "${data:-0}"
-        dbtune_audit_scope_put "$dbout" "$schema" index_bytes "${indexes:-0}"
-        dbtune_audit_scope_put "$dbout" "$schema" table_count "${tables:-0}"
+        if [[ $total =~ ^[0-9]+$ && $data =~ ^[0-9]+$ && $indexes =~ ^[0-9]+$ && $tables =~ ^[0-9]+$ ]]; then
+            dbtune_audit_scope_put "$dbout" "$schema" size_bytes "$total"
+            dbtune_audit_scope_put "$dbout" "$schema" data_bytes "$data"
+            dbtune_audit_scope_put "$dbout" "$schema" index_bytes "$indexes"
+            dbtune_audit_scope_put "$dbout" "$schema" table_count "$tables"
+        else
+            dbtune_audit_scope_put "$dbout" "$schema" audit_error.dataset invalid_result
+        fi
     done <<<"$rows"
-    total=$(command awk -F '\t' '$2=="size_bytes" { sum += $3 } END { printf "%.0f", sum }' "$dbout")
+    if ((dataset_ok)); then
+        total=$(command awk -F '\t' '$2=="size_bytes" && $3 ~ /^[0-9]+$/ { sum += $3 } END { printf "%.0f", sum+0 }' "$dbout")
+    else
+        total=unknown
+    fi
     dbtune_audit_put "$out" mariadb.dataset_bytes "$total"
 }
 
@@ -398,98 +445,184 @@ dbtune_audit_table_exists() {
 
 dbtune_audit_database_metrics() {
     local dbout=${1:-}
-    local database=${2:-}
-    local prefix=${3:-wp_}
-    local dbq tableq rows a b c d key index=0 probe_status
+    local scope=${2:-}
+    local database=${3:-}
+    local prefix=${4:-wp_}
+    local dbq tableq rows a b c d key index=0 probe_status table_name
 
     dbq=$(dbtune_sql_quote_identifier "$database") || {
-        dbtune_audit_scope_put "$dbout" "$database" audit_error invalid_identifier
+        dbtune_audit_scope_put "$dbout" "$scope" audit_error.database invalid_identifier
         return 0
     }
     [[ $prefix =~ ^[A-Za-z0-9_]+$ && ${#prefix} -le 48 ]] || {
-        dbtune_audit_scope_put "$dbout" "$database" audit_error invalid_table_prefix
+        dbtune_audit_scope_put "$dbout" "$scope" audit_error.prefix invalid_table_prefix
         return 0
     }
 
     tableq=$(dbtune_sql_quote_identifier "${prefix}options") || return 0
     if dbtune_audit_table_exists "$database" "${prefix}options"; then
-        rows=$(dbtune_audit_sql "SELECT COALESCE(SUM(LENGTH(option_value)),0), COUNT(*) FROM $dbq.$tableq WHERE autoload IN ('yes','on','auto')" || true)
-        IFS=$'\t' read -r a b <<<"${rows%%$'\n'*}"
-        dbtune_audit_scope_put "$dbout" "$database" autoload_bytes "${a:-0}"
-        dbtune_audit_scope_put "$dbout" "$database" autoload_count "${b:-0}"
-        rows=$(dbtune_audit_sql "SELECT option_name, LENGTH(option_value) FROM $dbq.$tableq WHERE autoload IN ('yes','on','auto') ORDER BY LENGTH(option_value) DESC LIMIT 20" || true)
-        while IFS=$'\t' read -r a b; do
-            [[ -n $a ]] || continue
-            dbtune_audit_scope_put "$dbout" "$database" "autoload.top.$index" "$a:${b:-0}"
-            index=$((index + 1))
-        done <<<"$rows"
-        rows=$(dbtune_audit_sql "SELECT option_name, option_value FROM $dbq.$tableq WHERE option_name IN ('woocommerce_custom_orders_table_enabled','woocommerce_custom_orders_table_data_sync_enabled','woocommerce_feature_custom_order_tables_enabled') ORDER BY option_name" || true)
-        while IFS=$'\t' read -r a b; do
-            [[ -n $a ]] || continue
-            dbtune_audit_scope_put "$dbout" "$database" "hpos.$(dbtune_audit_slug "$a")" "$b"
-        done <<<"$rows"
-        rows=$(dbtune_audit_sql "SELECT COUNT(*), COALESCE(SUM(LENGTH(option_value)),0) FROM $dbq.$tableq WHERE option_name LIKE '\\_transient%'" || true)
-        IFS=$'\t' read -r a b <<<"${rows%%$'\n'*}"
-        dbtune_audit_scope_put "$dbout" "$database" transient_count "${a:-0}"
-        dbtune_audit_scope_put "$dbout" "$database" transient_bytes "${b:-0}"
+        if rows=$(dbtune_audit_sql "SELECT COALESCE(SUM(LENGTH(option_value)),0), COUNT(*) FROM $dbq.$tableq WHERE autoload IN ('yes','on','auto')"); then
+            IFS=$'\t' read -r a b <<<"${rows%%$'\n'*}"
+            if [[ $a =~ ^[0-9]+$ && $b =~ ^[0-9]+$ ]]; then
+                dbtune_audit_scope_put "$dbout" "$scope" autoload_bytes "$a"
+                dbtune_audit_scope_put "$dbout" "$scope" autoload_count "$b"
+            else
+                dbtune_audit_scope_put "$dbout" "$scope" autoload_bytes unknown
+                dbtune_audit_scope_put "$dbout" "$scope" autoload_count unknown
+                dbtune_audit_scope_put "$dbout" "$scope" audit_error.autoload invalid_result
+            fi
+        else
+            dbtune_audit_scope_put "$dbout" "$scope" autoload_bytes unknown
+            dbtune_audit_scope_put "$dbout" "$scope" autoload_count unknown
+            dbtune_audit_scope_put "$dbout" "$scope" audit_error.autoload query_failed
+        fi
+        if rows=$(dbtune_audit_sql "SELECT option_name, LENGTH(option_value) FROM $dbq.$tableq WHERE autoload IN ('yes','on','auto') ORDER BY LENGTH(option_value) DESC LIMIT 20"); then
+            while IFS=$'\t' read -r a b; do
+                [[ -n $a ]] || continue
+                dbtune_audit_scope_put "$dbout" "$scope" "autoload.top.$index" "$a:${b:-unknown}"
+                index=$(command awk -v n="$index" 'BEGIN { print n+1 }')
+            done <<<"$rows"
+        else
+            dbtune_audit_scope_put "$dbout" "$scope" audit_error.autoload_top query_failed
+        fi
+        if rows=$(dbtune_audit_sql "SELECT option_name, option_value FROM $dbq.$tableq WHERE option_name IN ('woocommerce_custom_orders_table_enabled','woocommerce_custom_orders_table_data_sync_enabled','woocommerce_feature_custom_order_tables_enabled') ORDER BY option_name"); then
+            while IFS=$'\t' read -r a b; do
+                [[ -n $a ]] || continue
+                dbtune_audit_scope_put "$dbout" "$scope" "hpos.$(dbtune_audit_slug "$a")" "$b"
+            done <<<"$rows"
+        else
+            dbtune_audit_scope_put "$dbout" "$scope" hpos.status unknown
+            dbtune_audit_scope_put "$dbout" "$scope" audit_error.hpos query_failed
+        fi
+        if rows=$(dbtune_audit_sql "SELECT COUNT(*), COALESCE(SUM(LENGTH(option_value)),0) FROM $dbq.$tableq WHERE option_name LIKE '\\_transient%'"); then
+            IFS=$'\t' read -r a b <<<"${rows%%$'\n'*}"
+            if [[ $a =~ ^[0-9]+$ && $b =~ ^[0-9]+$ ]]; then
+                dbtune_audit_scope_put "$dbout" "$scope" transient_count "$a"
+                dbtune_audit_scope_put "$dbout" "$scope" transient_bytes "$b"
+            else
+                dbtune_audit_scope_put "$dbout" "$scope" transient_count unknown
+                dbtune_audit_scope_put "$dbout" "$scope" transient_bytes unknown
+                dbtune_audit_scope_put "$dbout" "$scope" audit_error.transients invalid_result
+            fi
+        else
+            dbtune_audit_scope_put "$dbout" "$scope" transient_count unknown
+            dbtune_audit_scope_put "$dbout" "$scope" transient_bytes unknown
+            dbtune_audit_scope_put "$dbout" "$scope" audit_error.transients query_failed
+        fi
     else
         probe_status=$?
         if ((probe_status == 2)); then
-            dbtune_audit_scope_put "$dbout" "$database" audit_error options_table_probe_failed
+            dbtune_audit_scope_put "$dbout" "$scope" audit_error.options_table probe_failed
         else
-            dbtune_audit_scope_put "$dbout" "$database" audit_error options_table_missing
+            dbtune_audit_scope_put "$dbout" "$scope" audit_error.options_table missing
         fi
+        dbtune_audit_scope_put "$dbout" "$scope" autoload_bytes unknown
+        dbtune_audit_scope_put "$dbout" "$scope" transient_count unknown
     fi
 
-    for tableq in "${prefix}wc_orders" "${prefix}woocommerce_sessions"; do
-        if dbtune_audit_table_exists "$database" "$tableq"; then
-            a=$(dbtune_sql_quote_identifier "$tableq") || continue
-            rows=$(dbtune_audit_sql "SELECT COUNT(*) FROM $dbq.$a" || true)
-            key=$(dbtune_audit_slug "${tableq#"$prefix"}")
-            dbtune_audit_scope_put "$dbout" "$database" "${key}_count" "${rows%%$'\n'*}"
+    for table_name in "${prefix}wc_orders" "${prefix}woocommerce_sessions"; do
+        key=$(dbtune_audit_slug "${table_name#"$prefix"}")
+        if dbtune_audit_table_exists "$database" "$table_name"; then
+            if rows=$(dbtune_audit_sql "SELECT COALESCE(TABLE_ROWS,0) FROM information_schema.TABLES WHERE TABLE_SCHEMA=$(dbtune_sql_quote_literal "$database") AND TABLE_NAME=$(dbtune_sql_quote_literal "$table_name")"); then
+                rows=${rows%%$'\n'*}
+                [[ $rows =~ ^[0-9]+$ ]] || rows=unknown
+                dbtune_audit_scope_put "$dbout" "$scope" "${key}_count" "$rows"
+                dbtune_audit_scope_put "$dbout" "$scope" "${key}_count_accuracy" estimated
+                [[ $rows != unknown ]] || dbtune_audit_scope_put "$dbout" "$scope" "audit_error.${key}_count" invalid_result
+            else
+                dbtune_audit_scope_put "$dbout" "$scope" "${key}_count" unknown
+                dbtune_audit_scope_put "$dbout" "$scope" "audit_error.${key}_count" query_failed
+            fi
+        else
+            probe_status=$?
+            ((probe_status != 2)) || dbtune_audit_scope_put "$dbout" "$scope" "audit_error.${key}_probe" query_failed
         fi
     done
 
     if dbtune_audit_table_exists "$database" "${prefix}posts"; then
         tableq=$(dbtune_sql_quote_identifier "${prefix}posts") || return 0
-        rows=$(dbtune_audit_sql "SELECT COALESCE(SUM(post_type LIKE 'shop_order%'),0) FROM $dbq.$tableq" || true)
-        dbtune_audit_scope_put "$dbout" "$database" legacy_order_count "${rows%%$'\n'*}"
+        if rows=$(dbtune_audit_sql "SELECT COUNT(*) FROM $dbq.$tableq WHERE post_type LIKE 'shop_order%'"); then
+            rows=${rows%%$'\n'*}
+            [[ $rows =~ ^[0-9]+$ ]] || rows=unknown
+            dbtune_audit_scope_put "$dbout" "$scope" legacy_order_count "$rows"
+            [[ $rows != unknown ]] || dbtune_audit_scope_put "$dbout" "$scope" audit_error.legacy_orders invalid_result
+        else
+            dbtune_audit_scope_put "$dbout" "$scope" legacy_order_count unknown
+            dbtune_audit_scope_put "$dbout" "$scope" audit_error.legacy_orders query_failed
+        fi
     fi
     if dbtune_audit_table_exists "$database" "${prefix}actionscheduler_actions"; then
         tableq=$(dbtune_sql_quote_identifier "${prefix}actionscheduler_actions") || return 0
-        rows=$(dbtune_audit_sql "SELECT status, COUNT(*) FROM $dbq.$tableq GROUP BY status ORDER BY status" || true)
-        while IFS=$'\t' read -r a b; do
-            [[ -n $a ]] || continue
-            dbtune_audit_scope_put "$dbout" "$database" "action_scheduler.$(dbtune_audit_slug "$a")" "$b"
-        done <<<"$rows"
+        if rows=$(dbtune_audit_sql "SELECT status, COUNT(*) FROM $dbq.$tableq GROUP BY status ORDER BY status"); then
+            while IFS=$'\t' read -r a b; do
+                [[ -n $a ]] || continue
+                dbtune_audit_scope_put "$dbout" "$scope" "action_scheduler.$(dbtune_audit_slug "$a")" "${b:-unknown}"
+            done <<<"$rows"
+        else
+            dbtune_audit_scope_put "$dbout" "$scope" action_scheduler.status unknown
+            dbtune_audit_scope_put "$dbout" "$scope" audit_error.action_scheduler query_failed
+        fi
     fi
 
-    rows=$(dbtune_audit_sql "SELECT TABLE_NAME, COALESCE(TABLE_ROWS,0), DATA_LENGTH+INDEX_LENGTH, ROUND((DATA_LENGTH+INDEX_LENGTH)/NULLIF(TABLE_ROWS,0)/1024,1) FROM information_schema.TABLES WHERE TABLE_SCHEMA=$(dbtune_sql_quote_literal "$database") AND TABLE_NAME REGEXP 'log|history|track|event' ORDER BY DATA_LENGTH+INDEX_LENGTH DESC LIMIT 20" || true)
+    if ! rows=$(dbtune_audit_sql "SELECT TABLE_NAME, COALESCE(TABLE_ROWS,0), DATA_LENGTH+INDEX_LENGTH, ROUND((DATA_LENGTH+INDEX_LENGTH)/NULLIF(TABLE_ROWS,0)/1024,1) FROM information_schema.TABLES WHERE TABLE_SCHEMA=$(dbtune_sql_quote_literal "$database") AND TABLE_NAME REGEXP 'log|history|track|event' ORDER BY DATA_LENGTH+INDEX_LENGTH DESC LIMIT 20"); then
+        rows=''
+        dbtune_audit_scope_put "$dbout" "$scope" audit_error.log_tables query_failed
+    fi
     index=0
     while IFS=$'\t' read -r a b c d; do
         [[ -n $a ]] || continue
-        dbtune_audit_scope_put "$dbout" "$database" "log_table.$index" "$a:${b:-0}:${c:-0}:${d:-0}"
-        index=$((index + 1))
+        dbtune_audit_scope_put "$dbout" "$scope" "log_table.$index" "$a:${b:-unknown}:${c:-unknown}:${d:-unknown}"
+        index=$(command awk -v n="$index" 'BEGIN { print n+1 }')
     done <<<"$rows"
 
-    rows=$(dbtune_audit_sql "SELECT INDEX_NAME, GROUP_CONCAT(CONCAT(COLUMN_NAME,IFNULL(CONCAT('(',SUB_PART,')'),'')) ORDER BY SEQ_IN_INDEX) FROM information_schema.STATISTICS WHERE TABLE_SCHEMA=$(dbtune_sql_quote_literal "$database") AND TABLE_NAME=$(dbtune_sql_quote_literal "${prefix}postmeta") GROUP BY INDEX_NAME ORDER BY INDEX_NAME" || true)
+    if ! rows=$(dbtune_audit_sql "SELECT INDEX_NAME, GROUP_CONCAT(CONCAT(COLUMN_NAME,IFNULL(CONCAT('(',SUB_PART,')'),'')) ORDER BY SEQ_IN_INDEX) FROM information_schema.STATISTICS WHERE TABLE_SCHEMA=$(dbtune_sql_quote_literal "$database") AND TABLE_NAME=$(dbtune_sql_quote_literal "${prefix}postmeta") GROUP BY INDEX_NAME ORDER BY INDEX_NAME"); then
+        rows=''
+        dbtune_audit_scope_put "$dbout" "$scope" audit_error.postmeta_indexes query_failed
+    fi
     index=0
     while IFS=$'\t' read -r a b; do
         [[ -n $a ]] || continue
-        dbtune_audit_scope_put "$dbout" "$database" "postmeta.index.$index" "$a:$b"
+        dbtune_audit_scope_put "$dbout" "$scope" "postmeta.index.$index" "$a:$b"
         if [[ $b == meta_value || $b == meta_value\(* ]]; then
-            dbtune_audit_scope_put "$dbout" "$database" rogue_meta_value_index "$a"
+            dbtune_audit_scope_put "$dbout" "$scope" rogue_meta_value_index "$a"
         fi
-        index=$((index + 1))
+        index=$(command awk -v n="$index" 'BEGIN { print n+1 }')
     done <<<"$rows"
 
-    rows=$(dbtune_audit_sql "SELECT TABLE_NAME, COALESCE(TABLE_ROWS,0), DATA_LENGTH+INDEX_LENGTH FROM information_schema.TABLES WHERE TABLE_SCHEMA=$(dbtune_sql_quote_literal "$database") ORDER BY DATA_LENGTH+INDEX_LENGTH DESC LIMIT 10" || true)
+    if ! rows=$(dbtune_audit_sql "SELECT TABLE_NAME, COALESCE(TABLE_ROWS,0), DATA_LENGTH+INDEX_LENGTH FROM information_schema.TABLES WHERE TABLE_SCHEMA=$(dbtune_sql_quote_literal "$database") ORDER BY DATA_LENGTH+INDEX_LENGTH DESC LIMIT 10"); then
+        rows=''
+        dbtune_audit_scope_put "$dbout" "$scope" audit_error.top_tables query_failed
+    fi
     index=0
     while IFS=$'\t' read -r a b c; do
         [[ -n $a ]] || continue
-        dbtune_audit_scope_put "$dbout" "$database" "top_table.$index" "$a:${b:-0}:${c:-0}"
-        index=$((index + 1))
+        dbtune_audit_scope_put "$dbout" "$scope" "top_table.$index" "$a:${b:-unknown}:${c:-unknown}"
+        index=$(command awk -v n="$index" 'BEGIN { print n+1 }')
     done <<<"$rows"
+}
+
+dbtune_audit_app_cron_status() {
+    local app=${1:-}
+    local app_root=${2:-}
+    local site_url=${3:-unknown}
+    local cron_root=${DBTUNE_CRON_ROOT:-/etc/cron.d}
+    local crontab_file=${DBTUNE_CRONTAB_FILE:-/etc/crontab}
+    local line candidates=0 site_base=${site_url%/}
+
+    while IFS= read -r line; do
+        [[ $line =~ ^[[:space:]]*# ]] && continue
+        candidates=1
+        if [[ $line == *"$app_root/"* || $line == *"$app_root "* || $line == *"$app/"* || $line == *"$app "* ]] ||
+            [[ $site_base != unknown && -n $site_base && ($line == *"$site_base/"* || $line == *"$site_base "*) ]]; then
+            printf '1\n'
+            return 0
+        fi
+    done < <(command grep -RhsE 'wp-cron\.php|wp cron event run' "$cron_root" "$crontab_file" 2>/dev/null || true)
+    if ((candidates)); then
+        printf 'unknown\n'
+    else
+        printf '0\n'
+    fi
 }
 
 dbtune_audit_collect_apps() {
@@ -498,7 +631,8 @@ dbtune_audit_collect_apps() {
     local dbout=${3:-}
     local home_root=${DBTUNE_HOME_ROOT:-/home}
     local user_dir app config app_root app_id app_index=0 type key value db_name='' prefix='' disable_cron=unresolved
-    local redis_active=0 redis_ping=0 cron_present=0 woo object_cache page_cache
+    local redis_active=0 redis_ping=0 woo object_cache page_cache wp_cache=unresolved
+    local multisite=false cron_status site_url optionsq dbq
     local -a databases=()
 
     if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet redis-server 2>/dev/null; then
@@ -509,12 +643,9 @@ dbtune_audit_collect_apps() {
     if command -v redis-cli >/dev/null 2>&1 && [[ $(redis-cli ping 2>/dev/null || true) == PONG ]]; then
         redis_ping=1
     fi
-    if command grep -RqsE 'wp-cron\.php|wp cron event run' "${DBTUNE_CRON_ROOT:-/etc/cron.d}" /etc/crontab 2>/dev/null; then
-        cron_present=1
-    fi
     dbtune_audit_put "$out" app.redis_service_active "$redis_active"
     dbtune_audit_put "$out" app.redis_ping "$redis_ping"
-    dbtune_audit_put "$out" app.system_wp_cron "$cron_present"
+    dbtune_audit_put "$out" app.system_wp_cron unknown
     if ((redis_ping)); then
         value=$(redis-cli --raw CONFIG GET maxmemory-policy 2>/dev/null | command awk 'NR==2 { print; exit }' || true)
         dbtune_audit_put "$out" redis.maxmemory_policy "${value:-unknown}"
@@ -547,32 +678,41 @@ dbtune_audit_collect_apps() {
             db_name=''
             prefix=''
             disable_cron=unresolved
+            multisite=false
+            wp_cache=unresolved
             if [[ -n $config ]]; then
                 while IFS=$'\t' read -r key value; do
                     case $key in
                         DB_NAME) db_name=$value ;;
                         table_prefix) prefix=$value ;;
                         DISABLE_WP_CRON) disable_cron=$value ;;
+                        MULTISITE) multisite=$value ;;
+                        WP_CACHE) wp_cache=$value ;;
                     esac
                 done < <(dbtune_wp_config_parse "$config")
             fi
-            if command -v wp >/dev/null 2>&1; then
-                if [[ -z $db_name || $db_name == unresolved ]]; then
-                    db_name=$(wp --path="$app_root" --allow-root --quiet config get DB_NAME 2>/dev/null || true)
-                fi
-                if [[ -z $prefix || $prefix == unresolved ]]; then
-                    prefix=$(wp --path="$app_root" --allow-root --quiet db prefix 2>/dev/null || true)
+            [[ -n $db_name ]] || db_name=unresolved
+            [[ -n $prefix ]] || prefix=unresolved
+            site_url=unknown
+            if [[ $db_name != unresolved && $prefix != unresolved && $prefix =~ ^[A-Za-z0-9_]+$ ]]; then
+                dbq=$(dbtune_sql_quote_identifier "$db_name" || true)
+                optionsq=$(dbtune_sql_quote_identifier "${prefix}options" || true)
+                if [[ -n $dbq && -n $optionsq ]] && value=$(dbtune_audit_sql "SELECT option_value FROM $dbq.$optionsq WHERE option_name IN ('home','siteurl') ORDER BY option_name LIMIT 2"); then
+                    site_url=${value%%$'\n'*}
+                    [[ -n $site_url ]] || site_url=unknown
                 fi
             fi
-            if [[ -n $db_name && $db_name != unresolved && (-z $prefix || $prefix == unresolved) ]]; then
-                value=$(dbtune_audit_sql "SHOW TABLES FROM $(dbtune_sql_quote_identifier "$db_name") LIKE '%options'" || true)
-                value=${value%%$'\n'*}
-                [[ $value == *options ]] && prefix=${value%options}
-            fi
-            [[ -n $prefix && $prefix != unresolved ]] || prefix=wp_
+            cron_status=$(dbtune_audit_app_cron_status "$app" "$app_root" "$site_url")
             dbtune_audit_scope_put "$appout" "$app_id" database "${db_name:-unresolved}"
             dbtune_audit_scope_put "$appout" "$app_id" table_prefix "$prefix"
             dbtune_audit_scope_put "$appout" "$app_id" disable_wp_cron "$disable_cron"
+            dbtune_audit_scope_put "$appout" "$app_id" system_wp_cron "$cron_status"
+            if [[ $site_url == unknown ]]; then
+                dbtune_audit_scope_put "$appout" "$app_id" site_url_status unresolved
+            else
+                dbtune_audit_scope_put "$appout" "$app_id" site_url_status resolved
+            fi
+            dbtune_audit_scope_put "$appout" "$app_id" multisite "$multisite"
 
             object_cache=0
             page_cache=0
@@ -580,11 +720,11 @@ dbtune_audit_collect_apps() {
             [[ -f $app_root/wp-content/object-cache.php ]] && object_cache=1
             [[ -f $app_root/wp-content/advanced-cache.php ]] && page_cache=1
             [[ -f $app_root/wp-content/plugins/woocommerce/woocommerce.php ]] && woo=1
-            if [[ $woo == 0 && -n $db_name && $db_name != unresolved ]] &&
+            if [[ $woo == 0 && $db_name != unresolved && $prefix != unresolved ]] &&
                 dbtune_audit_table_exists "$db_name" "${prefix}woocommerce_sessions"; then
                 woo=1
             fi
-            if [[ -n $config ]] && command grep -Eqs "define[[:space:]]*\([[:space:]]*['\"]WP_CACHE['\"][[:space:]]*,[[:space:]]*(true|TRUE)" "$config" 2>/dev/null; then
+            if [[ $wp_cache == true ]]; then
                 page_cache=1
             fi
             dbtune_audit_scope_put "$appout" "$app_id" object_cache_dropin "$object_cache"
@@ -595,23 +735,34 @@ dbtune_audit_collect_apps() {
             elif [[ $redis_ping == 0 ]]; then
                 dbtune_audit_scope_put "$appout" "$app_id" finding.redis_unavailable critical
             fi
-            if [[ $disable_cron == true && $cron_present == 0 ]]; then
+            if [[ $disable_cron == true && $cron_status == 0 ]]; then
                 dbtune_audit_scope_put "$appout" "$app_id" finding.wp_cron_disabled critical
+            elif [[ $disable_cron == true && $cron_status == unknown ]]; then
+                dbtune_audit_scope_put "$appout" "$app_id" finding.wp_cron_mapping_unknown warning
             fi
-            if [[ -n $db_name && $db_name != unresolved ]]; then
-                databases+=("$db_name"$'\t'"$prefix")
+            if [[ $db_name != unresolved && $prefix != unresolved ]]; then
+                if [[ $multisite == true ]]; then
+                    dbtune_audit_scope_put "$appout" "$app_id" multisite_metrics unsupported
+                    dbtune_audit_scope_put "$appout" "$app_id" finding.multisite_metrics_unknown warning
+                elif [[ $multisite == unresolved ]]; then
+                    dbtune_audit_scope_put "$appout" "$app_id" multisite_metrics unknown
+                    dbtune_audit_scope_put "$appout" "$app_id" finding.multisite_metrics_unknown warning
+                else
+                    databases+=("$app_id"$'\t'"$db_name"$'\t'"$prefix")
+                fi
                 dbtune_audit_scope_put "$dbout" "$db_name" "app_id.${app_id##*.}" "$app_id"
             else
-                dbtune_audit_scope_put "$appout" "$app_id" finding.database_unresolved warning
+                [[ $db_name != unresolved ]] || dbtune_audit_scope_put "$appout" "$app_id" finding.database_unresolved warning
+                [[ $prefix != unresolved ]] || dbtune_audit_scope_put "$appout" "$app_id" finding.table_prefix_unresolved warning
             fi
         done
     done
     dbtune_audit_put "$out" app.count "$app_index"
 
     if ((${#databases[@]})); then
-        while IFS=$'\t' read -r db_name prefix; do
-            dbtune_audit_database_metrics "$dbout" "$db_name" "$prefix" || {
-                dbtune_audit_scope_put "$dbout" "$db_name" audit_error query_failed
+        while IFS=$'\t' read -r app_id db_name prefix; do
+            dbtune_audit_database_metrics "$dbout" "$app_id" "$db_name" "$prefix" || {
+                dbtune_audit_scope_put "$dbout" "$app_id" audit_error.metrics query_failed
             }
         done < <(printf '%s\n' "${databases[@]}" | sort -u)
     fi
@@ -757,15 +908,26 @@ dbtune_audit_json() {
     local database_file=${3:-}
     local scope key value
     local -a fields=()
+    local -A json_seen=()
 
     while IFS=$'\t' read -r key value; do
-        [[ -n $key ]] && fields+=("$key" "$value")
+        [[ -n $key && -z ${json_seen[$key]+x} ]] || continue
+        json_seen["$key"]=1
+        fields+=("$key" "$value")
     done <"$audit"
     while IFS=$'\t' read -r scope key value; do
-        [[ -n $scope && -n $key ]] && fields+=("$scope.$key" "$value")
+        [[ -n $scope && -n $key ]] || continue
+        key="$scope.$key"
+        [[ -z ${json_seen[$key]+x} ]] || continue
+        json_seen["$key"]=1
+        fields+=("$key" "$value")
     done <"$apps"
     while IFS=$'\t' read -r scope key value; do
-        [[ -n $scope && -n $key ]] && fields+=("database.$(dbtune_audit_slug "$scope").$key" "$value")
+        [[ -n $scope && -n $key ]] || continue
+        key="database.$(dbtune_audit_slug "$scope").$key"
+        [[ -z ${json_seen[$key]+x} ]] || continue
+        json_seen["$key"]=1
+        fields+=("$key" "$value")
     done <"$database_file"
     dbtune_json_emit "${fields[@]}"
 }
@@ -822,6 +984,9 @@ cmd_audit() {
 
     dbtune_audit_put "$audit" audit.timestamp "$(dbtune_now)"
     dbtune_audit_put "$audit" audit.hostname "$(hostname 2>/dev/null || printf unknown)"
+    dbtune_audit_put "$audit" audit.sql_connect_timeout_seconds "${DBTUNE_SQL_CONNECT_TIMEOUT:-5}"
+    dbtune_audit_put "$audit" audit.sql_statement_timeout_seconds "${DBTUNE_AUDIT_QUERY_TIMEOUT_SECONDS:-5}"
+    dbtune_audit_put "$audit" audit.exact_full_table_counts disabled
     dbtune_audit_collect_mariadb "$audit" "$databases"
     dbtune_audit_collect_hw "$audit"
     dbtune_audit_collect_platform "$audit"
