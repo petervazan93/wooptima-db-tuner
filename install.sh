@@ -269,8 +269,9 @@ fi
 run_privileged install -d -m 0755 "$INSTALL_DIR"
 if [ "$PRIVILEGED_INSTALL" -eq 1 ]; then
     validate_privileged_install_path
-    [ ! -e "$target_new" ] && [ ! -L "$target_new" ] ||
+    if [ -e "$target_new" ] || [ -L "$target_new" ]; then
         fail "docasny privilegovany ciel uz existuje: $target_new"
+    fi
     run_privileged install -o root -g root -m 0755 "$temporary/dbtune" "$target_new"
     target_created=1
 else
@@ -278,8 +279,9 @@ else
     target_created=1
 fi
 if [ "$PRIVILEGED_INSTALL" -eq 1 ]; then
-    [ -f "$target_new" ] && [ ! -L "$target_new" ] ||
+    if [ ! -f "$target_new" ] || [ -L "$target_new" ]; then
         fail "docasny privilegovany ciel nie je regularny subor: $target_new"
+    fi
     validate_privileged_install_path
 fi
 run_privileged mv -f "$target_new" "$INSTALL_DIR/dbtune"
