@@ -2,7 +2,9 @@
 
 ## Instalacia
 
-`install.sh` stahuje iba artefakty z GitHub Releases cez HTTPS, kontroluje SHA-256, GitHub keyless artifact attestation a Bash syntax a az potom publikuje `/usr/local/bin/dbtune` atomickym `mv`. Overenie je fail-closed: vyzaduje `gh` CLI a pevne kontroluje repozitar `petervazan93/wooptima-db-tuner`, signer `petervazan93/wooptima-db-tuner/.github/workflows/release.yml` a GitHub-hosted runner.
+`install.sh` stahuje iba artefakty z GitHub Releases cez HTTPS, kontroluje SHA-256, GitHub keyless artifact attestation a Bash syntax a az potom publikuje `/usr/local/bin/dbtune` atomickym `mv`. Overenie je fail-closed: vyzaduje `gh` CLI a pevne kontroluje zdrojovy repozitar aj jeho vlastnika cez `--repo petervazan93/wooptima-db-tuner`, signer `petervazan93/wooptima-db-tuner/.github/workflows/release.yml`, presny release source ref a GitHub-hosted runner.
+
+`DBTUNE_REPOSITORY` nie je podporovane. Upstream repository, ocakavany vlastnik, signer workflow a source ref tvoria jednu nemennu trust policy; operator nemoze prepisat iba download repository a ponechat nejasny povod. Distribucny mirror je bezpecny iba pre bajtovo identicke upstream artefakty s upstream atestaciou. Fork alebo mirror s vlastnym buildom moze ovladat svoj release, workflow aj bundle, preto musi udrziavat vlastny installer s kompletne explicitnou alternativnou politikou. Upstream installer takyto build odmietne namiesto automatickeho oslabenia alebo preladenia dovery.
 
 Primarny postup nepouziva pipe do root shellu. Pripnite release, overte atestaciu installera, skontrolujte jeho obsah a az potom ho spustite:
 

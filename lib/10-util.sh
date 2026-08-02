@@ -22,23 +22,463 @@ dbtune_path() {
     printf '%s/%s\n' "$DBTUNE_STATE_DIR" "$1"
 }
 
+dbtune_path_is_canonical_absolute() {
+    local path=${1:-}
+
+    [[ $path == /* && $path != / && $path != */ && $path != *//* && $path != *$'\n'* ]] || return 1
+    [[ $path != */./* && $path != */. && $path != */../* && $path != */.. ]]
+}
+
+dbtune_file_identity() {
+    local path=${1:-}
+
+    [[ -n $path ]] || return 64
+    if stat -c '%d:%i' "$path" >/dev/null 2>&1; then
+        stat -c '%d:%i' "$path"
+    else
+        stat -f '%d:%i' "$path"
+    fi
+}
+
+dbtune_file_inode() {
+    local path=${1:-}
+
+    [[ -n $path ]] || return 64
+    if stat -L -c '%i' "$path" >/dev/null 2>&1; then
+        stat -L -c '%i' "$path"
+    else
+        stat -L -f '%i' "$path"
+    fi
+}
+
+dbtune_file_links() {
+    local path=${1:-}
+
+    [[ -n $path ]] || return 64
+    if stat -c '%h' "$path" >/dev/null 2>&1; then
+        stat -c '%h' "$path"
+    else
+        stat -f '%l' "$path"
+    fi
+}
+
+dbtune_validate_single_link_file() {
+    local file=${1:-}
+    local label=${2:-Spravovany subor}
+    local links
+
+    if [[ -L $file || ! -f $file ]]; then
+        dbtune_log error "$label nie je bezpecny regularny subor: $file"
+        return 65
+    fi
+    links=$(dbtune_file_links "$file") || return 1
+    if [[ $links != 1 ]]; then
+        dbtune_log error "$label nema ocakavanu hardlink topologiu: $file (links=$links, ocakavane=1)"
+        return 65
+    fi
+}
+
+dbtune_state_expected_uid() {
+    printf '%s\n' "${DBTUNE_STATE_UID:-$EUID}"
+}
+
+dbtune_validate_state_parent_components() {
+    local directory=${1:-}
+    local expected_uid=${2:-}
+    local component current='' uid gid mode
+    local -a components
+
+    dbtune_path_is_canonical_absolute "$directory" || {
+        dbtune_log error "State adresar musi byt kanonicka absolutna cesta: ${directory:-<prazdny>}"
+        return 65
+    }
+    [[ $expected_uid =~ ^[0-9]+$ ]] || return 64
+    IFS=/ read -r -a components <<<"${directory%/*}"
+    for component in "${components[@]}"; do
+        [[ -n $component ]] || continue
+        current+="/$component"
+        if [[ -L $current || ! -d $current ]]; then
+            dbtune_log error "State parent komponent nie je bezpecny realny adresar: $current"
+            return 65
+        fi
+        read -r uid gid mode < <(dbtune_file_stat "$current") || return 1
+        if [[ ! $uid =~ ^[0-9]+$ || ! $mode =~ ^[0-7]{3,4}$ ||
+            ($uid != 0 && $uid != "$expected_uid") ]]; then
+            dbtune_log error "State parent komponent ma nedoveryhodne vlastnictvo alebo mode: $current ($uid:$gid $mode)"
+            return 65
+        fi
+        if (((8#$mode & 0022) != 0 && ((8#$mode & 01000) == 0 || uid != 0))); then
+            dbtune_log error "State parent komponent je nedoveryhodne group/world writable: $current ($uid:$gid $mode)"
+            return 65
+        fi
+    done
+}
+
+dbtune_validate_state_dir() {
+    local expected_uid=${1:-}
+    local expected_identity=${2:-}
+    local expected_mode=${3:-}
+    local uid gid mode identity
+
+    dbtune_validate_state_parent_components "$DBTUNE_STATE_DIR" "$expected_uid" || return
+    if [[ -L $DBTUNE_STATE_DIR || ! -d $DBTUNE_STATE_DIR ]]; then
+        dbtune_log error "State cesta nie je bezpecny realny adresar: $DBTUNE_STATE_DIR"
+        return 65
+    fi
+    read -r uid gid mode < <(dbtune_file_stat "$DBTUNE_STATE_DIR") || return 1
+    if [[ $uid != "$expected_uid" ]]; then
+        dbtune_log error "State adresar nevlastni ocakavana privilegovana identita: $DBTUNE_STATE_DIR ($uid:$gid)"
+        return 65
+    fi
+    if [[ -n $expected_mode && $mode != "$expected_mode" ]]; then
+        dbtune_log error "State adresar nema ocakavany mode: $DBTUNE_STATE_DIR ($mode)"
+        return 65
+    fi
+    identity=$(dbtune_file_identity "$DBTUNE_STATE_DIR") || return 1
+    if [[ -n $expected_identity && $identity != "$expected_identity" ]]; then
+        dbtune_log error "State adresar bol pocas validacie vymeneny: $DBTUNE_STATE_DIR"
+        return 65
+    fi
+}
+
 dbtune_init_state_dir() {
-    if [[ -d $DBTUNE_STATE_DIR ]]; then
-        chmod 700 "$DBTUNE_STATE_DIR" 2>/dev/null || return 1
+    local expected_uid identity
+
+    expected_uid=$(dbtune_state_expected_uid) || return 1
+    [[ $expected_uid =~ ^[0-9]+$ ]] || return 64
+    dbtune_validate_state_parent_components "$DBTUNE_STATE_DIR" "$expected_uid" || return
+    if [[ -L $DBTUNE_STATE_DIR ]]; then
+        dbtune_log error "State cesta nesmie byt symlink: $DBTUNE_STATE_DIR"
+        return 65
+    elif [[ -e $DBTUNE_STATE_DIR ]]; then
+        dbtune_validate_state_dir "$expected_uid" "" 700 || return
     else
         install -d -m 700 "$DBTUNE_STATE_DIR" || return 1
     fi
+    dbtune_validate_state_dir "$expected_uid" "" 700 || return
+    identity=$(dbtune_file_identity "$DBTUNE_STATE_DIR") || return 1
+    dbtune_validate_state_dir "$expected_uid" "$identity" 700 || return
 }
 
 dbtune_now() {
     date -u '+%Y-%m-%dT%H:%M:%SZ'
 }
 
+dbtune_sanitize_text() {
+    local input=${1-}
+    local output='' char sequence
+    local code next_code expected valid index=0 offset length
+
+    if [[ ! $input =~ [[:cntrl:]] ]]; then
+        printf '%s' "$input"
+        return 0
+    fi
+    local LC_ALL=C
+
+    length=${#input}
+    while ((index < length)); do
+        char=${input:index:1}
+        printf -v code '%d' "'$char"
+        if ((code < 32 || code == 127 || (code >= 128 && code <= 159))); then
+            output+=' '
+            index=$((index + 1))
+            continue
+        fi
+        expected=1
+        if ((code >= 194 && code <= 223)); then
+            expected=2
+        elif ((code >= 224 && code <= 239)); then
+            expected=3
+        elif ((code >= 240 && code <= 244)); then
+            expected=4
+        fi
+        if ((expected > 1 && index + expected <= length)); then
+            valid=1
+            for ((offset = 1; offset < expected; offset++)); do
+                char=${input:index+offset:1}
+                printf -v next_code '%d' "'$char"
+                if ((next_code < 128 || next_code > 191)); then
+                    valid=0
+                    break
+                fi
+            done
+            if ((valid)); then
+                sequence=${input:index:expected}
+                if ((code == 194)); then
+                    char=${input:index+1:1}
+                    printf -v next_code '%d' "'$char"
+                    if ((next_code >= 128 && next_code <= 159)); then
+                        output+=' '
+                        index=$((index + expected))
+                        continue
+                    fi
+                fi
+                output+=$sequence
+                index=$((index + expected))
+                continue
+            fi
+        fi
+        output+=${input:index:1}
+        index=$((index + 1))
+    done
+    printf '%s' "$output"
+}
+
+dbtune_key_normalize() {
+    printf '%s' "${1:-}" | LC_ALL=C tr '[:upper:]-' '[:lower:]_'
+}
+
+dbtune_is_sensitive_key() {
+    local key compact
+    key=$(dbtune_sanitize_text "${1:-}")
+    key=${key,,}
+    key=${key//[!a-z0-9]/_}
+    compact=${key//_/}
+    case $key in
+        *password*|*passwd*|pwd|pwd_*|*_pwd|*_pwd_*|*credential*|*secret*|*token*|*salt*|*private_key*) return 0 ;;
+    esac
+    case $compact in
+        *privatekey*|*apikey*|*accesskey*|*authkey*|*clientkey*|*consumerkey*|*signingkey*|*encryptionkey*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 dbtune_redact() {
-    printf '%s' "${1:-}" | sed -E \
-        -e 's/(((db[_-]?)?password|passwd|pwd)[[:space:]]*[=:][[:space:]]*)[^[:space:]]+/\1[REDACTED]/Ig' \
-        -e 's/(--password([=[:space:]]+))[^[:space:]]+/\1[REDACTED]/g' \
+    local value lower key quote char prefix suffix
+    local index key_start key_end value_start value_end escaped
+
+    value=$(dbtune_sanitize_text "${1:-}")
+    lower=${value,,}
+    case $lower in
+        *pass*|*pwd*|*credential*|*secret*|*token*|*salt*|*api*key*|*access*key*|*auth*key*|\
+        *client*key*|*consumer*key*|*private*key*|*signing*key*|*encryption*key*|*' -p'*) ;;
+        *)
+            printf '%s' "$value"
+            return 0
+            ;;
+    esac
+    index=0
+    while ((index < ${#value})); do
+        char=${value:index:1}
+        if [[ $char != = && $char != : ]]; then
+            index=$((index + 1))
+            continue
+        fi
+        key_end=$index
+        while ((key_end > 0)) && [[ ${value:key_end-1:1} == [[:space:]] ]]; do
+            key_end=$((key_end - 1))
+        done
+        key_start=$key_end
+        quote=''
+        if ((key_end > 0)) && [[ ${value:key_end-1:1} == "'" || ${value:key_end-1:1} == '"' ]]; then
+            quote=${value:key_end-1:1}
+            key_end=$((key_end - 1))
+            key_start=$key_end
+            while ((key_start > 0)) && [[ ${value:key_start-1:1} != "$quote" ]]; do
+                key_start=$((key_start - 1))
+            done
+        else
+            while ((key_start > 0)) && [[ ${value:key_start-1:1} == [[:alnum:]_.\ -] ]]; do
+                key_start=$((key_start - 1))
+            done
+        fi
+        key=${value:key_start:key_end-key_start}
+        if ! dbtune_is_sensitive_key "$key"; then
+            index=$((index + 1))
+            continue
+        fi
+        value_start=$((index + 1))
+        while ((value_start < ${#value})) && [[ ${value:value_start:1} == [[:space:]] ]]; do
+            value_start=$((value_start + 1))
+        done
+        value_end=$value_start
+        quote=${value:value_start:1}
+        if [[ $quote == "'" || $quote == '"' ]]; then
+            value_end=$((value_start + 1))
+            escaped=0
+            while ((value_end < ${#value})); do
+                char=${value:value_end:1}
+                value_end=$((value_end + 1))
+                if ((escaped)); then
+                    escaped=0
+                elif [[ $char == \\ ]]; then
+                    escaped=1
+                elif [[ $char == "$quote" ]]; then
+                    break
+                fi
+            done
+        else
+            while ((value_end < ${#value})); do
+                char=${value:value_end:1}
+                case $char in
+                    [[:space:]]|\;|,) break ;;
+                esac
+                value_end=$((value_end + 1))
+            done
+        fi
+        prefix=${value:0:value_start}
+        suffix=${value:value_end}
+        value="${prefix}[REDACTED]${suffix}"
+        index=$((${#prefix} + 10))
+    done
+    printf '%s' "$value" | sed -E \
+        -e 's/(--password([=[:space:]]+))[^[:space:]]+/\1[REDACTED]/Ig' \
         -e 's/(^|[[:space:]])-p[^[:space:]]+/\1-p[REDACTED]/g'
+}
+
+dbtune_audit_key_canonical() {
+    local key flat suffix
+
+    key=$(dbtune_key_normalize "${1:-}")
+    flat=${key//./_}
+    case $flat in
+        version|mariadb|mariadb_version|mariadb_server_version|server_mariadb_version)
+            printf 'mariadb.version\n'
+            ;;
+        mysql_version|server_mysql_version)
+            printf 'mysql.version\n'
+            ;;
+        server_version)
+            printf 'server.version\n'
+            ;;
+        database_family|server_family|sql_server_family)
+            printf 'database.family\n'
+            ;;
+        hostname|host_name|server_hostname|audit_hostname)
+            printf 'audit.hostname\n'
+            ;;
+        os|os_version|server_os)
+            printf 'audit.os\n'
+            ;;
+        cpu_count|cpu_cores|cpu_cores_count|hw_cpu_count)
+            printf 'hw.cpu_count\n'
+            ;;
+        hw_ram_bytes|memory_total_bytes|memory_total_mb|ram_total|ram_total_bytes|ram_bytes|ram_mb)
+            printf 'hw.ram_bytes\n'
+            ;;
+        memory_total_kb|mem_total_kb|ram_kb|ram_total_kb)
+            printf 'ram_total_kb\n'
+            ;;
+        hw_ram_available_bytes|mem_available_bytes|memory_available_bytes)
+            printf 'hw.ram_available_bytes\n'
+            ;;
+        mariadb_dataset_bytes|database_size_bytes|total_dataset_bytes|db_size_bytes|dataset_size|dataset_bytes|dataset_mb|dataset_total_mb)
+            printf 'mariadb.dataset_bytes\n'
+            ;;
+        php_fpm_max_children_sum|php_fpm_max_children|pm_max_children|fpm_max_children_sum|pm_max_children_sum)
+            printf 'php_fpm.max_children_sum\n'
+            ;;
+        max_connections_used|peak_connections|max_used_connections)
+            printf 'mariadb.status.max_used_connections\n'
+            ;;
+        hw_storage_class|disk_type|disk_class|storage_type|storage_class)
+            printf 'hw.storage_class\n'
+            ;;
+        runcloud_skip_log_bin|skip_log_bin)
+            printf 'runcloud.skip_log_bin\n'
+            ;;
+        security_remote_grant_count|remote_grant_count)
+            printf 'security.remote_grant_count\n'
+            ;;
+        security_port_3306|port_3306)
+            printf 'security.port_3306\n'
+            ;;
+        security_root_cnf_present|root_cnf_present)
+            printf 'security.root_cnf_present\n'
+            ;;
+        limit_nofile|systemd_limit_nofile)
+            printf 'systemd.limit_nofile\n'
+            ;;
+        unattended_mariadb|unattended_mariadb_origin)
+            printf 'unattended.mariadb_origin\n'
+            ;;
+        backup|backup_enabled)
+            printf 'backup.enabled\n'
+            ;;
+        mariadb_variable_*|mysql_variable_*|variables_*|variable_*)
+            suffix=$flat
+            suffix=${suffix#mariadb_variable_}
+            suffix=${suffix#mysql_variable_}
+            suffix=${suffix#variables_}
+            suffix=${suffix#variable_}
+            printf 'mariadb.variable.%s\n' "$suffix"
+            ;;
+        mariadb_status_*|mysql_status_*|status_*)
+            suffix=$flat
+            suffix=${suffix#mariadb_status_}
+            suffix=${suffix#mysql_status_}
+            suffix=${suffix#status_}
+            printf 'mariadb.status.%s\n' "$suffix"
+            ;;
+        buffer_pool_size)
+            printf 'mariadb.variable.innodb_buffer_pool_size\n'
+            ;;
+        innodb_*|max_connections|query_cache_type|query_cache_size|skip_name_resolve|thread_cache_size|tmp_table_size|max_heap_table_size|table_definition_cache|key_buffer_size|slow_query_log|slow_query_log_file|long_query_time|log_slow_verbosity|open_files_limit|performance_schema|log_bin|wsrep_on|bind_address|datadir)
+            printf 'mariadb.variable.%s\n' "$flat"
+            ;;
+        uptime|questions|com_select|created_tmp_disk_tables|created_tmp_tables|handler_read_rnd_next|qcache_hits|slow_queries|key_read_requests|aborted_connects|threads_running|threads_connected)
+            printf 'mariadb.status.%s\n' "$flat"
+            ;;
+        effective_open_files_limit)
+            printf 'mariadb.variable.open_files_limit\n'
+            ;;
+        audit_*|backup_*|app_*|finding_*|hw_*|mariadb_*|php_fpm_*|redis_*|runcloud_*|security_*|systemd_*|unattended_*)
+            if [[ $key == "$flat" ]]; then
+                suffix=${flat#*_}
+                printf '%s.%s\n' "${flat%%_*}" "$suffix"
+            else
+                printf '%s\n' "$key"
+            fi
+            ;;
+        *)
+            printf '%s\n' "$key"
+            ;;
+    esac
+}
+
+dbtune_audit_normalize() {
+    local file=${1:-}
+    local raw_key value rest canonical diagnostic line=0
+    local -a order=()
+    local -A seen=() values=() first_lines=()
+
+    [[ -r $file ]] || return 66
+    while IFS=$'\t' read -r raw_key value rest || [[ -n ${raw_key:-} ]]; do
+        line=$((line + 1))
+        value=${value%$'\r'}
+        [[ -n $raw_key ]] || continue
+        if [[ $(dbtune_key_normalize "$raw_key") == key && $(dbtune_key_normalize "$value") == value ]]; then
+            continue
+        fi
+        canonical=$(dbtune_audit_key_canonical "$raw_key") || return
+        [[ -n $canonical ]] || continue
+        if [[ ! $canonical =~ ^[a-z0-9][a-z0-9._-]*$ ]]; then
+            printf 'dbtune: neplatny audit key na riadku %s\n' "$line" >&2
+            return 65
+        fi
+        if [[ -n ${seen[$canonical]+x} ]]; then
+            if [[ ${values[$canonical]} != "$value" ]]; then
+                diagnostic=$canonical
+                dbtune_is_sensitive_key "$raw_key" && diagnostic='[REDACTED]'
+                printf 'dbtune: konfliktna duplicitna audit hodnota: key=%s; first_line=%s; duplicate_line=%s\n' \
+                    "$diagnostic" "${first_lines[$canonical]}" "$line" >&2
+                return 65
+            fi
+            continue
+        fi
+        seen["$canonical"]=1
+        values["$canonical"]=$value
+        first_lines["$canonical"]=$line
+        order+=("$canonical")
+    done <"$file"
+
+    for canonical in "${order[@]}"; do
+        printf '%s\t%s\n' "$canonical" "${values[$canonical]}"
+    done
+}
+
+dbtune_audit_validate() {
+    dbtune_audit_normalize "${1:-}" >/dev/null
 }
 
 dbtune_log() {
@@ -175,6 +615,106 @@ dbtune_shell_quote() {
     printf "'%s'" "${value//\'/\'\\\'\'}"
 }
 
+dbtune_samples_inspect() {
+    local file=${1:-}
+    local mode=${2:-diagnostics}
+
+    [[ -r $file ]] || return 66
+    [[ $mode == diagnostics || $mode == count || $mode == rows ]] || return 64
+    awk -F '\t' -v mode="$mode" '
+        function is_number(value) { return value ~ /^[0-9]+([.][0-9]+)?$/ }
+        function is_uint(value) { return value ~ /^[0-9]+$/ }
+        function is_timestamp(value, year, month, day, hour, minute, second, leap, month_days) {
+            if (value !~ /^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$/) return 0
+            year=substr(value, 1, 4)+0
+            month=substr(value, 6, 2)+0; day=substr(value, 9, 2)+0
+            hour=substr(value, 12, 2)+0; minute=substr(value, 15, 2)+0; second=substr(value, 18, 2)+0
+            if (month < 1 || month > 12 || hour > 23 || minute > 59 || second > 59) return 0
+            split("31 28 31 30 31 30 31 31 30 31 30 31", month_days, " ")
+            leap=(year%400==0 || (year%4==0 && year%100!=0))
+            if (leap) month_days[2]=29
+            return day >= 1 && day <= month_days[month]
+        }
+        function row_reason(legacy_extended, status, i) {
+            if (NF < expected_fields) return "truncated"
+            if (NF > expected_fields) return "extra_fields"
+            if (!is_timestamp($1)) return "invalid_timestamp"
+            for (i=2; i<=17; i++) if (!is_number($i)) return "non_numeric"
+            if (!is_uint($2) || !is_uint($8) || !is_uint($9) || !is_uint($11) ||
+                !is_uint($12) || !is_uint($14) || !is_uint($15) || !is_uint($17)) return "invalid_value"
+            if ($3 > 100 || $7 > 100 || $10 > 100 || $17 > 1) return "invalid_value"
+            if (expected_fields == 17) return ""
+            status=$20
+            if (status != "ok" && status != "degraded_interval") return "invalid_value"
+            legacy_extended=($18 == "" && $19 == "")
+            if (($18 == "") != ($19 == "")) return "non_numeric"
+            if (legacy_extended) return status == "ok" ? "" : "non_numeric"
+            if (!is_uint($18) || !is_number($19)) return "non_numeric"
+            if ($19 <= 0 && status == "ok") return "non_monotonic"
+            return ""
+        }
+        BEGIN {
+            OFS="\t"
+            canonical="timestamp\tuptime\tbp_hit_pct\tbp_misses_s\tdata_read_s\trnd_next_s\ttmp_disk_pct\tthreads_running\tthreads_connected\tqcache_hit_pct\tlog_waits_delta\twait_free_delta\tcpu_pct\tmem_available_kb\tswap_used_kb\tload1\trestart_flag\tqcache_queries_delta\tinterval_seconds\tsample_status"
+            legacy="timestamp\tuptime\tbp_hit_pct\tbp_misses_s\tdata_read_s\trnd_next_s\ttmp_disk_pct\tthreads_running\tthreads_connected\tqcache_hit_pct\tlog_waits_delta\twait_free_delta\tcpu_pct\tmem_available_kb\tswap_used_kb\tload1\trestart_flag"
+        }
+        NR == 1 {
+            sub(/\r$/, "")
+            if ($0 == canonical) expected_fields=20
+            else if ($0 == legacy) expected_fields=17
+            else { bad_header=1; exit 65 }
+            if (mode == "rows") print
+            next
+        }
+        $0 != "" {
+            sub(/\r$/, "", $NF)
+            reason=row_reason()
+            if (reason != "") {
+                rejected++
+                rejected_reason[reason]++
+                next
+            }
+            status=(expected_fields == 20) ? $20 : "ok"
+            if (status != "ok") excluded_status++
+            else if ($17 != 0) excluded_restart++
+            else {
+                valid++
+                if (mode == "rows") print
+            }
+        }
+        END {
+            if (bad_header) exit 65
+            if (!expected_fields) exit 65
+            if (mode == "count") print valid+0
+            else if (mode == "diagnostics") {
+                print "valid_rows", valid+0
+                print "rejected_rows", rejected+0
+                print "excluded_status_rows", excluded_status+0
+                print "excluded_restart_rows", excluded_restart+0
+                printf "rejected_reasons\ttruncated=%d,extra_fields=%d,non_numeric=%d,invalid_timestamp=%d,invalid_value=%d,non_monotonic=%d\n",
+                    rejected_reason["truncated"]+0, rejected_reason["extra_fields"]+0,
+                    rejected_reason["non_numeric"]+0, rejected_reason["invalid_timestamp"]+0,
+                    rejected_reason["invalid_value"]+0, rejected_reason["non_monotonic"]+0
+            }
+        }
+    ' "$file"
+}
+
+dbtune_samples_valid_rows() {
+    dbtune_samples_inspect "${1:-}" rows
+}
+
+dbtune_samples_diagnostics() {
+    dbtune_samples_inspect "${1:-}" diagnostics
+}
+
+dbtune_samples_diagnostic_value() {
+    local file=${1:-}
+    local wanted=${2:-}
+
+    dbtune_samples_diagnostics "$file" | awk -F '\t' -v wanted="$wanted" '$1 == wanted { print $2; found=1; exit } END { if (!found) exit 1 }'
+}
+
 dbtune_tsv_percentile() {
     local file=${1:-}
     local aliases=${2:-}
@@ -185,6 +725,7 @@ dbtune_tsv_percentile() {
     [[ -r $file && -n $aliases && $fallback =~ ^[1-9][0-9]*$ ]] || return 64
     [[ $percentile =~ ^[0-9]+([.][0-9]+)?$ ]] || return 64
     [[ $filter == valid || $filter == qcache-active ]] || return 64
+    dbtune_samples_diagnostics "$file" >/dev/null || return 65
     awk -F '\t' -v aliases="$aliases" -v fallback="$fallback" -v filter="$filter" '
         function norm(value) { value=tolower(value); gsub(/-/, "_", value); return value }
         BEGIN { wanted_count=split(aliases, wanted, ","); column=fallback }
@@ -205,7 +746,7 @@ dbtune_tsv_percentile() {
         (filter != "qcache-active" || (qcache_queries_column && $qcache_queries_column ~ /^[0-9]+([.][0-9]+)?$/ && $qcache_queries_column + 0 > 0)) &&
         (filter != "qcache-active" || ($column + 0 >= 0 && $column + 0 <= 100)) &&
         $column ~ /^-?[0-9]+([.][0-9]+)?$/ { print $column + 0 }
-    ' "$file" | LC_ALL=C sort -n | awk -v percentile="$percentile" '
+    ' < <(dbtune_samples_valid_rows "$file") | LC_ALL=C sort -n | awk -v percentile="$percentile" '
         { values[NR]=$1 }
         END {
             if (!NR || percentile < 0 || percentile > 100) exit 65
@@ -257,16 +798,55 @@ dbtune_backup_evidence_file() {
     printf '%s\n' "${DBTUNE_BACKUP_EVIDENCE_FILE:-$DBTUNE_STATE_DIR/backup-evidence.tsv}"
 }
 
+dbtune_iso8601_epoch() {
+    local timestamp=${1:-}
+
+    awk -v timestamp="$timestamp" 'BEGIN {
+        if (timestamp !~ /^[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z$/) exit 1
+        year=substr(timestamp,1,4)+0; month=substr(timestamp,6,2)+0; day=substr(timestamp,9,2)+0
+        hour=substr(timestamp,12,2)+0; minute=substr(timestamp,15,2)+0; second=substr(timestamp,18,2)+0
+        if (year < 1970 || month < 1 || month > 12 || hour > 23 || minute > 59 || second > 59) exit 1
+        leap=(year%400==0 || (year%4==0 && year%100!=0))
+        split("31 28 31 30 31 30 31 31 30 31 30 31", month_days, " ")
+        if (leap) month_days[2]=29
+        if (day < 1 || day > month_days[month]) exit 1
+        days=365*(year-1)+int((year-1)/4)-int((year-1)/100)+int((year-1)/400)
+        for (i=1; i<month; i++) days+=month_days[i]
+        days+=day
+        printf "%.0f\n", (days-719163)*86400+hour*3600+minute*60+second
+    }'
+}
+
 dbtune_backup_evidence_validate() {
     local file=${1:-}
-    local uid gid mode expected_uid
+    local uid gid mode expected_uid max_age now_epoch checked_epoch success_epoch
+    local status checked success
 
-    [[ -f $file && ! -L $file ]] || return 66
+    DBTUNE_BACKUP_EVIDENCE_AGE_SECONDS=unknown
+    DBTUNE_BACKUP_EVIDENCE_MAX_AGE_SECONDS=${DBTUNE_MAX_BACKUP_AGE_SECONDS:-86400}
+    DBTUNE_BACKUP_EVIDENCE_ERROR=invalid
+
+    max_age=$DBTUNE_BACKUP_EVIDENCE_MAX_AGE_SECONDS
+    if [[ ! $max_age =~ ^[1-9][0-9]{0,9}$ ]] || ((max_age > 2147483647)); then
+        DBTUNE_BACKUP_EVIDENCE_ERROR=invalid_max_age_policy
+        return 64
+    fi
+
+    if [[ ! -f $file || -L $file ]]; then
+        DBTUNE_BACKUP_EVIDENCE_ERROR=unsafe_or_missing_file
+        return 66
+    fi
     read -r uid gid mode < <(dbtune_file_stat "$file") || return 1
     expected_uid=${DBTUNE_BACKUP_EVIDENCE_UID:-0}
-    [[ $expected_uid =~ ^[0-9]+$ ]] || return 64
-    [[ $uid =~ ^[0-9]+$ && $gid =~ ^[0-9]+$ && $uid == "$expected_uid" && ($mode == 400 || $mode == 600) ]] || return 65
-    awk -F '\t' '
+    if [[ ! $expected_uid =~ ^[0-9]+$ ]]; then
+        DBTUNE_BACKUP_EVIDENCE_ERROR=invalid_expected_uid
+        return 64
+    fi
+    if [[ ! $uid =~ ^[0-9]+$ || ! $gid =~ ^[0-9]+$ || $uid != "$expected_uid" || ($mode != 400 && $mode != 600) ]]; then
+        DBTUNE_BACKUP_EVIDENCE_ERROR=unsafe_permissions
+        return 65
+    fi
+    if ! awk -F '\t' '
         NF != 2 || seen[$1]++ { bad=1; next }
         $1 == "schema" { schema=$2; next }
         $1 == "status" { status=$2; next }
@@ -283,7 +863,55 @@ dbtune_backup_evidence_validate() {
             if (status == "unknown") exit !(success == "unknown")
             exit 1
         }
-    ' "$file"
+    ' "$file"; then
+        DBTUNE_BACKUP_EVIDENCE_ERROR=invalid_contract
+        return 65
+    fi
+
+    status=$(dbtune_manifest_value "$file" status) || return 65
+    checked=$(dbtune_manifest_value "$file" checked_at) || return 65
+    success=$(dbtune_manifest_value "$file" last_success) || return 65
+    checked_epoch=$(dbtune_iso8601_epoch "$checked") || {
+        DBTUNE_BACKUP_EVIDENCE_ERROR=malformed_checked_at
+        return 65
+    }
+    if [[ -n ${DBTUNE_NOW_EPOCH:-} ]]; then
+        now_epoch=$DBTUNE_NOW_EPOCH
+        if [[ ! $now_epoch =~ ^[0-9]{1,12}$ ]]; then
+            DBTUNE_BACKUP_EVIDENCE_ERROR=invalid_current_time
+            return 70
+        fi
+    else
+        now_epoch=$(dbtune_iso8601_epoch "$(dbtune_now)") || {
+            DBTUNE_BACKUP_EVIDENCE_ERROR=invalid_current_time
+            return 70
+        }
+    fi
+    if ((checked_epoch > now_epoch)); then
+        DBTUNE_BACKUP_EVIDENCE_ERROR=future_checked_at
+        return 65
+    fi
+    if [[ $status == verified ]]; then
+        success_epoch=$(dbtune_iso8601_epoch "$success") || {
+            DBTUNE_BACKUP_EVIDENCE_ERROR=malformed_last_success
+            return 65
+        }
+        DBTUNE_BACKUP_EVIDENCE_AGE_SECONDS=$((now_epoch - success_epoch))
+        if ((success_epoch > now_epoch)); then
+            DBTUNE_BACKUP_EVIDENCE_ERROR=future_last_success
+            return 65
+        fi
+        if ((success_epoch > checked_epoch)); then
+            DBTUNE_BACKUP_EVIDENCE_ERROR=last_success_after_checked_at
+            return 65
+        fi
+        if ((DBTUNE_BACKUP_EVIDENCE_AGE_SECONDS > max_age)); then
+            DBTUNE_BACKUP_EVIDENCE_ERROR=expired
+            return 65
+        fi
+    fi
+    # shellcheck disable=SC2034 # Read by lifecycle and audit after validation.
+    DBTUNE_BACKUP_EVIDENCE_ERROR=none
 }
 
 dbtune_run_id() {
@@ -375,36 +1003,141 @@ dbtune_provenance_validate_audit() {
     fi
 }
 
+dbtune_dbsize_selected_rows() {
+    local file=${1:-}
+
+    [[ -r $file ]] || return 66
+    awk -F '\t' '
+        BEGIN { OFS="\t" }
+        NR == 1 {
+            if (!(($1 == "timestamp" || $1 == "date") &&
+                ($2 == "database" || $2 == "db") && $3 == "size_bytes" && NF == 3)) exit 65
+            next
+        }
+        {
+            timestamp=trim($1); database=trim($2); size=trim($3); date=substr(timestamp, 1, 10)
+            if (NF < 3 || timestamp == "" || database == "" || !valid_date(date) ||
+                size !~ /^[0-9]+([.][0-9]+)?$/) next
+            key=timestamp SUBSEP database
+            if (!(key in snapshot_size)) {
+                snapshot_count[timestamp]++
+                if (!(timestamp in snapshot_seen)) {
+                    snapshot_seen[timestamp]=1
+                    snapshot_day[timestamp]=date
+                    snapshots[++snapshot_total]=timestamp
+                }
+            }
+            snapshot_size[key]=size
+        }
+        END {
+            if (NR == 0) exit 65
+            for (i=1; i<=snapshot_total; i++) {
+                timestamp=snapshots[i]; date=snapshot_day[timestamp]
+                if (snapshot_count[timestamp] > day_database_count[date])
+                    day_database_count[date]=snapshot_count[timestamp]
+            }
+            for (i=1; i<=snapshot_total; i++) {
+                timestamp=snapshots[i]; date=snapshot_day[timestamp]
+                if (snapshot_count[timestamp] == day_database_count[date] &&
+                    (!(date in day_snapshot) || timestamp > day_snapshot[date]))
+                    day_snapshot[date]=timestamp
+            }
+            for (key in snapshot_size) {
+                split(key, fields, SUBSEP)
+                timestamp=fields[1]; database=fields[2]; date=snapshot_day[timestamp]
+                if (day_snapshot[date] == timestamp)
+                    rows[++row_count]=timestamp OFS database OFS snapshot_size[key]
+            }
+            sort_text(rows, row_count)
+            print "timestamp", "database", "size_bytes"
+            for (i=1; i<=row_count; i++) print rows[i]
+        }
+        function trim(value) {
+            sub(/^[[:space:]]+/, "", value); sub(/[[:space:]]+$/, "", value)
+            return value
+        }
+        function valid_date(date, parts, year, month, day, limit) {
+            if (date !~ /^[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]$/) return 0
+            split(date, parts, "-"); year=parts[1]+0; month=parts[2]+0; day=parts[3]+0
+            if (year < 1 || month < 1 || month > 12) return 0
+            limit=31
+            if (month == 2) limit=leap(year) ? 29 : 28
+            else if (month == 4 || month == 6 || month == 9 || month == 11) limit=30
+            return day >= 1 && day <= limit
+        }
+        function leap(year) { return year % 400 == 0 || (year % 4 == 0 && year % 100 != 0) }
+        function sort_text(values, count, i, j, value) {
+            for (i=2; i<=count; i++) {
+                value=values[i]; j=i-1
+                while (j >= 1 && values[j] > value) { values[j+1]=values[j]; j-- }
+                values[j+1]=value
+            }
+        }
+    ' "$file"
+}
+
+dbtune_provenance_analysis_fingerprint() {
+    local run_id=${1:-}
+    local audit_hash=${2:-}
+    local samples_hash=${3:-}
+    local dbsize_input=${4:-}
+    local dbsize_hash=${5:-}
+    local dbsize_selected_hash=${6:-}
+    local analysis_hash=${7:-}
+
+    printf 'run_id\t%s\naudit_hash\t%s\nsamples_hash\t%s\ndbsize_input\t%s\ndbsize_hash\t%s\ndbsize_selected_hash\t%s\nanalysis_hash\t%s\n' \
+        "$run_id" "$audit_hash" "$samples_hash" "$dbsize_input" "$dbsize_hash" \
+        "$dbsize_selected_hash" "$analysis_hash" | dbtune_sha256_stream
+}
+
 dbtune_provenance_write_analysis_manifest() {
     local output=${1:-}
     local analysis=${2:-}
     local samples=${3:-}
-    local audit_manifest run_id audit_hash samples_hash analysis_hash
+    local dbsize=${4:-}
+    local audit_manifest run_id audit_hash samples_hash dbsize_hash dbsize_selected_hash selected
+    local analysis_hash analysis_fingerprint row row_count=0
 
     audit_manifest=$(dbtune_audit_manifest_file) || return
     run_id=$(dbtune_manifest_value "$audit_manifest" run_id) || return 65
     audit_hash=$(dbtune_manifest_value "$audit_manifest" audit_hash) || return 65
     samples_hash=$(dbtune_sha256_file "$samples") || return
+    dbsize_hash=$(dbtune_sha256_file "$dbsize") || return
+    selected=$(dbtune_dbsize_selected_rows "$dbsize") || return
+    dbsize_selected_hash=$(printf '%s\n' "$selected" | awk 'NR > 1' | dbtune_sha256_stream) || return
     analysis_hash=$(dbtune_sha256_file "$analysis") || return
+    analysis_fingerprint=$(dbtune_provenance_analysis_fingerprint "$run_id" "$audit_hash" \
+        "$samples_hash" "$dbsize" "$dbsize_hash" "$dbsize_selected_hash" "$analysis_hash") || return
     {
-        printf 'schema\t1\n'
+        printf 'schema\t2\n'
         printf 'run_id\t%s\n' "$run_id"
         printf 'audit_hash\t%s\n' "$audit_hash"
         printf 'samples_hash\t%s\n' "$samples_hash"
+        printf 'dbsize_input\t%s\n' "$dbsize"
+        printf 'dbsize_hash\t%s\n' "$dbsize_hash"
+        printf 'dbsize_selected_hash\t%s\n' "$dbsize_selected_hash"
+        while IFS= read -r row; do
+            row_count=$((row_count + 1))
+            printf 'dbsize_selected_row.%06d\t%s\n' "$row_count" "$row"
+        done < <(printf '%s\n' "$selected" | awk 'NR > 1')
+        printf 'dbsize_selected_rows\t%s\n' "$row_count"
         printf 'analysis_hash\t%s\n' "$analysis_hash"
+        printf 'analysis_fingerprint\t%s\n' "$analysis_fingerprint"
     } | dbtune_atomic_write "$output" 600
 }
 
 dbtune_provenance_validate_analysis() {
-    local audit_manifest analysis_manifest samples analysis
-    local key audit_value analysis_value actual
+    local audit_manifest analysis_manifest samples dbsize analysis
+    local key audit_value analysis_value actual dbsize_input selected selected_hash selected_count
+    local analysis_fingerprint
 
     dbtune_provenance_validate_audit || return
     audit_manifest=$(dbtune_audit_manifest_file) || return
     analysis_manifest=$(dbtune_analysis_manifest_file) || return
     samples=$(dbtune_path samples.tsv) || return
+    dbsize=$(dbtune_path dbsize.tsv) || return
     analysis=$(dbtune_path analysis.tsv) || return
-    [[ -r $analysis_manifest && -r $samples && -r $analysis ]] || {
+    [[ -r $analysis_manifest && -r $samples && -r $dbsize && -r $analysis ]] || {
         dbtune_log error "Chyba analysis provenance alebo jeho vstup"
         return 66
     }
@@ -416,11 +1149,18 @@ dbtune_provenance_validate_analysis() {
             return 65
         fi
     done
-    for key in samples_hash analysis_hash; do
+    dbsize_input=$(dbtune_manifest_value "$analysis_manifest" dbsize_input) || return 65
+    [[ $dbsize_input == "$dbsize" ]] || {
+        dbtune_log error "Analysis pouzila iny dbsize vstup"
+        return 65
+    }
+    for key in samples_hash dbsize_hash analysis_hash; do
         analysis_value=$(dbtune_manifest_value "$analysis_manifest" "$key") || return 65
         [[ $analysis_value =~ ^[0-9a-f]{64}$ ]] || return 65
         if [[ $key == samples_hash ]]; then
             actual=$(dbtune_sha256_file "$samples") || return
+        elif [[ $key == dbsize_hash ]]; then
+            actual=$(dbtune_sha256_file "$dbsize") || return
         else
             actual=$(dbtune_sha256_file "$analysis") || return
         fi
@@ -429,6 +1169,33 @@ dbtune_provenance_validate_analysis() {
             return 65
         fi
     done
+    selected=$(dbtune_dbsize_selected_rows "$dbsize") || return
+    selected_hash=$(printf '%s\n' "$selected" | awk 'NR > 1' | dbtune_sha256_stream) || return
+    analysis_value=$(dbtune_manifest_value "$analysis_manifest" dbsize_selected_hash) || return 65
+    [[ $analysis_value =~ ^[0-9a-f]{64}$ && $selected_hash == "$analysis_value" ]] || return 65
+    actual=$(awk -F '\t' '$1 ~ /^dbsize_selected_row\.[0-9][0-9][0-9][0-9][0-9][0-9]$/ {sub(/^[^\t]*\t/, ""); print}' \
+        "$analysis_manifest" | dbtune_sha256_stream) || return
+    [[ $actual == "$selected_hash" ]] || {
+        dbtune_log error "Analysis dbsize baseline riadky nezodpovedaju vstupu"
+        return 65
+    }
+    selected_count=$(dbtune_manifest_value "$analysis_manifest" dbsize_selected_rows) || return 65
+    [[ $selected_count =~ ^[0-9]+$ ]] || return 65
+    actual=$(awk -F '\t' '$1 ~ /^dbsize_selected_row\.[0-9][0-9][0-9][0-9][0-9][0-9]$/ {count++} END {print count+0}' "$analysis_manifest")
+    [[ $actual == "$selected_count" ]] || return 65
+    analysis_fingerprint=$(dbtune_provenance_analysis_fingerprint \
+        "$(dbtune_manifest_value "$analysis_manifest" run_id)" \
+        "$(dbtune_manifest_value "$analysis_manifest" audit_hash)" \
+        "$(dbtune_manifest_value "$analysis_manifest" samples_hash)" \
+        "$dbsize_input" \
+        "$(dbtune_manifest_value "$analysis_manifest" dbsize_hash)" \
+        "$selected_hash" \
+        "$(dbtune_manifest_value "$analysis_manifest" analysis_hash)") || return
+    analysis_value=$(dbtune_manifest_value "$analysis_manifest" analysis_fingerprint) || return 65
+    [[ $analysis_value =~ ^[0-9a-f]{64}$ && $analysis_value == "$analysis_fingerprint" ]] || {
+        dbtune_log error "Analysis fingerprint nezodpoveda provenance"
+        return 65
+    }
 }
 
 dbtune_cycle_archive() {
@@ -480,20 +1247,117 @@ dbtune_lifecycle_lock_file() {
     printf '%s/.lifecycle.lock\n' "$DBTUNE_STATE_DIR"
 }
 
+dbtune_validate_state_lock_path() {
+    local lock_file=${1:-}
+    local label=${2:-State lock}
+    local directory base
+
+    directory=${lock_file%/*}
+    base=${lock_file##*/}
+    if [[ $directory != "$DBTUNE_STATE_DIR" || ! $base =~ ^[A-Za-z0-9.][A-Za-z0-9._-]*[.]lock$ ]]; then
+        dbtune_log error "$label musi byt priamy .lock subor v state adresari: $lock_file"
+        return 65
+    fi
+}
+
+dbtune_validate_state_lock() {
+    local lock_file=${1:-}
+    local label=${2:-State lock}
+    local expected_identity=${3:-}
+    local expected_links=${4:-1}
+    local uid gid mode links identity expected_uid
+
+    [[ $expected_links =~ ^[12]$ ]] || return 64
+    dbtune_validate_state_lock_path "$lock_file" "$label" || return
+    expected_uid=$(dbtune_state_expected_uid) || return 1
+    if [[ -L $lock_file || ! -f $lock_file ]]; then
+        dbtune_log error "$label nie je bezpecny regularny subor: $lock_file"
+        return 65
+    fi
+    read -r uid gid mode < <(dbtune_file_stat "$lock_file") || return 1
+    links=$(dbtune_file_links "$lock_file") || return 1
+    identity=$(dbtune_file_identity "$lock_file") || return 1
+    if [[ $uid != "$expected_uid" || $mode != 600 || $links != "$expected_links" ]]; then
+        dbtune_log error "$label ma neocakavane vlastnictvo, mode alebo topologiu: $lock_file ($uid:$gid $mode links=$links, ocakavane=$expected_links)"
+        return 65
+    fi
+    if [[ -n $expected_identity && $identity != "$expected_identity" ]]; then
+        dbtune_log error "$label bol pocas otvorenia vymeneny: $lock_file"
+        return 65
+    fi
+    DBTUNE_STATE_LOCK_IDENTITY=$identity
+}
+
+dbtune_open_state_lock() {
+    local output_variable=${1:-}
+    local lock_file=${2:-}
+    local label=${3:-State lock}
+    local temporary identity inode fd_inode opened_fd status
+
+    [[ $output_variable =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || return 64
+    dbtune_validate_state_lock_path "$lock_file" "$label" || return
+    temporary=$(mktemp "$DBTUNE_STATE_DIR/.state.lock.open.XXXXXX") || return 1
+    chmod 600 "$temporary" || {
+        rm -f "$temporary"
+        return 1
+    }
+    identity=$(dbtune_file_identity "$temporary") || {
+        rm -f "$temporary"
+        return 1
+    }
+    if ! command ln -P "$temporary" "$lock_file" 2>/dev/null; then
+        rm -f "$temporary"
+        dbtune_validate_state_lock "$lock_file" "$label" || return
+        identity=$DBTUNE_STATE_LOCK_IDENTITY
+        temporary=$(mktemp "$DBTUNE_STATE_DIR/.state.lock.open.XXXXXX") || return 1
+        rm -f "$temporary"
+        if ! command ln -P "$lock_file" "$temporary" 2>/dev/null || [[ -L $temporary || ! -f $temporary ]] ||
+            [[ $(dbtune_file_identity "$temporary") != "$identity" ]]; then
+            rm -f "$temporary"
+            dbtune_log error "$label sa nepodarilo otvorit bez nasledovania symlinkov: $lock_file"
+            return 65
+        fi
+    fi
+    dbtune_validate_state_lock "$lock_file" "$label" "$identity" 2 || {
+        status=$?
+        rm -f "$temporary"
+        return "$status"
+    }
+    inode=${identity##*:}
+    if ! exec {opened_fd}>>"$temporary"; then
+        rm -f "$temporary"
+        return 1
+    fi
+    if [[ -e /proc/$$/fd/$opened_fd ]]; then
+        fd_inode=$(dbtune_file_inode "/proc/$$/fd/$opened_fd") || fd_inode=
+    else
+        fd_inode=$(dbtune_file_inode "/dev/fd/$opened_fd") || fd_inode=
+    fi
+    rm -f "$temporary"
+    if [[ $fd_inode != "$inode" ]] || ! dbtune_validate_state_lock "$lock_file" "$label" "$identity"; then
+        exec {opened_fd}>&-
+        dbtune_log error "Otvoreny $label nema ocakavanu identitu"
+        return 65
+    fi
+    printf -v "$output_variable" '%s' "$opened_fd"
+}
+
 dbtune_with_lifecycle_lock() {
     local mode=${1:-wait}
     local operation=${2:-operation}
     local function_name=${3:-}
-    local lock_fd status=0 flock_command=${DBTUNE_FLOCK:-flock}
+    local lock_file lock_identity lock_fd status=0 flock_command=${DBTUNE_FLOCK:-flock}
     shift 3 || true
 
-    dbtune_init_state_dir || return 1
+    dbtune_init_state_dir || return
     if ! command -v "$flock_command" >/dev/null 2>&1; then
         dbtune_log error "Lifecycle lock vyzaduje flock"
         [[ $mode == skip ]] && return 75
         return 69
     fi
-    exec {lock_fd}>"$(dbtune_lifecycle_lock_file)" || return 1
+    lock_file=$(dbtune_lifecycle_lock_file) || return
+    dbtune_open_state_lock lock_fd "$lock_file" "Lifecycle lock" || return
+    lock_identity=$DBTUNE_STATE_LOCK_IDENTITY
     if [[ $mode == skip ]]; then
         if ! "$flock_command" -n "$lock_fd"; then
             exec {lock_fd}>&-
@@ -504,7 +1368,17 @@ dbtune_with_lifecycle_lock() {
         dbtune_log error "Nepodarilo sa ziskat lifecycle lock pre $operation"
         return 1
     fi
-    "$function_name" "$@" || status=$?
+    if ! dbtune_validate_state_lock "$lock_file" "Lifecycle lock" "$lock_identity"; then
+        "$flock_command" -u "$lock_fd" >/dev/null 2>&1 || true
+        exec {lock_fd}>&-
+        return 65
+    fi
+    if declare -F dbtune_lifecycle_recover_if_needed >/dev/null 2>&1; then
+        dbtune_lifecycle_recover_if_needed || status=$?
+    fi
+    if ((status == 0)); then
+        "$function_name" "$@" || status=$?
+    fi
     "$flock_command" -u "$lock_fd" >/dev/null 2>&1 || true
     exec {lock_fd}>&-
     return "$status"
@@ -512,7 +1386,8 @@ dbtune_with_lifecycle_lock() {
 
 dbtune_event() {
     local event_type=${1:-}
-    local line lock_file
+    local line lock_file lock_identity lock_fd flock_command=${DBTUNE_EVENT_FLOCK:-flock}
+    local locked=0 status=0
     local -a fields
 
     [[ -n $event_type ]] || {
@@ -532,14 +1407,20 @@ dbtune_event() {
     done
     line=$(dbtune_json_emit "${fields[@]}") || return
     lock_file="$DBTUNE_STATE_DIR/.events.lock"
-    if command -v flock >/dev/null 2>&1; then
-        (
-            flock -x 9 || exit 1
-            printf '%s\n' "$line" >>"$(dbtune_events_file)"
-        ) 9>"$lock_file"
-    else
-        printf '%s\n' "$line" >>"$(dbtune_events_file)"
+    dbtune_open_state_lock lock_fd "$lock_file" "Event lock" || return
+    lock_identity=$DBTUNE_STATE_LOCK_IDENTITY
+    if command -v "$flock_command" >/dev/null 2>&1; then
+        if ! "$flock_command" -x "$lock_fd"; then
+            exec {lock_fd}>&-
+            return 1
+        fi
+        locked=1
     fi
+    dbtune_validate_state_lock "$lock_file" "Event lock" "$lock_identity" || status=$?
+    ((status != 0)) || printf '%s\n' "$line" >>"$(dbtune_events_file)" || status=$?
+    ((locked == 0)) || "$flock_command" -u "$lock_fd" >/dev/null 2>&1 || true
+    exec {lock_fd}>&-
+    ((status == 0)) || return "$status"
     chmod 600 "$(dbtune_events_file)" 2>/dev/null || true
 }
 
@@ -554,10 +1435,11 @@ dbtune_state_read() {
     local file state
 
     file=$(dbtune_state_file)
-    if [[ ! -e $file ]]; then
+    if [[ ! -e $file && ! -L $file ]]; then
         printf 'idle\n'
         return 0
     fi
+    dbtune_validate_single_link_file "$file" "State subor" || return
     IFS= read -r state <"$file" || true
     if ! dbtune_state_is_valid "$state"; then
         dbtune_log error "State subor obsahuje neplatny stav: ${state:-<prazdny>}"
@@ -568,13 +1450,19 @@ dbtune_state_read() {
 
 dbtune_state_write() {
     local state=${1:-}
+    local file
 
     if ! dbtune_state_is_valid "$state"; then
         dbtune_log error "Nie je mozne zapisat neplatny stav: ${state:-<prazdny>}"
         return 64
     fi
     dbtune_init_state_dir || return 1
-    printf '%s\n' "$state" | dbtune_atomic_write "$(dbtune_state_file)" 600
+    file=$(dbtune_state_file)
+    if [[ -e $file || -L $file ]]; then
+        dbtune_validate_single_link_file "$file" "State subor" || return
+    fi
+    printf '%s\n' "$state" | dbtune_atomic_write "$file" 600 || return
+    dbtune_validate_single_link_file "$file" "Publikovany state subor"
 }
 
 dbtune_state_can_transition() {

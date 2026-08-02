@@ -1,9 +1,12 @@
 #!/usr/bin/env bats
 
 setup() {
+    BATS_TEST_TMPDIR=$(CDPATH='' cd -- "$BATS_TEST_TMPDIR" && pwd -P)
+    export BATS_TEST_TMPDIR
     export DBTUNE_STATE_DIR="$BATS_TEST_TMPDIR/state"
     export DBTUNE_LOG_LEVEL=quiet
     mkdir -p "$DBTUNE_STATE_DIR"
+    chmod 700 "$DBTUNE_STATE_DIR"
     source "$BATS_TEST_DIRNAME/../../lib/00-header.sh"
     source "$BATS_TEST_DIRNAME/../../lib/10-util.sh"
     source "$BATS_TEST_DIRNAME/../../lib/20-audit.sh"
@@ -56,6 +59,18 @@ make_samples() {
     }' >"$file"
 }
 
+append_malformed_samples() {
+    local file=$1 valid
+
+    valid=$'2026-07-24T00:00:00Z\t300\t99\t1\t1024\t100\t20\t2\t5\t30\t0\t0\t5\t12000000\t0\t1\t0\t10\t300\tok'
+    {
+        printf '2026-07-24T00:01:00Z\t360\t99\n'
+        printf '%s\textra\n' "$valid"
+        printf '2026-07-24T00:02:00Z\t420\t99\t1\t1024\t100\t20\t2\t5\t30\toops\t0\t5\t12000000\t0\t1\t0\t10\t300\tok\n'
+        printf '2026-07-24T00:03:00Z\t480\t99\t1\t1024\t100\t20\t2\t5\t30\t0\t0\t5\t12000000\t0\t1\t0\t10\t0\tok\n'
+    } >>"$file"
+}
+
 analysis_value() {
     local file=$1
     local rule=$2
@@ -87,6 +102,55 @@ write_current_audit_manifest() {
 @test "audit effective variables exactly cover the rules proposal contract" {
     run diff <(dbtune_audit_effective_variables | LC_ALL=C sort -u) <(dbtune_rules_proposable_variables | LC_ALL=C sort -u)
     [ "$status" -eq 0 ]
+}
+
+@test "rules resolve canonical audit aliases independently of record order" {
+    local first second
+
+    make_audit "$BATS_TEST_TMPDIR/base.tsv"
+    make_samples "$BATS_TEST_TMPDIR/samples.tsv" 30 2 10
+    awk -F '\t' '$1 != "mariadb_version" {print}' OFS='\t' "$BATS_TEST_TMPDIR/base.tsv" >"$BATS_TEST_TMPDIR/body.tsv"
+    {
+        printf 'mariadb_version\t10.6.18-MariaDB\n'
+        printf 'mariadb.version\t10.6.18-MariaDB\n'
+        cat "$BATS_TEST_TMPDIR/body.tsv"
+    } >"$BATS_TEST_TMPDIR/alias-first.tsv"
+    {
+        printf 'mariadb.version\t10.6.18-MariaDB\n'
+        printf 'mariadb_version\t10.6.18-MariaDB\n'
+        cat "$BATS_TEST_TMPDIR/body.tsv"
+    } >"$BATS_TEST_TMPDIR/canonical-first.tsv"
+
+    dbtune_rules_analyze "$BATS_TEST_TMPDIR/alias-first.tsv" "$BATS_TEST_TMPDIR/samples.tsv" "" "" "" 10 >"$BATS_TEST_TMPDIR/first.tsv"
+    dbtune_rules_analyze "$BATS_TEST_TMPDIR/canonical-first.tsv" "$BATS_TEST_TMPDIR/samples.tsv" "" "" "" 10 >"$BATS_TEST_TMPDIR/second.tsv"
+
+    run cmp "$BATS_TEST_TMPDIR/first.tsv" "$BATS_TEST_TMPDIR/second.tsv"
+    [ "$status" -eq 0 ]
+    run awk -F '\t' '$1=="R-VERSION" && $4=="UNSUPPORTED" {bad=1} END {print bad+0}' "$BATS_TEST_TMPDIR/first.tsv"
+    [ "$output" = 0 ]
+}
+
+@test "rules reject conflicting canonical duplicates in every order" {
+    local first second
+
+    make_audit "$BATS_TEST_TMPDIR/base.tsv"
+    make_samples "$BATS_TEST_TMPDIR/samples.tsv" 30 2 10
+    awk -F '\t' '$1 != "mariadb_version" {print}' OFS='\t' "$BATS_TEST_TMPDIR/base.tsv" >"$BATS_TEST_TMPDIR/body.tsv"
+    for first in mariadb_version mariadb.version; do
+        if [[ $first == mariadb_version ]]; then second=mariadb.version; else second=mariadb_version; fi
+        {
+            printf '%s\t10.6.18-MariaDB\n' "$first"
+            printf '%s\t11.4.12-MariaDB\n' "$second"
+            cat "$BATS_TEST_TMPDIR/body.tsv"
+        } >"$BATS_TEST_TMPDIR/conflict.tsv"
+
+        run dbtune_rules_analyze "$BATS_TEST_TMPDIR/conflict.tsv" "$BATS_TEST_TMPDIR/samples.tsv" "" "" "" 10
+
+        [ "$status" -eq 65 ]
+        [[ "$output" == *'key=mariadb.version'* ]]
+        [[ "$output" != *'10.6.18-MariaDB'* ]]
+        [[ "$output" != *'11.4.12-MariaDB'* ]]
+    done
 }
 
 @test "missing current values block ordinary and explicit durability proposals" {
@@ -152,7 +216,7 @@ write_current_audit_manifest() {
     dbtune_rules_analyze "$BATS_TEST_TMPDIR/audit.tsv" "$BATS_TEST_TMPDIR/samples-low.tsv" "" "" "" 10 >"$BATS_TEST_TMPDIR/low.tsv"
     [ "$(analysis_value "$BATS_TEST_TMPDIR/low.tsv" R-QCACHE query_cache_type)" = 0 ]
 
-    make_samples "$BATS_TEST_TMPDIR/samples-busy.tsv" 20 8.01 10
+    make_samples "$BATS_TEST_TMPDIR/samples-busy.tsv" 20 9 10
     dbtune_rules_analyze "$BATS_TEST_TMPDIR/audit.tsv" "$BATS_TEST_TMPDIR/samples-busy.tsv" "" "" "" 10 >"$BATS_TEST_TMPDIR/busy.tsv"
     [ "$(analysis_value "$BATS_TEST_TMPDIR/busy.tsv" R-QCACHE query_cache_type)" = 0 ]
 }
@@ -199,7 +263,7 @@ write_current_audit_manifest() {
 @test "degraded interval rows are excluded from rule metrics and valid sample count" {
     make_audit "$BATS_TEST_TMPDIR/audit.tsv"
     make_samples "$BATS_TEST_TMPDIR/samples.tsv" 100 2 10
-    printf 'bad\t9999\t0\t99999\t99999\t99999\t100\t999\t999\t0\t999\t999\t999\t1\t1\t1\t0\t1\t999\tdegraded_interval\n' >>"$BATS_TEST_TMPDIR/samples.tsv"
+    printf '2026-07-24T01:00:00Z\t9999\t0\t99999\t99999\t99999\t100\t999\t999\t0\t999\t999\t999\t1\t1\t1\t0\t1\t999\tdegraded_interval\n' >>"$BATS_TEST_TMPDIR/samples.tsv"
 
     dbtune_rules_analyze "$BATS_TEST_TMPDIR/audit.tsv" "$BATS_TEST_TMPDIR/samples.tsv" "" "" "" 10 >"$BATS_TEST_TMPDIR/analysis.tsv"
     run awk -F '\t' '$1=="R-QCACHE" {print $4, $7; exit}' "$BATS_TEST_TMPDIR/analysis.tsv"
@@ -207,6 +271,25 @@ write_current_audit_manifest() {
     [[ "$output" == 'KEEP '* ]]
     [[ "$output" == *'active_windows=10'* ]]
     [[ "$output" == *'degraded_windows=1'* ]]
+    [[ "$output" == *'threads_running_p95=2.00'* ]]
+}
+
+@test "malformed samples do not satisfy readiness or enter rule baselines" {
+    make_audit "$BATS_TEST_TMPDIR/audit.tsv"
+    make_samples "$BATS_TEST_TMPDIR/samples.tsv" 30 2 1
+    append_malformed_samples "$BATS_TEST_TMPDIR/samples.tsv"
+
+    run dbtune_rules_analyze "$BATS_TEST_TMPDIR/audit.tsv" "$BATS_TEST_TMPDIR/samples.tsv" "" "" "" 2
+    [ "$status" -eq 65 ]
+    [[ "$output" == *'odmietnute vzorky: 4'* ]]
+    [[ "$output" == *'truncated=1,extra_fields=1,non_numeric=1,invalid_timestamp=0,invalid_value=0,non_monotonic=1'* ]]
+    [[ "$output" == *'malo vzoriek: 1, minimum: 2'* ]]
+
+    dbtune_rules_analyze "$BATS_TEST_TMPDIR/audit.tsv" "$BATS_TEST_TMPDIR/samples.tsv" "" "" "" 1 >"$BATS_TEST_TMPDIR/analysis.tsv" 2>"$BATS_TEST_TMPDIR/diagnostics.log"
+    run awk -F '\t' '$1=="R-QCACHE" {print $7; exit}' "$BATS_TEST_TMPDIR/analysis.tsv"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *'active_windows=1'* ]]
+    [[ "$output" == *'rejected_windows=4'* ]]
     [[ "$output" == *'threads_running_p95=2.00'* ]]
 }
 
@@ -325,6 +408,12 @@ EOF
     [ "$output" = 10.11 ]
     run dbtune_rules_version_family 11.4.12-MariaDB
     [ "$output" = 11.x ]
+    run dbtune_rules_version_family 11.99.0-MariaDB
+    [ "$output" = 11.x ]
+    run dbtune_rules_version_family 12.0.0-MariaDB
+    [ "$output" = unsupported ]
+    run dbtune_rules_version_family 10.12.0-MariaDB
+    [ "$output" = unsupported ]
 
     run dbtune_rules_variable_gate 11.4.12 innodb_change_buffering
     [ "$output" = removed ]
@@ -334,6 +423,23 @@ EOF
     [ "$output" = restart ]
     run dbtune_rules_variable_gate 10.11.13 innodb_write_io_threads
     [ "$output" = dynamic ]
+    run dbtune_rules_variable_gate 12.0.0 innodb_write_io_threads
+    [ "$output" = unsupported ]
+}
+
+@test "next MariaDB major is unsupported and emits no tuning proposals" {
+    make_audit "$BATS_TEST_TMPDIR/audit.tsv" 12.0.0-MariaDB
+    make_samples "$BATS_TEST_TMPDIR/samples.tsv" 10 10 20
+
+    dbtune_rules_analyze "$BATS_TEST_TMPDIR/audit.tsv" "$BATS_TEST_TMPDIR/samples.tsv" "" "" "" 20 >"$BATS_TEST_TMPDIR/analysis.tsv"
+
+    run awk -F '\t' '$1=="R-VERSION" {print $3, $4, $7}' "$BATS_TEST_TMPDIR/analysis.tsv"
+    [ "$status" -eq 0 ]
+    [[ "$output" == 'critical UNSUPPORTED version=12.0.0-MariaDB' ]]
+    run awk -F '\t' 'NR > 1 && ($5 != "" || $6 != "") {bad=1} END {print bad+0}' "$BATS_TEST_TMPDIR/analysis.tsv"
+    [ "$output" = 0 ]
+    run awk -F '\t' 'NR > 1 && $2 == "server" {count++} END {print count+0}' "$BATS_TEST_TMPDIR/analysis.tsv"
+    [ "$output" = 1 ]
 }
 
 @test "11.x analysis warns about static landmines without proposing them" {
@@ -350,6 +456,7 @@ EOF
 @test "minimum samples rejects analysis and preserves collected state" {
     cp "$BATS_TEST_DIRNAME/../fixtures/audit-10.6.tsv" "$DBTUNE_STATE_DIR/audit.tsv"
     cp "$BATS_TEST_DIRNAME/../fixtures/samples-7d.tsv" "$DBTUNE_STATE_DIR/samples.tsv"
+    printf 'timestamp\tdatabase\tsize_bytes\n' >"$DBTUNE_STATE_DIR/dbsize.tsv"
     write_current_audit_manifest
     dbtune_state_write collected
 
@@ -362,6 +469,13 @@ EOF
 @test "successful cmd_analyze transitions collected to analyzed" {
     cp "$BATS_TEST_DIRNAME/../fixtures/audit-10.6.tsv" "$DBTUNE_STATE_DIR/audit.tsv"
     cp "$BATS_TEST_DIRNAME/../fixtures/samples-7d.tsv" "$DBTUNE_STATE_DIR/samples.tsv"
+    cat >"$DBTUNE_STATE_DIR/dbsize.tsv" <<'EOF'
+timestamp	database	size_bytes
+2026-07-01T00:00:00Z	shop	5368709120
+2026-07-01T12:00:00Z	shop	5476083302
+2026-07-01T12:00:00Z	logs	104857600
+2026-07-01T23:00:00Z	shop	9999999999
+EOF
     write_current_audit_manifest
     dbtune_state_write collected
 
@@ -371,6 +485,35 @@ EOF
     [ "$(awk -F '\t' 'NR==1 {print NF}' "$DBTUNE_STATE_DIR/analysis.tsv")" = 8 ]
     [ "$(dbtune_manifest_value "$DBTUNE_STATE_DIR/analysis-manifest.tsv" run_id)" = test-run ]
     [ "$(dbtune_manifest_value "$DBTUNE_STATE_DIR/analysis-manifest.tsv" samples_hash)" = "$(dbtune_sha256_file "$DBTUNE_STATE_DIR/samples.tsv")" ]
+    [ "$(dbtune_manifest_value "$DBTUNE_STATE_DIR/analysis-manifest.tsv" dbsize_hash)" = "$(dbtune_sha256_file "$DBTUNE_STATE_DIR/dbsize.tsv")" ]
+    [ "$(dbtune_manifest_value "$DBTUNE_STATE_DIR/analysis-manifest.tsv" dbsize_selected_rows)" = 2 ]
+    grep -F $'dbsize_selected_row.000001\t2026-07-01T12:00:00Z\tlogs\t104857600' "$DBTUNE_STATE_DIR/analysis-manifest.tsv"
+    grep -F $'dbsize_selected_row.000002\t2026-07-01T12:00:00Z\tshop\t5476083302' "$DBTUNE_STATE_DIR/analysis-manifest.tsv"
+}
+
+@test "changing only dbsize changes analysis provenance fingerprint" {
+    local first second
+
+    cp "$BATS_TEST_DIRNAME/../fixtures/audit-10.6.tsv" "$DBTUNE_STATE_DIR/audit.tsv"
+    cp "$BATS_TEST_DIRNAME/../fixtures/samples-7d.tsv" "$DBTUNE_STATE_DIR/samples.tsv"
+    printf 'timestamp\tdatabase\tsize_bytes\n2026-07-01T00:00:00Z\tshop\t5368709120\n' >"$DBTUNE_STATE_DIR/dbsize.tsv"
+    write_current_audit_manifest
+    printf 'rule_id\tscope\tseverity\tverdict\tproposed_key\tproposed_value\tevidence\treason_sk\n' >"$DBTUNE_STATE_DIR/analysis.tsv"
+
+    dbtune_provenance_write_analysis_manifest "$DBTUNE_STATE_DIR/first-manifest.tsv" \
+        "$DBTUNE_STATE_DIR/analysis.tsv" "$DBTUNE_STATE_DIR/samples.tsv" "$DBTUNE_STATE_DIR/dbsize.tsv"
+    first=$(dbtune_manifest_value "$DBTUNE_STATE_DIR/first-manifest.tsv" analysis_fingerprint)
+    cp "$DBTUNE_STATE_DIR/first-manifest.tsv" "$DBTUNE_STATE_DIR/analysis-manifest.tsv"
+    printf '2026-07-02T00:00:00Z\tshop\t5476083302\n' >>"$DBTUNE_STATE_DIR/dbsize.tsv"
+    run dbtune_provenance_validate_analysis
+    [ "$status" -eq 65 ]
+    dbtune_provenance_write_analysis_manifest "$DBTUNE_STATE_DIR/second-manifest.tsv" \
+        "$DBTUNE_STATE_DIR/analysis.tsv" "$DBTUNE_STATE_DIR/samples.tsv" "$DBTUNE_STATE_DIR/dbsize.tsv"
+    second=$(dbtune_manifest_value "$DBTUNE_STATE_DIR/second-manifest.tsv" analysis_fingerprint)
+
+    [ "$first" != "$second" ]
+    [ "$(dbtune_manifest_value "$DBTUNE_STATE_DIR/first-manifest.tsv" analysis_hash)" = \
+        "$(dbtune_manifest_value "$DBTUNE_STATE_DIR/second-manifest.tsv" analysis_hash)" ]
 }
 
 @test "per-app rules emit recommendations without server config proposals" {
@@ -416,9 +559,9 @@ EOF
 @test "backup rule obeys verified missing unknown tri-state contract" {
     make_audit "$BATS_TEST_TMPDIR/verified.tsv"
     make_samples "$BATS_TEST_TMPDIR/samples.tsv" 30 2 10
-    cp "$BATS_TEST_TMPDIR/verified.tsv" "$BATS_TEST_TMPDIR/missing.tsv"
+    awk -F '\t' '$1 != "backup.status" {print}' "$BATS_TEST_TMPDIR/verified.tsv" >"$BATS_TEST_TMPDIR/missing.tsv"
     printf '%s\n' $'backup.status\tmissing' >>"$BATS_TEST_TMPDIR/missing.tsv"
-    cp "$BATS_TEST_TMPDIR/verified.tsv" "$BATS_TEST_TMPDIR/unknown.tsv"
+    awk -F '\t' '$1 != "backup.status" {print}' "$BATS_TEST_TMPDIR/verified.tsv" >"$BATS_TEST_TMPDIR/unknown.tsv"
     printf '%s\n' $'backup.status\tunknown' >>"$BATS_TEST_TMPDIR/unknown.tsv"
     awk -F '\t' '$1 != "backup.last_success" {print}' "$BATS_TEST_TMPDIR/verified.tsv" >"$BATS_TEST_TMPDIR/verified-no-success.tsv"
     awk -F '\t' '$1 != "backup.source" {print}' "$BATS_TEST_TMPDIR/missing.tsv" >"$BATS_TEST_TMPDIR/missing-no-source.tsv"
@@ -521,4 +664,46 @@ EOF
     [[ "$output" != *'app:app.1:TOO-LARGE'* ]]
     [[ "$output" == *'app:app.1:UNKNOWN'* ]]
     [[ "$output" != *'app:app.0:UNKNOWN'* ]]
+}
+
+@test "mixed app statuses keep verified empty distinct and propagate source failures as UNKNOWN" {
+    make_audit "$BATS_TEST_TMPDIR/audit.tsv"
+    make_samples "$BATS_TEST_TMPDIR/samples.tsv" 30 2 10
+    cat >"$BATS_TEST_TMPDIR/apps.tsv" <<'EOF'
+healthy	type	wordpress
+healthy	audit_status	complete
+healthy	source_error	none
+healthy	object_cache_dropin	1
+healthy	redis_active	1
+healthy	disable_wp_cron	false
+partial	type	wordpress
+partial	audit_status	partial
+partial	source_error	audit_error.autoload=query_failed
+partial	object_cache_dropin	1
+partial	redis_active	1
+partial	disable_wp_cron	false
+failed	type	wordpress
+failed	audit_status	failed
+failed	source_error	audit_error.wp_config=missing
+failed	audit_error.wp_config	missing
+failed	object_cache_dropin	0
+failed	redis_active	1
+EOF
+    cat >"$BATS_TEST_TMPDIR/databases.tsv" <<'EOF'
+healthy	autoload_bytes	0
+partial	autoload_bytes	unknown
+partial	audit_error.autoload	query_failed
+EOF
+
+    dbtune_rules_analyze "$BATS_TEST_TMPDIR/audit.tsv" "$BATS_TEST_TMPDIR/samples.tsv" "" "$BATS_TEST_TMPDIR/apps.tsv" "$BATS_TEST_TMPDIR/databases.tsv" 10 >"$BATS_TEST_TMPDIR/analysis.tsv"
+
+    run awk -F '\t' '$1=="R-APP-AUTOLOAD" {print $2, $4, $7}' "$BATS_TEST_TMPDIR/analysis.tsv"
+    [ "$status" -eq 0 ]
+    [[ "$output" != *'app:healthy'* ]]
+    [[ "$output" == *'app:partial UNKNOWN audit_status=partial; source_error=audit_error.autoload=query_failed'* ]]
+    [[ "$output" == *'app:failed UNKNOWN audit_status=failed; source_error=audit_error.wp_config=missing'* ]]
+    run awk -F '\t' '$2=="app:partial" && $1=="R-APP-OBJECT-CACHE" {print $4}' "$BATS_TEST_TMPDIR/analysis.tsv"
+    [ "$output" = OK ]
+    run awk -F '\t' '$2=="app:failed" && $1=="R-APP-WPCRON" {print $4, $7}' "$BATS_TEST_TMPDIR/analysis.tsv"
+    [[ "$output" == 'UNKNOWN audit_status=failed; source_error=audit_error.wp_config=missing'* ]]
 }

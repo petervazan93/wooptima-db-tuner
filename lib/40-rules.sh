@@ -1,16 +1,17 @@
 dbtune_rules_version_family() {
-    awk -v version="${1:-}" 'BEGIN {
-        split(version, v, ".")
-        if (v[1] + 0 >= 11) print "11.x"
-        else if (v[1] + 0 == 10 && v[2] + 0 >= 11) print "10.11"
-        else if (v[1] + 0 == 10 && v[2] + 0 == 6) print "10.6"
-        else print "unsupported"
-    }'
+    dbtune_audit_mariadb_version_family "${1:-}"
 }
 
 dbtune_rules_variable_gate() {
     local version=${1:-}
     local variable=${2:-}
+    local family
+
+    family=$(dbtune_rules_version_family "$version") || return
+    if [[ $family == unsupported ]]; then
+        printf 'unsupported\n'
+        return 0
+    fi
 
     awk -v version="$version" -v variable="$variable" 'BEGIN {
         split(version, v, ".")
@@ -44,36 +45,7 @@ dbtune_rules_percentile() {
 }
 
 dbtune_rules_proposable_variables() {
-    printf '%s\n' \
-        innodb_buffer_pool_size \
-        max_connections \
-        innodb_io_capacity \
-        innodb_io_capacity_max \
-        innodb_read_io_threads \
-        innodb_write_io_threads \
-        innodb_flush_neighbors \
-        innodb_log_file_size \
-        innodb_log_buffer_size \
-        query_cache_type \
-        query_cache_size \
-        innodb_flush_log_at_trx_commit \
-        innodb_doublewrite \
-        innodb_flush_method \
-        innodb_buffer_pool_dump_at_shutdown \
-        innodb_buffer_pool_load_at_startup \
-        innodb_max_dirty_pages_pct \
-        innodb_max_dirty_pages_pct_lwm \
-        innodb_lock_wait_timeout \
-        skip_name_resolve \
-        thread_cache_size \
-        tmp_table_size \
-        max_heap_table_size \
-        table_definition_cache \
-        key_buffer_size \
-        slow_query_log \
-        slow_query_log_file \
-        long_query_time \
-        log_slow_verbosity
+    dbtune_audit_effective_variables
 }
 
 dbtune_rules_analyze() {
@@ -83,17 +55,32 @@ dbtune_rules_analyze() {
     local apps_file=${4:-}
     local databases_file=${5:-}
     local min_samples=${6:-288}
-    local p95_threads p50_qcache p05_available
+    local p95_threads p50_qcache p05_available diagnostics rejected excluded_status excluded_restart
+    local normalized_audit result
 
     [[ -r $audit_file && -r $samples_file ]] || return 66
+    diagnostics=$(dbtune_samples_diagnostics "$samples_file") || return 65
+    rejected=$(awk -F '\t' '$1 == "rejected_rows" { print $2 }' <<<"$diagnostics")
+    excluded_status=$(awk -F '\t' '$1 == "excluded_status_rows" { print $2 }' <<<"$diagnostics")
+    excluded_restart=$(awk -F '\t' '$1 == "excluded_restart_rows" { print $2 }' <<<"$diagnostics")
+    if ((rejected > 0)); then
+        printf 'dbtune: odmietnute vzorky: %s; %s\n' "$rejected" \
+            "$(awk -F '\t' '$1 == "rejected_reasons" { print $2 }' <<<"$diagnostics")" >&2
+    fi
     p95_threads=$(dbtune_tsv_percentile "$samples_file" threads_running 8 95) || return 65
     p05_available=$(dbtune_tsv_percentile "$samples_file" mem_available_kb 14 5) || return 65
     p50_qcache=$(dbtune_tsv_percentile "$samples_file" qcache_hit_pct 10 50 qcache-active 2>/dev/null || printf '0')
-    awk -v audit_file="$audit_file" -v samples_file="$samples_file" \
+    normalized_audit=$(mktemp "${TMPDIR:-/tmp}/dbtune-audit-normalized.XXXXXX") || return 1
+    if ! chmod 600 "$normalized_audit" || ! dbtune_audit_normalize "$audit_file" >"$normalized_audit"; then
+        rm -f "$normalized_audit"
+        return 65
+    fi
+    awk -v audit_file="$normalized_audit" -v samples_file=<(dbtune_samples_valid_rows "$samples_file") \
         -v dbsize_file="$dbsize_file" -v apps_file="$apps_file" \
         -v databases_file="$databases_file" -v min_samples="$min_samples" \
         -v shared_p95_threads="$p95_threads" -v shared_p50_qcache="$p50_qcache" \
-        -v shared_p05_available="$p05_available" '
+        -v shared_p05_available="$p05_available" -v shared_rejected_count="$rejected" \
+        -v shared_excluded_count="$((excluded_status + excluded_restart))" '
     BEGIN {
         FS = OFS = "\t"
         gib = 1073741824
@@ -218,6 +205,8 @@ dbtune_rules_analyze() {
             }
         }
         close(file)
+        degraded_sample_count = shared_excluded_count + 0
+        rejected_sample_count = shared_rejected_count + 0
         p95_threads = shared_p95_threads + 0
         p50_qcache = shared_p50_qcache + 0
         p05_available_kb = shared_p05_available + 0
@@ -409,6 +398,21 @@ dbtune_rules_analyze() {
         return ""
     }
 
+    function app_source_error(id, sources, include_failed, requested, count, i, key, value, result, status) {
+        status = tolower(av(id, "audit_status"))
+        count = split(sources, requested, " ")
+        for (i = 1; i <= count; i++) {
+            key = "audit_error_" requested[i]
+            value = av(id, key)
+            if (value != "") result = result (result == "" ? "" : ",") "audit_error." requested[i] "=" value
+        }
+        if (result == "" && include_failed && status == "failed") {
+            result = av(id, "source_error")
+            if (result == "none") result = "audit_status=failed"
+        }
+        return result
+    }
+
     function numeric(value) {
         value = trim(value)
         gsub(/,/, ".", value)
@@ -503,10 +507,15 @@ dbtune_rules_analyze() {
 
     function version_parts(version) {
         split(version, version_number, ".")
+        if (version_number[1] !~ /^[0-9]+$/ || version_number[2] !~ /^[0-9]+$/) {
+            version_major = version_minor = 0
+            version_family = "unsupported"
+            return
+        }
         version_major = version_number[1] + 0
         version_minor = version_number[2] + 0
-        if (version_major >= 11) version_family = "11.x"
-        else if (version_major == 10 && version_minor >= 11) version_family = "10.11"
+        if (version_major == 11) version_family = "11.x"
+        else if (version_major == 10 && version_minor == 11) version_family = "10.11"
         else if (version_major == 10 && version_minor == 6) version_family = "10.6"
         else version_family = "unsupported"
     }
@@ -602,7 +611,7 @@ dbtune_rules_analyze() {
     function qcache_rule(hit, threads, evidence) {
         hit = p50_qcache
         threads = p95_threads
-        evidence = sprintf("qcache_hit_p50=%.2f%%; active_windows=%d; required=%d; idle_windows=%d; unavailable_windows=%d; degraded_windows=%d; threads_running_p95=%.2f", hit, qcache_active_count, min_samples, qcache_idle_count, qcache_unavailable_count, degraded_sample_count, threads)
+        evidence = sprintf("qcache_hit_p50=%.2f%%; active_windows=%d; required=%d; idle_windows=%d; unavailable_windows=%d; degraded_windows=%d; rejected_windows=%d; threads_running_p95=%.2f", hit, qcache_active_count, min_samples, qcache_idle_count, qcache_unavailable_count, degraded_sample_count, rejected_sample_count, threads)
         if (qcache_active_count < min_samples) {
             emit("R-QCACHE", "server", "medium", "UNKNOWN", "", "", evidence, "Query cache nema dost aktivnych okien s nenulovym poctom query; idle okna sa do hit-rate percentilu nerataju.")
             return
@@ -616,7 +625,10 @@ dbtune_rules_analyze() {
     }
 
     function gate_rules() {
-        if (version_family == "unsupported") emit("R-VERSION", "server", "critical", "UNSUPPORTED", "", "", "version=" ag("mariadb_version", "unknown"), "Podporovane su MariaDB 10.6, 10.11 a 11.x.")
+        if (version_family == "unsupported") {
+            emit("R-VERSION", "server", "critical", "UNSUPPORTED", "", "", "version=" ag("mariadb_version", "unknown"), "Podporovane su MariaDB 10.6, 10.11 a 11.x.")
+            return
+        }
         if (version_major >= 11 && (present["config_innodb_change_buffering"] || present["landmine_innodb_change_buffering_severity"] || truth(ag("landmine_innodb_change_buffering", ""))))
             emit("R-VERSION", "server", "critical", "REMOVED", "", "", "innodb_change_buffering; family=" version_family, "Premenna je od MariaDB 11 odstranena a moze zablokovat dalsi start.")
         if (present["config_innodb_buffer_pool_instances"] || present["landmine_innodb_buffer_pool_instances_severity"] || truth(ag("landmine_innodb_buffer_pool_instances", "")))
@@ -673,7 +685,7 @@ dbtune_rules_analyze() {
         backup_status = tolower(trim(ag("backup_status", "unknown")))
         backup_source = trim(ag("backup_source", "unknown"))
         backup_success = trim(ag("backup_last_success", "unknown"))
-        backup_evidence = "status=" backup_status "; source=" backup_source "; checked_at=" ag("backup_checked_at", "unknown") "; last_success=" backup_success "; schedule_count=" ag("backup_schedule_count", "unknown") "; interval_hours=" backup_interval
+        backup_evidence = "status=" backup_status "; source=" backup_source "; checked_at=" ag("backup_checked_at", "unknown") "; last_success=" backup_success "; age_seconds=" ag("backup_age_seconds", "unknown") "; max_age_seconds=" ag("backup_max_age_seconds", "unknown") "; evidence_error=" ag("backup_evidence_error", "none") "; schedule_count=" ag("backup_schedule_count", "unknown") "; interval_hours=" backup_interval
         if (backup_status == "missing" && backup_source != "" && backup_source != "unknown")
             emit("R-BACKUP", "server", "critical", "MISSING", "", "", backup_evidence, "Potvrdena absencia zalohy blokuje tuning.")
         else if (backup_status != "verified" || backup_source == "" || backup_source == "unknown" || backup_success == "" || backup_success == "unknown" || backup_success == "none")
@@ -686,6 +698,7 @@ dbtune_rules_analyze() {
     function server_rules(dataset, log_size, log_gate) {
         version_parts(ag("mariadb_version", "0.0"))
         gate_rules()
+        if (version_family == "unsupported") return
         growth_evidence_rule()
         buffer_pool_rule()
         max_connections_rule()
@@ -707,7 +720,11 @@ dbtune_rules_analyze() {
         emit(rule, "app:" id, severity, verdict, "", "", evidence, reason)
     }
 
-    function app_rules(i, id, is_wp, is_woo, redis, cache, disabled_cron, system_cron, autoload, autoload_mb, hpos, orders, sync, kbrow, sessions, failed, retention, transient_count, transient_bytes, policy, meta_index, multisite) {
+    function app_unknown(rule, id, source) {
+        app_emit(rule, id, "medium", "UNKNOWN", "audit_status=" tolower(av(id, "audit_status")) "; source_error=" source, "Zdrojove auditne data pre toto pravidlo nie su dostupne; nalez sa nesmie vyhodnotit ako zdravy ani prazdny.")
+    }
+
+    function app_rules(i, id, is_wp, is_woo, redis, cache, disabled_cron, system_cron, autoload, autoload_mb, hpos, orders, sync, kbrow, sessions, failed, retention, transient_count, transient_bytes, policy, meta_index, multisite, source, raw) {
         for (i = 1; i <= app_count; i++) {
             id = app_ids[i]
             is_wp = av(id, "is_wp", "wordpress", "wp_detected", "type")
@@ -716,13 +733,17 @@ dbtune_rules_analyze() {
             if (!truth(is_wp) && !truth(is_woo)) continue
 
             multisite = av(id, "multisite_metrics")
-            if (tolower(multisite) == "unsupported" || tolower(multisite) == "unknown")
+            source = app_source_error(id, "multisite database table_prefix", 1)
+            if (source != "") app_unknown("R-APP-MULTISITE", id, source)
+            else if (tolower(multisite) == "unsupported" || tolower(multisite) == "unknown")
                 app_emit("R-APP-MULTISITE", id, "medium", "UNKNOWN", "multisite_metrics=" multisite, "Multisite site prefixy neboli enumerovane; aplikacne DB metriky sa nesmu hodnotit ako zdrave.")
 
             redis = av(id, "redis_active", "redis_running", "redis")
             if (redis == "") redis = ag("app_redis_ping", ag("app_redis_service_active", ""))
             cache = av(id, "object_cache", "object_cache_dropin", "object_cache_php")
-            if (truth(cache) && truth(redis))
+            source = app_source_error(id, "wp_root", 1)
+            if (source != "") app_unknown("R-APP-OBJECT-CACHE", id, source)
+            else if (truth(cache) && truth(redis))
                 app_emit("R-APP-OBJECT-CACHE", id, "info", "OK", "redis=probe-success; dropin=present", "Persistent object cache ma drop-in aj uspesny Redis probe.")
             else if (falsehood(redis))
                 app_emit("R-APP-OBJECT-CACHE", id, "critical", "REDIS-DOWN", "redis=" redis "; dropin=" (cache == "" ? "unknown" : cache), "Redis probe zlyhal; aplikacnu vrstvu ries pred DB tuningom.")
@@ -734,39 +755,59 @@ dbtune_rules_analyze() {
             disabled_cron = av(id, "disable_wp_cron", "wp_cron_disabled")
             system_cron = av(id, "system_wp_cron", "wp_cron_system", "cron_present")
             if (system_cron == "") system_cron = ag("app_system_wp_cron", "")
-            if (truth(disabled_cron) && falsehood(system_cron)) app_emit("R-APP-WPCRON", id, "critical", "DISABLED", "DISABLE_WP_CRON=true; system_cron=false", "WP cron nebezi vobec, co ohrozuje objednavky a Action Scheduler.")
+            source = app_source_error(id, "wp_config disable_wp_cron", 1)
+            if (source == "" && truth(disabled_cron) && tolower(system_cron) == "unknown") source = app_source_error(id, "site_url", 0)
+            if (source != "") app_unknown("R-APP-WPCRON", id, source)
+            else if (truth(disabled_cron) && falsehood(system_cron)) app_emit("R-APP-WPCRON", id, "critical", "DISABLED", "DISABLE_WP_CRON=true; system_cron=false", "WP cron nebezi vobec, co ohrozuje objednavky a Action Scheduler.")
             else if (truth(disabled_cron) && tolower(system_cron) == "unknown") app_emit("R-APP-WPCRON", id, "medium", "UNKNOWN", "DISABLE_WP_CRON=true; app cron mapping=unknown", "Globalny cron nie je dokaz pre tuto aplikaciu; namapuj URL alebo webroot konkretneho wp-cron behu.")
 
-            autoload = bytes(av(id, "autoload_bytes", "autoload_size_bytes"))
+            raw = av(id, "autoload_bytes", "autoload_size_bytes")
+            autoload = bytes(raw)
             autoload_mb = numeric(av(id, "autoload_mb", "autoload_size_mb"))
             if (autoload <= 0 && autoload_mb > 0) autoload = autoload_mb * mib
-            if (autoload > 3 * mib) app_emit("R-APP-AUTOLOAD", id, "high", "TOO-LARGE", sprintf("autoload=%.2fM; inspect_top20", autoload / mib), "Autoload nad 3 MB ries prioritne a skontroluj top 20 options.")
+            source = app_source_error(id, "wp_config database table_prefix options_table autoload metrics", 1)
+            if (source == "" && tolower(raw) == "unknown") source = "autoload=unknown"
+            if (source != "") app_unknown("R-APP-AUTOLOAD", id, source)
+            else if (autoload > 3 * mib) app_emit("R-APP-AUTOLOAD", id, "high", "TOO-LARGE", sprintf("autoload=%.2fM; inspect_top20", autoload / mib), "Autoload nad 3 MB ries prioritne a skontroluj top 20 options.")
             else if (autoload >= mib) app_emit("R-APP-AUTOLOAD", id, "medium", "REVIEW", sprintf("autoload=%.2fM; inspect_top20", autoload / mib), "Autoload 1 az 3 MB vyzaduje kontrolu najvacsich options.")
             else if (autoload > 0) app_emit("R-APP-AUTOLOAD", id, "info", "OK", sprintf("autoload=%.2fM", autoload / mib), "Autoload je pod 1 MB.")
 
             hpos = av(id, "hpos_enabled", "woocommerce_hpos_enabled", "hpos_woocommerce_custom_orders_table_enabled", "hpos_woocommerce_feature_custom_order_tables_enabled")
             orders = numeric(av(id, "orders_in_posts", "shop_orders_in_posts", "postmeta_orders", "legacy_order_count"))
             sync = av(id, "hpos_sync_enabled", "hpos_data_sync", "data_sync_enabled", "hpos_woocommerce_custom_orders_table_data_sync_enabled")
-            if (falsehood(hpos) && orders > 0) app_emit("R-APP-HPOS", id, "high", "MIGRATE", "HPOS=off; legacy_orders=" orders, "Objednavky v posts/postmeta su kandidat na samostatnu HPOS migraciu.")
+            source = app_source_error(id, "wp_config database table_prefix options_table hpos legacy_orders metrics", 1)
+            if (source != "") app_unknown("R-APP-HPOS", id, source)
+            else if (falsehood(hpos) && orders > 0) app_emit("R-APP-HPOS", id, "high", "MIGRATE", "HPOS=off; legacy_orders=" orders, "Objednavky v posts/postmeta su kandidat na samostatnu HPOS migraciu.")
             else if (truth(hpos) && truth(sync)) app_emit("R-APP-HPOS", id, "medium", "DUPLICATE-WRITES", "HPOS=on; sync=on", "Po overeni migracie vypni kompatibilny sync, inak sa objednavky zapisuju dvakrat.")
 
             kbrow = numeric(av(id, "max_log_kb_per_row", "log_kb_per_row", "kb_per_row"))
-            if (kbrow > 20) app_emit("R-APP-LOG-TABLE", id, "high", "PURGE-CANDIDATE", "max_kb_per_row=" kbrow, "Log tabulka nad 20 KB na riadok pravdepodobne drzi cele payloady.")
+            source = app_source_error(id, "wp_config database table_prefix log_tables metrics", 1)
+            if (source != "") app_unknown("R-APP-LOG-TABLE", id, source)
+            else if (kbrow > 20) app_emit("R-APP-LOG-TABLE", id, "high", "PURGE-CANDIDATE", "max_kb_per_row=" kbrow, "Log tabulka nad 20 KB na riadok pravdepodobne drzi cele payloady.")
 
             sessions = numeric(av(id, "woocommerce_sessions", "session_rows", "sessions", "woocommerce_sessions_count"))
-            if (sessions >= 500000) app_emit("R-APP-SESSIONS", id, "medium", "CLEANUP", "session_rows=" sessions, "WooCommerce sessions su problem od priblizne 500 tisic riadkov.")
+            source = app_source_error(id, "wp_config database table_prefix woocommerce_sessions_probe woocommerce_sessions_count metrics", 1)
+            if (source != "") app_unknown("R-APP-SESSIONS", id, source)
+            else if (sessions >= 500000) app_emit("R-APP-SESSIONS", id, "medium", "CLEANUP", "session_rows=" sessions, "WooCommerce sessions su problem od priblizne 500 tisic riadkov.")
 
             failed = numeric(av(id, "action_scheduler_failed", "as_failed", "failed_actions"))
-            if (failed > 0) app_emit("R-APP-AS", id, "medium", "FAILED", "failed_actions=" failed, "Zlyhane Action Scheduler akcie retention neodstrani; najdi chybny plugin alebo hook.")
+            source = app_source_error(id, "wp_config database table_prefix action_scheduler metrics", 1)
+            if (source != "") app_unknown("R-APP-AS", id, source)
+            else if (failed > 0) app_emit("R-APP-AS", id, "medium", "FAILED", "failed_actions=" failed, "Zlyhane Action Scheduler akcie retention neodstrani; najdi chybny plugin alebo hook.")
             retention = numeric(av(id, "action_scheduler_retention_days", "as_retention_days"))
-            if (retention > 7) app_emit("R-APP-AS-RETENTION", id, "low", "REDUCE", "retention_days=" retention, "Skrat retention dokoncenej historie na 7 dni, nie na 1 den.")
+            if (source != "") app_unknown("R-APP-AS-RETENTION", id, source)
+            else if (retention > 7) app_emit("R-APP-AS-RETENTION", id, "low", "REDUCE", "retention_days=" retention, "Skrat retention dokoncenej historie na 7 dni, nie na 1 den.")
 
             transient_count = numeric(av(id, "transient_count", "transients"))
             transient_bytes = bytes(av(id, "transient_bytes", "transients_bytes"))
-            if (transient_count >= 1000 || transient_bytes >= 10 * mib) app_emit("R-APP-TRANSIENTS", id, "medium", "CLEANUP", sprintf("count=%d; size=%.2fM", transient_count, transient_bytes / mib), "Velky objem DB transientov prever a odstran iba expirovane zaznamy.")
+            source = app_source_error(id, "wp_config database table_prefix options_table transients metrics", 1)
+            if (source != "") app_unknown("R-APP-TRANSIENTS", id, source)
+            else if (transient_count >= 1000 || transient_bytes >= 10 * mib) app_emit("R-APP-TRANSIENTS", id, "medium", "CLEANUP", sprintf("count=%d; size=%.2fM", transient_count, transient_bytes / mib), "Velky objem DB transientov prever a odstran iba expirovane zaznamy.")
 
             meta_index = av(id, "rogue_meta_value_index", "meta_value_index")
-            if (meta_index != "" && !falsehood(meta_index)) app_emit("R-APP-META-INDEX", id, "medium", "ROGUE-INDEX", "standalone meta_value index detected", "Samostatny index meta_value je velky a malo selektivny; pred odstraneni over pouzitie.")
+            source = app_source_error(id, "wp_config database table_prefix postmeta_indexes metrics", 1)
+            if (source != "") app_unknown("R-APP-META-INDEX", id, source)
+            else if (meta_index != "" && !falsehood(meta_index)) app_emit("R-APP-META-INDEX", id, "medium", "ROGUE-INDEX", "standalone meta_value index detected", "Samostatny index meta_value je velky a malo selektivny; pred odstraneni over pouzitie.")
 
             policy = tolower(av(id, "redis_maxmemory_policy", "redis_policy"))
             if (policy == "") policy = tolower(ag("redis_maxmemory_policy", ""))
@@ -774,13 +815,16 @@ dbtune_rules_analyze() {
         }
     }
     ' </dev/null
+    result=$?
+    rm -f "$normalized_audit"
+    return "$result"
 }
 
 # Funkciu vola CLI dispatcher aj collector bez argumentov.
 # shellcheck disable=SC2120
 cmd_analyze() {
     local min_samples=288
-    local output temporary manifest temporary_manifest run_id audit_hash samples_hash
+    local output temporary manifest temporary_manifest run_id audit_hash samples_hash dbsize_hash dbsize_hash_before
     local audit_file samples_file dbsize_file apps_file databases_file
 
     while [[ $# -gt 0 ]]; do
@@ -812,6 +856,10 @@ cmd_analyze() {
     output=$(dbtune_path analysis.tsv) || return
     manifest=$(dbtune_analysis_manifest_file) || return
     dbtune_provenance_validate_audit || return
+    dbsize_hash_before=$(dbtune_sha256_file "$dbsize_file") || {
+        dbtune_log error "Chyba povinny dbsize vstup: $dbsize_file"
+        return 66
+    }
     temporary=$(mktemp "$DBTUNE_STATE_DIR/.analysis.tmp.XXXXXX") || return 1
     temporary_manifest=$(mktemp "$DBTUNE_STATE_DIR/.analysis-manifest.tmp.XXXXXX") || {
         rm -f "$temporary"
@@ -823,7 +871,16 @@ cmd_analyze() {
         dbtune_log error "Analyza zlyhala; analysis.tsv nebol zmeneny"
         return 65
     fi
-    if ! dbtune_provenance_write_analysis_manifest "$temporary_manifest" "$temporary" "$samples_file" ||
+    dbsize_hash=$(dbtune_sha256_file "$dbsize_file") || {
+        rm -f "$temporary" "$temporary_manifest"
+        return 66
+    }
+    if [[ $dbsize_hash != "$dbsize_hash_before" ]]; then
+        rm -f "$temporary" "$temporary_manifest"
+        dbtune_log error "dbsize.tsv sa pocas analyzy zmenil; analysis.tsv nebol zmeneny"
+        return 65
+    fi
+    if ! dbtune_provenance_write_analysis_manifest "$temporary_manifest" "$temporary" "$samples_file" "$dbsize_file" ||
         ! dbtune_atomic_write "$output" 600 <"$temporary" ||
         ! dbtune_atomic_write "$manifest" 600 <"$temporary_manifest"; then
         rm -f "$temporary" "$temporary_manifest"
@@ -836,6 +893,7 @@ cmd_analyze() {
     run_id=$(dbtune_manifest_value "$manifest" run_id) || return
     audit_hash=$(dbtune_manifest_value "$manifest" audit_hash) || return
     samples_hash=$(dbtune_manifest_value "$manifest" samples_hash) || return
+    dbsize_hash=$(dbtune_manifest_value "$manifest" dbsize_hash) || return
     dbtune_event analysis_completed samples_min "$min_samples" output "$output" \
-        run_id "$run_id" audit_hash "$audit_hash" samples_hash "$samples_hash" || true
+        run_id "$run_id" audit_hash "$audit_hash" samples_hash "$samples_hash" dbsize_hash "$dbsize_hash" || true
 }

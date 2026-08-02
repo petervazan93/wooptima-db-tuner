@@ -234,7 +234,7 @@ dbtune_collect_status() {
     local state key value health_timestamp=unknown health_status=unknown health_detail=''
     local now sample_epoch='' sample_age=unknown sample_state=missing guard_state=none sample_count=0
     local stale_seconds=${DBTUNE_STALE_SAMPLE_SECONDS:-900}
-    local identity_file samples_file
+    local identity_file samples_file diagnostics
 
     (($# == 0)) || { dbtune_collect_usage >&2; return 64; }
     state=$(dbtune_state_read) || return
@@ -258,6 +258,17 @@ dbtune_collect_status() {
     fi
     samples_file=$(dbtune_collect_samples_file)
     sample_count=$(dbtune_collect_sample_count 2>/dev/null) || sample_count=0
+    if diagnostics=$(dbtune_samples_diagnostics "$samples_file" 2>/dev/null); then
+        while IFS=$'\t' read -r key value; do
+            printf 'sample_%s\t%s\n' "$key" "$value"
+        done <<<"$diagnostics"
+    else
+        printf 'sample_valid_rows\t0\n'
+        printf 'sample_rejected_rows\t0\n'
+        printf 'sample_excluded_status_rows\t0\n'
+        printf 'sample_excluded_restart_rows\t0\n'
+        printf 'sample_rejected_reasons\tunavailable\n'
+    fi
     if ! dbtune_is_uint "$sample_epoch" && ((sample_count > 0)); then
         sample_epoch=$(dbtune_collect_file_epoch "$samples_file" 2>/dev/null) || sample_epoch=''
     fi
@@ -316,23 +327,31 @@ dbtune_collect_finish_locked() {
 }
 
 dbtune_collect_stop() {
-    local result=0 lock_file lock_fd timer_result=ok
+    local result=0 lock_file lock_identity lock_fd lock_status timer_result=ok
 
     (($# == 0)) || { dbtune_collect_usage >&2; return 64; }
+    dbtune_init_state_dir || return
     dbtune_require_state collect_stop || return
     if ! dbtune_collect_disable_timer; then
         result=1
         timer_result=failed
     fi
     lock_file=$(dbtune_collect_lock_file)
-    exec {lock_fd}>"$lock_file" || {
+    dbtune_open_state_lock lock_fd "$lock_file" "Collector lock" || {
+        lock_status=$?
         dbtune_collect_health error stop_lock_open || true
-        return 1
+        return "$lock_status"
     }
+    lock_identity=$DBTUNE_STATE_LOCK_IDENTITY
     if ! "${DBTUNE_FLOCK:-flock}" -x "$lock_fd"; then
         dbtune_collect_health error stop_lock || true
         exec {lock_fd}>&-
         return 1
+    fi
+    if ! dbtune_validate_state_lock "$lock_file" "Collector lock" "$lock_identity"; then
+        "${DBTUNE_FLOCK:-flock}" -u "$lock_fd" >/dev/null 2>&1 || true
+        exec {lock_fd}>&-
+        return 65
     fi
     dbtune_collect_finish_locked stopped "reason=manual timer=$timer_result" || result=1
     "${DBTUNE_FLOCK:-flock}" -u "$lock_fd" >/dev/null 2>&1 || true
@@ -668,19 +687,7 @@ dbtune_collect_sample_count() {
         printf '0\n'
         return 0
     }
-    awk -F '\t' '
-        NR == 1 {
-            for (i=1; i<=NF; i++) column[$i]=i
-            valid_header=("timestamp" in column && "restart_flag" in column)
-            next
-        }
-        valid_header && NF && $column["timestamp"] != "" {
-            status=("sample_status" in column) ? $column["sample_status"] : "ok"
-            restart=$column["restart_flag"]
-            if (status == "ok" && restart == 0) count++
-        }
-        END { if (!valid_header) exit 1; print count+0 }
-    ' "$file"
+    dbtune_samples_inspect "$file" count
 }
 
 dbtune_collect_daily_dbsize() {
@@ -824,16 +831,25 @@ dbtune_collect_tick_body() {
 }
 
 cmd_tick() {
-    local lock_file lock_fd
+    local lock_file lock_identity lock_fd
 
     if (($#)); then
         dbtune_log warn "_tick ignoruje argumenty"
     fi
     dbtune_init_state_dir || return 0
     lock_file=$(dbtune_collect_lock_file)
-    exec {lock_fd}>"$lock_file" || { dbtune_collect_health error lock_open || true; return 0; }
+    dbtune_open_state_lock lock_fd "$lock_file" "Collector lock" || {
+        dbtune_collect_health error lock_open || true
+        return 0
+    }
+    lock_identity=$DBTUNE_STATE_LOCK_IDENTITY
     if ! "${DBTUNE_FLOCK:-flock}" -n "$lock_fd"; then
         dbtune_event tick_skipped reason locked || true
+        exec {lock_fd}>&-
+        return 0
+    fi
+    if ! dbtune_validate_state_lock "$lock_file" "Collector lock" "$lock_identity"; then
+        "${DBTUNE_FLOCK:-flock}" -u "$lock_fd" >/dev/null 2>&1 || true
         exec {lock_fd}>&-
         return 0
     fi

@@ -53,15 +53,24 @@ ssh root@SERVER '(cd /root/dbtune-pilot && sha256sum -c dbtune.sha256) && chmod 
 
 GNU `timeout` ukonci cely audit, ak by trval viac ako 15 minut. JSON sa zachyti lokalne; stderr zostane viditelny operatorovi.
 
-Query budget auditu je 5 sekund na connect a 5 sekund `max_statement_time` na kazdy read-only SQL statement. Presne full-table pocty su vypnute; velkosti a pocty velkych tabuliek pouzivaju metadata odhady a selektivne WordPress dotazy zostavaju pod rovnakym statement budgetom. Timeout alebo SQL chyba musi byt v TSV ako `unknown` a `audit_error.*`, nie ako nula. Efektivne hodnoty su zapisane v `audit.sql_connect_timeout_seconds`, `audit.sql_statement_timeout_seconds` a `audit.exact_full_table_counts`.
+Query budget auditu je 5 sekund na connect a 5 sekund `max_statement_time` na kazdy read-only SQL statement. Presne full-table pocty su vypnute; velkosti a pocty velkych tabuliek pouzivaju metadata odhady a selektivne WordPress dotazy zostavaju pod rovnakym statement budgetom. Timeout alebo SQL chyba musi byt v TSV ako `unknown` a `audit_error.*`, nie ako nula. Kazda aplikacia ma kanonicky `audit_status` (`complete`, `partial`, `failed`) a `source_error`; iba `complete` bez zdrojovej chyby umoznuje interpretovat chybajuci nalez ako overene prazdny. Efektivne hodnoty su zapisane v `audit.sql_connect_timeout_seconds`, `audit.sql_statement_timeout_seconds` a `audit.exact_full_table_counts`.
+
+Autoritativny vysledok vyzaduje kompletne sekcie `mariadb`, `hardware`, `applications` a `security`. `PASS` je uplny audit bez nalezov, `FINDINGS` uplny audit s nalezmi, `UNKNOWN` znamena chybajuce povinne dokazy v jednej alebo viacerych sekciach a `ERROR` zlyhanie vsetkych povinnych sekcii. Exit status je `0` pre `PASS`/`FINDINGS`, `2` pre `UNKNOWN` a `1` pre `ERROR` alebo technicku chybu. JSON sa zapise aj pred navratom `2`/klasifikovaneho `1`; shell wrapper preto musi exit status zachytit bez zahodenia vystupu a pri ne-nulovom stave pilot zastavit.
+
+MariaDB sekcia navyse overuje verziovanu minimalnu schemu vsetkych current hodnot, ktore mozu vstupit do serveroveho pravidla alebo proposalu. Chybajuci, `unknown`, malformed, konfliktny alebo pre nepodporovanu verziu neplatny povinny kluc znamena `UNKNOWN`; presne kluce bez hodnot su v `audit.section.mariadb.missing_evidence`, `invalid_evidence` a `conflicting_evidence`. Na MariaDB 11.x je deprecated `innodb_flush_method` explicitne uvedeny v `optional_evidence`, nie predstierany ako povinny proposal vstup.
 
 ```bash
 install -d -m 700 pilot-artifacts
+set +e
 ssh root@SERVER 'timeout --signal=TERM 15m /root/dbtune-pilot/dbtune audit --json' >pilot-artifacts/audit.json
+audit_status=$?
+set -e
+printf 'dbtune audit exit status: %s\n' "$audit_status"
 scp root@SERVER:/var/lib/dbtune/audit.tsv pilot-artifacts/
 scp root@SERVER:/var/lib/dbtune/apps.tsv pilot-artifacts/
 scp root@SERVER:/var/lib/dbtune/databases.tsv pilot-artifacts/
 scp root@SERVER:/var/lib/dbtune/events.log pilot-artifacts/
+test "$audit_status" -eq 0
 ```
 
 ## Stop podmienky pocas auditu

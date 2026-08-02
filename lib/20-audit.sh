@@ -1,12 +1,7 @@
 # shellcheck shell=bash
 
 dbtune_audit_clean() {
-    local value=${1-}
-
-    value=${value//$'\t'/ }
-    value=${value//$'\r'/ }
-    value=${value//$'\n'/ }
-    printf '%s' "$value"
+    dbtune_redact "${1-}"
 }
 
 dbtune_audit_put() {
@@ -15,6 +10,9 @@ dbtune_audit_put() {
     local value=${3-}
 
     [[ -n $file && $key =~ ^[a-z0-9][a-z0-9._-]*$ ]] || return 64
+    if dbtune_is_sensitive_key "$key"; then
+        value='[REDACTED]'
+    fi
     printf '%s\t%s\n' "$key" "$(dbtune_audit_clean "$value")" >>"$file"
 }
 
@@ -26,7 +24,22 @@ dbtune_audit_scope_put() {
 
     [[ -n $file && -n $scope && $scope != *$'\t'* && $scope != *$'\n'* ]] || return 64
     [[ $key =~ ^[a-z0-9][a-z0-9._-]*$ ]] || return 64
+    if dbtune_is_sensitive_key "$key"; then
+        value='[REDACTED]'
+    fi
     printf '%s\t%s\t%s\n' "$(dbtune_audit_clean "$scope")" "$key" "$(dbtune_audit_clean "$value")" >>"$file"
+}
+
+dbtune_audit_normalize_in_place() {
+    local file=${1:-}
+    local temporary
+
+    [[ -r $file ]] || return 66
+    temporary=$(mktemp "$file.normalized.XXXXXX") || return 1
+    if ! chmod 600 "$temporary" || ! dbtune_audit_normalize "$file" >"$temporary" || ! mv -f "$temporary" "$file"; then
+        rm -f "$temporary"
+        return 65
+    fi
 }
 
 dbtune_audit_slug() {
@@ -69,27 +82,10 @@ dbtune_sql_quote_identifier() {
 
 dbtune_wp_config_value() {
     local expression=${1:-}
-    local quote char previous='' output='' index
+    local quote char output='' index=0 length escape closed
 
     expression=${expression#"${expression%%[![:space:]]*}"}
     expression=${expression%"${expression##*[![:space:]]}"}
-    quote=${expression:0:1}
-    if [[ $quote == "'" || $quote == '"' ]]; then
-        for ((index = 1; index < ${#expression}; index++)); do
-            char=${expression:index:1}
-            if [[ $char == "$quote" && $previous != \\ ]]; then
-                printf '%s' "$output"
-                return 0
-            fi
-            output+=$char
-            if [[ $char == \\ && $previous == \\ ]]; then
-                previous=''
-            else
-                previous=$char
-            fi
-        done
-        return 1
-    fi
     if [[ $expression =~ ^(true|TRUE)$ ]]; then
         printf 'true'
         return 0
@@ -98,6 +94,46 @@ dbtune_wp_config_value() {
         printf 'false'
         return 0
     fi
+
+    length=${#expression}
+    while ((index < length)); do
+        while ((index < length)) && [[ ${expression:index:1} == [[:space:]] ]]; do
+            index=$((index + 1))
+        done
+        quote=${expression:index:1}
+        [[ $quote == "'" || $quote == '"' ]] || return 1
+        index=$((index + 1))
+        escape=0
+        closed=0
+        while ((index < length)); do
+            char=${expression:index:1}
+            index=$((index + 1))
+            if ((escape)); then
+                output+=$char
+                escape=0
+            elif [[ $char == \\ ]]; then
+                output+=$char
+                escape=1
+            elif [[ $quote == '"' && $char == '$' ]]; then
+                return 1
+            elif [[ $char == "$quote" ]]; then
+                closed=1
+                break
+            else
+                output+=$char
+            fi
+        done
+        ((closed)) || return 1
+        while ((index < length)) && [[ ${expression:index:1} == [[:space:]] ]]; do
+            index=$((index + 1))
+        done
+        if ((index == length)); then
+            printf '%s' "$output"
+            return 0
+        fi
+        [[ ${expression:index:1} == . ]] || return 1
+        index=$((index + 1))
+    done
     return 1
 }
 
@@ -106,44 +142,67 @@ dbtune_wp_config_code() {
 
     [[ -r $file ]] || return 1
     command awk '
-        BEGIN { quote=""; block=0; escape=0 }
+        function emit_statement(    start, candidate, position) {
+            start=0
+            if (match(mask, /(^|[^[:alnum:]_])define[[:space:]]*\(/)) {
+                candidate=substr(mask, RSTART, RLENGTH)
+                start=RSTART+index(candidate, "define")-1
+            }
+            if (match(mask, /(^|[^[:alnum:]_])const[[:space:]]+/)) {
+                candidate=substr(mask, RSTART, RLENGTH)
+                position=RSTART+index(candidate, "const")-1
+                if (start==0 || position<start) start=position
+            }
+            if (match(mask, /\$table_prefix[[:space:]]*=/)) {
+                if (start==0 || RSTART<start) start=RSTART
+            }
+            if (start>0) print substr(statement, start)
+            statement=""; mask=""
+        }
+        BEGIN { quote=""; block=0; escape=0; statement=""; mask=""; php=0 }
         {
-            line=$0; output=""; line_comment=0
+            line=$0; sub(/\r$/, "", line); line_comment=0
             for (i=1; i<=length(line); i++) {
                 char=substr(line,i,1); next_char=substr(line,i+1,1)
+                if (!php) {
+                    if (substr(line,i,5)=="<?php") { php=1; statement=""; mask=""; i+=4 }
+                    continue
+                }
                 if (line_comment) break
                 if (block) {
-                    if (char=="*" && next_char=="/") { block=0; i++ }
+                    if (char=="*" && next_char=="/") { block=0; statement=statement " "; mask=mask " "; i++ }
                     continue
                 }
                 if (quote != "") {
-                    output=output char
+                    statement=statement char
+                    mask=mask " "
                     if (escape) escape=0
                     else if (char=="\\") escape=1
                     else if (char==quote) quote=""
                     continue
                 }
-                if (char=="\"" || char=="\047") { quote=char; output=output char; continue }
+                if (substr(line,i,5)=="<?php") { statement=""; mask=""; i+=4; continue }
+                if (char=="?" && next_char==">") { php=0; statement=""; mask=""; i++; continue }
+                if (char=="\"" || char=="\047") { quote=char; statement=statement char; mask=mask " "; continue }
                 if (char=="/" && next_char=="*") { block=1; i++; continue }
                 if (char=="/" && next_char=="/") { line_comment=1; continue }
                 if (char=="#") { line_comment=1; continue }
-                output=output char
+                statement=statement char
+                mask=mask char
+                if (char==";") emit_statement()
             }
-            print output
+            if (php) { statement=statement " "; mask=mask " " }
         }
     ' "$file"
 }
 
 dbtune_wp_config_parse() {
     local file=${1:-}
-    local statement='' line key expression value
+    local statement key expression value
 
     [[ -r $file ]] || return 1
-    while IFS= read -r line || [[ -n $line ]]; do
-        line=${line//$'\r'/}
-        statement+=" $line"
-        [[ $line == *';'* ]] || continue
-        if [[ $statement =~ define[[:space:]]*\([[:space:]]*[\'\"](DB_NAME|DISABLE_WP_CRON|MULTISITE|WP_CACHE)[\'\"][[:space:]]*,[[:space:]]*(.*)\)[[:space:]]*\; ]]; then
+    while IFS= read -r statement || [[ -n $statement ]]; do
+        if [[ $statement =~ ^define[[:space:]]*\([[:space:]]*[\'\"](DB_NAME|DISABLE_WP_CRON|MULTISITE|WP_CACHE)[\'\"][[:space:]]*,[[:space:]]*(.*)\)[[:space:]]*\;[[:space:]]*$ ]]; then
             key=${BASH_REMATCH[1]}
             expression=${BASH_REMATCH[2]}
             if value=$(dbtune_wp_config_value "$expression"); then
@@ -151,7 +210,7 @@ dbtune_wp_config_parse() {
             else
                 printf '%s\t%s\n' "$key" unresolved
             fi
-        elif [[ $statement =~ const[[:space:]]+(DB_NAME|DISABLE_WP_CRON|MULTISITE|WP_CACHE)[[:space:]]*=[[:space:]]*(.*)\; ]]; then
+        elif [[ $statement =~ ^const[[:space:]]+(DB_NAME|DISABLE_WP_CRON|MULTISITE|WP_CACHE)[[:space:]]*=[[:space:]]*(.*)\;[[:space:]]*$ ]]; then
             key=${BASH_REMATCH[1]}
             expression=${BASH_REMATCH[2]}
             if value=$(dbtune_wp_config_value "$expression"); then
@@ -159,7 +218,7 @@ dbtune_wp_config_parse() {
             else
                 printf '%s\t%s\n' "$key" unresolved
             fi
-        elif [[ $statement =~ \$table_prefix[[:space:]]*=[[:space:]]*(.*)\; ]]; then
+        elif [[ $statement =~ ^\$table_prefix[[:space:]]*=[[:space:]]*(.*)\;[[:space:]]*$ ]]; then
             expression=${BASH_REMATCH[1]}
             if value=$(dbtune_wp_config_value "$expression"); then
                 printf 'table_prefix\t%s\n' "$(dbtune_audit_clean "$value")"
@@ -167,7 +226,6 @@ dbtune_wp_config_parse() {
                 printf 'table_prefix\tunresolved\n'
             fi
         fi
-        statement=''
     done < <(dbtune_wp_config_code "$file")
 }
 
@@ -182,6 +240,55 @@ dbtune_audit_find_wp_config() {
         fi
     done
     return 1
+}
+
+dbtune_audit_verified_wp_root() {
+    local app=${1:-}
+    local candidate candidate_root root=''
+
+    [[ $app == /* && $app != *$'\n'* && $app != *$'\r'* && $app != *$'\t'* ]] || return 1
+    for candidate in "$app" "$app/htdocs" "$app/public"; do
+        [[ -f $candidate/wp-load.php ]] || continue
+        candidate_root=$(cd -P -- "$candidate" 2>/dev/null && pwd -P) || continue
+        [[ $candidate_root == /* && $candidate_root != *$'\n'* && $candidate_root != *$'\r'* && $candidate_root != *$'\t'* ]] || continue
+        [[ -f $candidate_root/wp-load.php ]] || continue
+        [[ -z $root || $root == "$candidate_root" ]] || return 1
+        root=$candidate_root
+    done
+    [[ -n $root ]] || return 1
+    printf '%s\n' "$root"
+}
+
+dbtune_audit_path_uid() {
+    local path=${1:-}
+    local uid
+
+    uid=$(stat -c '%u' -- "$path" 2>/dev/null) || uid=$(stat -f '%u' "$path" 2>/dev/null) || return 1
+    [[ $uid =~ ^[0-9]+$ ]] || return 1
+    printf '%s\n' "$uid"
+}
+
+dbtune_audit_user_for_uid() {
+    command id -nu "${1:-}" 2>/dev/null
+}
+
+dbtune_audit_uid_for_user() {
+    command id -u "${1:-}" 2>/dev/null
+}
+
+dbtune_audit_verified_owner() {
+    local root=${1:-}
+    local uid owner verified_uid
+
+    uid=$(dbtune_audit_path_uid "$root") || return 1
+    [[ $uid =~ ^[0-9]+$ ]] || return 1
+    ((10#$uid > 0)) || return 1
+    owner=$(dbtune_audit_user_for_uid "$uid") || return 1
+    [[ $owner =~ ^[A-Za-z_][A-Za-z0-9_-]*$ && $owner != root ]] || return 1
+    verified_uid=$(dbtune_audit_uid_for_user "$owner") || return 1
+    [[ $verified_uid =~ ^[0-9]+$ ]] || return 1
+    ((10#$verified_uid == 10#$uid)) || return 1
+    printf '%s\n' "$owner"
 }
 
 dbtune_audit_scan_landmines() {
@@ -240,47 +347,171 @@ dbtune_audit_sql() {
 }
 
 dbtune_audit_effective_variables() {
-    printf '%s\n' \
-        innodb_buffer_pool_size \
-        max_connections \
-        innodb_io_capacity \
-        innodb_io_capacity_max \
-        innodb_read_io_threads \
-        innodb_write_io_threads \
-        innodb_flush_neighbors \
-        innodb_log_file_size \
-        innodb_log_buffer_size \
-        query_cache_type \
-        query_cache_size \
-        innodb_flush_log_at_trx_commit \
-        innodb_doublewrite \
-        innodb_flush_method \
-        innodb_buffer_pool_dump_at_shutdown \
-        innodb_buffer_pool_load_at_startup \
-        innodb_max_dirty_pages_pct \
-        innodb_max_dirty_pages_pct_lwm \
-        innodb_lock_wait_timeout \
-        skip_name_resolve \
-        thread_cache_size \
-        tmp_table_size \
-        max_heap_table_size \
-        table_definition_cache \
-        key_buffer_size \
-        slow_query_log \
-        slow_query_log_file \
-        long_query_time \
-        log_slow_verbosity
+    dbtune_audit_mariadb_evidence_schema | command awk -F '\t' '
+        $4=="proposal" && $1 ~ /^mariadb[.]variable[.]/ {
+            sub(/^mariadb[.]variable[.]/, "", $1)
+            print $1
+        }
+    '
 }
 
 dbtune_audit_mariadb_variables() {
-    dbtune_audit_effective_variables
-    printf '%s\n' \
-        datadir \
-        open_files_limit \
-        performance_schema \
-        log_bin \
-        wsrep_on \
-        bind_address
+    dbtune_audit_mariadb_evidence_schema | command awk -F '\t' '
+        $1 ~ /^mariadb[.]variable[.]/ {
+            sub(/^mariadb[.]variable[.]/, "", $1)
+            print $1
+        }
+    '
+}
+
+dbtune_audit_mariadb_evidence_schema() {
+    cat <<'SCHEMA'
+mariadb.version	version	all	input
+mariadb.dataset_bytes	uint	all	input
+mariadb.variable.innodb_buffer_pool_size	positive_uint	all	proposal
+mariadb.variable.max_connections	positive_uint	all	proposal
+mariadb.variable.innodb_io_capacity	positive_uint	all	proposal
+mariadb.variable.innodb_io_capacity_max	positive_uint	all	proposal
+mariadb.variable.innodb_read_io_threads	positive_uint	all	proposal
+mariadb.variable.innodb_write_io_threads	positive_uint	all	proposal
+mariadb.variable.innodb_flush_neighbors	bool	all	proposal
+mariadb.variable.innodb_log_file_size	positive_uint	all	proposal
+mariadb.variable.innodb_log_buffer_size	positive_uint	all	proposal
+mariadb.variable.query_cache_type	query_cache_type	all	proposal
+mariadb.variable.query_cache_size	uint	all	proposal
+mariadb.variable.innodb_flush_log_at_trx_commit	trx_commit	all	proposal
+mariadb.variable.innodb_doublewrite	bool	all	proposal
+mariadb.variable.innodb_flush_method	flush_method	pre11	proposal
+mariadb.variable.innodb_buffer_pool_dump_at_shutdown	bool	all	proposal
+mariadb.variable.innodb_buffer_pool_load_at_startup	bool	all	proposal
+mariadb.variable.innodb_max_dirty_pages_pct	percent	all	proposal
+mariadb.variable.innodb_max_dirty_pages_pct_lwm	percent	all	proposal
+mariadb.variable.innodb_lock_wait_timeout	uint	all	proposal
+mariadb.variable.skip_name_resolve	bool	all	proposal
+mariadb.variable.thread_cache_size	uint	all	proposal
+mariadb.variable.tmp_table_size	positive_uint	all	proposal
+mariadb.variable.max_heap_table_size	positive_uint	all	proposal
+mariadb.variable.table_definition_cache	positive_uint	all	proposal
+mariadb.variable.key_buffer_size	uint	all	proposal
+mariadb.variable.slow_query_log	bool	all	proposal
+mariadb.variable.slow_query_log_file	text	all	proposal
+mariadb.variable.long_query_time	decimal	all	proposal
+mariadb.variable.log_slow_verbosity	verbosity	all	proposal
+mariadb.variable.datadir	absolute_path	all	input
+mariadb.variable.open_files_limit	positive_uint	all	input
+mariadb.variable.performance_schema	bool	all	input
+mariadb.variable.log_bin	bool	all	input
+mariadb.variable.wsrep_on	bool	all	input
+mariadb.variable.bind_address	bind_address	all	input
+mariadb.status.uptime	uint	all	input
+mariadb.status.max_used_connections	uint	all	input
+mariadb.status.key_read_requests	uint	all	input
+SCHEMA
+}
+
+dbtune_audit_mariadb_version_family() {
+    local version=${1:-}
+    local major minor
+
+    version=${version%%-*}
+    IFS=. read -r major minor _ <<<"$version"
+    if [[ ! $major =~ ^[0-9]+$ || ! $minor =~ ^[0-9]+$ ]]; then
+        printf 'unsupported\n'
+    elif ((10#$major == 11)); then
+        printf '11.x\n'
+    elif ((10#$major == 10 && 10#$minor == 11)); then
+        printf '10.11\n'
+    elif ((10#$major == 10 && 10#$minor == 6)); then
+        printf '10.6\n'
+    else
+        printf 'unsupported\n'
+    fi
+}
+
+dbtune_audit_mariadb_evidence_valid() {
+    local validator=${1:-}
+    local value=${2-}
+    local upper=${value^^}
+
+    DBTUNE_AUDIT_EVIDENCE_ERROR=malformed
+    if [[ ${value,,} == unknown || ${value,,} == unresolved ]]; then
+        DBTUNE_AUDIT_EVIDENCE_ERROR=unknown
+        return 1
+    fi
+    case $validator in
+        version)
+            [[ $value =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?([_-][A-Za-z0-9._-]+)*$ ]] || return 1
+            [[ $(dbtune_audit_mariadb_version_family "$value") != unsupported ]] || {
+                DBTUNE_AUDIT_EVIDENCE_ERROR=unsupported
+                return 1
+            }
+            ;;
+        uint) [[ $value =~ ^[0-9]+$ ]] || return 1 ;;
+        positive_uint) [[ $value =~ ^[1-9][0-9]*$ ]] || return 1 ;;
+        decimal) [[ $value =~ ^[0-9]+([.][0-9]+)?$ ]] || return 1 ;;
+        percent)
+            [[ $value =~ ^[0-9]+([.][0-9]+)?$ ]] || return 1
+            command awk -v value="$value" 'BEGIN {exit !(value >= 0 && value <= 100)}' || return 1
+            ;;
+        bool) [[ $upper == 0 || $upper == 1 || $upper == OFF || $upper == ON ]] || return 1 ;;
+        query_cache_type) [[ $upper == 0 || $upper == 1 || $upper == 2 || $upper == OFF || $upper == ON || $upper == DEMAND ]] || return 1 ;;
+        trx_commit) [[ $value == 0 || $value == 1 || $value == 2 ]] || return 1 ;;
+        flush_method) [[ $upper =~ ^(FSYNC|O_DSYNC|LITTLESYNC|NOSYNC|O_DIRECT|O_DIRECT_NO_FSYNC|ALL_O_DIRECT)$ ]] || return 1 ;;
+        absolute_path) [[ $value == /* && $value != *[[:space:]]* ]] || return 1 ;;
+        text) [[ -n $value ]] || return 1 ;;
+        verbosity) [[ $value =~ ^[A-Za-z0-9_,[:space:]-]*$ ]] || return 1 ;;
+        bind_address) [[ -z $value || $value =~ ^[A-Za-z0-9:.*,_/-]+$ ]] || return 1 ;;
+        *) return 1 ;;
+    esac
+    DBTUNE_AUDIT_EVIDENCE_ERROR=none
+}
+
+dbtune_audit_quarantine_mariadb_conflicts() {
+    local file=${1:-}
+    local raw_key value rest canonical key _validator _requirement _role temporary conflict_list=''
+    local conflict_count=0
+    local -A schema=() seen=() values=() conflicts=()
+
+    [[ -r $file ]] || return 66
+    while IFS=$'\t' read -r key _validator _requirement _role; do
+        [[ -n $key ]] && schema["$key"]=1
+    done < <(dbtune_audit_mariadb_evidence_schema)
+    while IFS=$'\t' read -r raw_key value rest || [[ -n ${raw_key:-} ]]; do
+        [[ -n $raw_key ]] || continue
+        canonical=$(dbtune_audit_key_canonical "$raw_key") || return
+        [[ -n ${schema[$canonical]+x} ]] || continue
+        if [[ -n ${seen[$canonical]+x} && ${values[$canonical]} != "$value" ]]; then
+            if [[ -z ${conflicts[$canonical]+x} ]]; then
+                conflicts["$canonical"]=1
+                conflict_count=$((conflict_count + 1))
+            fi
+        else
+            seen["$canonical"]=1
+            values["$canonical"]=$value
+        fi
+    done <"$file"
+    ((conflict_count > 0)) || return 0
+
+    temporary=$(mktemp "$file.evidence.XXXXXX") || return 1
+    chmod 600 "$temporary" || {
+        rm -f "$temporary"
+        return 1
+    }
+    while IFS=$'\t' read -r raw_key value rest || [[ -n ${raw_key:-} ]]; do
+        [[ -n $raw_key ]] || continue
+        canonical=$(dbtune_audit_key_canonical "$raw_key") || {
+            rm -f "$temporary"
+            return 1
+        }
+        [[ -n ${conflicts[$canonical]+x} ]] && continue
+        printf '%s\t%s\n' "$raw_key" "$value" >>"$temporary"
+    done <"$file"
+    while IFS=$'\t' read -r key _validator _requirement _role; do
+        [[ -n ${conflicts[$key]+x} ]] || continue
+        conflict_list+="${conflict_list:+,}$key"
+    done < <(dbtune_audit_mariadb_evidence_schema)
+    printf 'audit.mariadb_evidence_conflicts\t%s\n' "$conflict_list" >>"$temporary"
+    mv -f "$temporary" "$file"
 }
 
 dbtune_audit_storage_class() {
@@ -527,6 +758,7 @@ dbtune_audit_database_metrics() {
         if rows=$(dbtune_audit_sql "SELECT option_name, LENGTH(option_value) FROM $dbq.$tableq WHERE autoload IN ('yes','on','auto') ORDER BY LENGTH(option_value) DESC LIMIT 20"); then
             while IFS=$'\t' read -r a b; do
                 [[ -n $a ]] || continue
+                dbtune_is_sensitive_key "$a" && a='[REDACTED]'
                 dbtune_audit_scope_put "$dbout" "$scope" "autoload.top.$index" "$a:${b:-unknown}"
                 index=$(command awk -v n="$index" 'BEGIN { print n+1 }')
             done <<<"$rows"
@@ -673,15 +905,63 @@ dbtune_audit_app_cron_status() {
     fi
 }
 
+dbtune_audit_finalize_app_statuses() {
+    local appout=${1:-}
+    local dbout=${2:-}
+    local records
+
+    [[ -r $appout && -r $dbout ]] || return 66
+    records=$(awk -F '\t' '
+        function remember(scope) {
+            if (!(scope in seen)) {
+                seen[scope] = 1
+                scopes[++count] = scope
+            }
+        }
+        function add_error(scope, key, value, entry) {
+            remember(scope)
+            entry = key "=" value
+            errors[scope] = errors[scope] (errors[scope] == "" ? "" : ",") entry
+            if (key == "audit_error.wp_config") failed[scope] = 1
+        }
+        FNR == NR {
+            remember($1)
+            if ($2 ~ /^audit_error\./) add_error($1, $2, $3)
+            next
+        }
+        $2 ~ /^audit_error\./ { add_error($1, $2, $3) }
+        END {
+            OFS = "\t"
+            for (i = 1; i <= count; i++) {
+                scope = scopes[i]
+                status = failed[scope] ? "failed" : (errors[scope] != "" ? "partial" : "complete")
+                print scope, "audit_status", status
+                print scope, "source_error", (errors[scope] == "" ? "none" : errors[scope])
+            }
+        }
+    ' "$appout" "$dbout") || return
+    if [[ -n $records ]]; then
+        printf '%s\n' "$records" >>"$appout"
+    fi
+    return 0
+}
+
 dbtune_audit_collect_apps() {
     local out=${1:-}
     local appout=${2:-}
     local dbout=${3:-}
     local home_root=${DBTUNE_HOME_ROOT:-/home}
-    local user_dir app config app_root app_id app_index=0 type key value db_name='' prefix='' disable_cron=unresolved
+    local user_dir app config app_root wp_root owner app_id app_index=0 type key value db_name='' prefix='' disable_cron=unresolved
     local redis_active=0 redis_ping=0 woo object_cache page_cache wp_cache=unresolved
-    local multisite=false cron_status site_url optionsq dbq
+    local multisite=false cron_status site_url optionsq dbq site_url_query
     local -a databases=()
+
+    if [[ ! -d $home_root || ! -r $home_root || ! -x $home_root ]]; then
+        dbtune_audit_put "$out" app.discovery_status failed
+        dbtune_audit_put "$out" app.count 0
+        return 0
+    fi
+    dbtune_audit_put "$out" app.discovery_status complete
 
     if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet redis-server 2>/dev/null; then
         redis_active=1
@@ -710,7 +990,6 @@ dbtune_audit_collect_apps() {
             app_id="app.$app_index"
             app_index=$((app_index + 1))
             dbtune_audit_scope_put "$appout" "$app_id" path "$app"
-            dbtune_audit_scope_put "$appout" "$app_id" owner "${user_dir##*/}"
             config=$(dbtune_audit_find_wp_config "$app" || true)
             if [[ -z $config && ! -f $app/wp-load.php && ! -f $app/htdocs/wp-load.php && ! -f $app/public/wp-load.php ]]; then
                 dbtune_audit_scope_put "$appout" "$app_id" type non_wordpress
@@ -723,11 +1002,21 @@ dbtune_audit_collect_apps() {
             app_root=$app
             [[ -f $app/htdocs/wp-load.php ]] && app_root=$app/htdocs
             [[ -f $app/public/wp-load.php ]] && app_root=$app/public
+            wp_root=$(dbtune_audit_verified_wp_root "$app" || true)
+            owner=''
+            if [[ -n $wp_root ]]; then
+                app_root=$wp_root
+                owner=$(dbtune_audit_verified_owner "$wp_root" || true)
+            fi
+            dbtune_audit_scope_put "$appout" "$app_id" webroot "${wp_root:-unresolved}"
+            dbtune_audit_scope_put "$appout" "$app_id" owner "${owner:-unresolved}"
+            [[ -n $wp_root ]] || dbtune_audit_scope_put "$appout" "$app_id" audit_error.wp_root unverified
+            [[ -n $owner ]] || dbtune_audit_scope_put "$appout" "$app_id" audit_error.owner unverified
             db_name=''
             prefix=''
-            disable_cron=unresolved
+            disable_cron=false
             multisite=false
-            wp_cache=unresolved
+            wp_cache=false
             if [[ -n $config ]]; then
                 while IFS=$'\t' read -r key value; do
                     case $key in
@@ -738,16 +1027,26 @@ dbtune_audit_collect_apps() {
                         WP_CACHE) wp_cache=$value ;;
                     esac
                 done < <(dbtune_wp_config_parse "$config")
+            else
+                dbtune_audit_scope_put "$appout" "$app_id" audit_error.wp_config missing
             fi
             [[ -n $db_name ]] || db_name=unresolved
             [[ -n $prefix ]] || prefix=unresolved
+            [[ $db_name != unresolved ]] || dbtune_audit_scope_put "$appout" "$app_id" audit_error.database unresolved
+            [[ $prefix != unresolved ]] || dbtune_audit_scope_put "$appout" "$app_id" audit_error.table_prefix unresolved
+            [[ $disable_cron != unresolved ]] || dbtune_audit_scope_put "$appout" "$app_id" audit_error.disable_wp_cron unresolved
+            [[ $multisite != unresolved ]] || dbtune_audit_scope_put "$appout" "$app_id" audit_error.multisite unresolved
+            [[ $wp_cache != unresolved ]] || dbtune_audit_scope_put "$appout" "$app_id" audit_error.wp_cache unresolved
             site_url=unknown
             if [[ $db_name != unresolved && $prefix != unresolved && $prefix =~ ^[A-Za-z0-9_]+$ ]]; then
                 dbq=$(dbtune_sql_quote_identifier "$db_name" || true)
                 optionsq=$(dbtune_sql_quote_identifier "${prefix}options" || true)
-                if [[ -n $dbq && -n $optionsq ]] && value=$(dbtune_audit_sql "SELECT option_value FROM $dbq.$optionsq WHERE option_name IN ('home','siteurl') ORDER BY option_name LIMIT 2"); then
+                site_url_query="SELECT option_value FROM $dbq.$optionsq WHERE option_name IN ('home','siteurl') ORDER BY option_name LIMIT 2"
+                if [[ -n $dbq && -n $optionsq ]] && value=$(dbtune_audit_sql "$site_url_query"); then
                     site_url=${value%%$'\n'*}
                     [[ -n $site_url ]] || site_url=unknown
+                else
+                    dbtune_audit_scope_put "$appout" "$app_id" audit_error.site_url query_failed
                 fi
             fi
             cron_status=$(dbtune_audit_app_cron_status "$app" "$app_root" "$site_url")
@@ -822,6 +1121,7 @@ dbtune_audit_collect_apps() {
             dbtune_audit_scope_put "$dbout" "$db_name" application_mapping unmapped
         fi
     done < <(command awk -F '\t' '$2=="size_bytes" { print $1 }' "$dbout" | sort -u)
+    dbtune_audit_finalize_app_statuses "$appout" "$dbout"
 }
 
 dbtune_audit_collect_platform() {
@@ -883,10 +1183,12 @@ dbtune_audit_collect_platform() {
         backup_success=$(dbtune_manifest_value "$evidence" last_success)
         dbtune_audit_put "$out" backup.evidence_file "$evidence"
     elif [[ -e $evidence || -L $evidence ]]; then
-        dbtune_audit_put "$out" backup.evidence_error invalid
+        dbtune_audit_put "$out" backup.evidence_error "${DBTUNE_BACKUP_EVIDENCE_ERROR:-invalid}"
     else
         dbtune_audit_put "$out" backup.evidence_error missing
     fi
+    dbtune_audit_put "$out" backup.age_seconds "${DBTUNE_BACKUP_EVIDENCE_AGE_SECONDS:-unknown}"
+    dbtune_audit_put "$out" backup.max_age_seconds "${DBTUNE_BACKUP_EVIDENCE_MAX_AGE_SECONDS:-${DBTUNE_MAX_BACKUP_AGE_SECONDS:-86400}}"
     dbtune_audit_put "$out" backup.status "$backup_status"
     dbtune_audit_put "$out" backup.source "$backup_source"
     dbtune_audit_put "$out" backup.checked_at "$backup_checked"
@@ -967,6 +1269,183 @@ dbtune_audit_add_findings() {
     fi
 }
 
+dbtune_audit_finalize_status() {
+    local audit=${1:-}
+    local apps=${2:-}
+    local database_file=${3:-}
+    local available mariadb_status hardware_status applications_status security_status version family
+    local cpu ram storage discovery app_count app_partial app_failed app_status_count
+    local grants listener hardware_evidence=0 findings=0 incomplete=0 failed_count=0
+    local evidence_key evidence_value validator requirement _role first_value quarantined_conflicts
+    local evidence_present evidence_conflict mariadb_missing='' mariadb_invalid='' mariadb_conflicting='' mariadb_optional=''
+    local overall exit_status section status domain failed_sections='' partial_sections='' affected_domains=''
+    local -a sections=(mariadb hardware applications security)
+    local -A statuses domains affected=()
+
+    [[ -r $audit && -r $apps && -r $database_file ]] || return 66
+
+    available=$(command awk -F '\t' '$1=="mariadb.available" {print $2; exit}' "$audit")
+    version=$(command awk -F '\t' '$1=="mariadb.version" {print $2; exit}' "$audit")
+    family=$(dbtune_audit_mariadb_version_family "$version")
+    quarantined_conflicts=$(command awk -F '\t' '$1=="audit.mariadb_evidence_conflicts" {print $2; exit}' "$audit")
+    mariadb_status=failed
+    if [[ $available == 1 ]]; then
+        mariadb_status=complete
+        while IFS=$'\t' read -r evidence_key validator requirement _role; do
+            if [[ $requirement == pre11 && $family == 11.x ]]; then
+                mariadb_optional+="${mariadb_optional:+,}$evidence_key=deprecated_11x"
+                continue
+            fi
+            evidence_present=0
+            evidence_conflict=0
+            first_value=''
+            if [[ ,$quarantined_conflicts, == *,$evidence_key,* ]]; then
+                evidence_conflict=1
+            fi
+            while IFS= read -r evidence_value; do
+                if ((evidence_present == 0)); then
+                    first_value=$evidence_value
+                elif [[ $first_value != "$evidence_value" ]]; then
+                    evidence_conflict=1
+                fi
+                evidence_present=$((evidence_present + 1))
+            done < <(command awk -F '\t' -v key="$evidence_key" '$1==key {print $2}' "$audit")
+            if ((evidence_conflict)); then
+                mariadb_conflicting+="${mariadb_conflicting:+,}$evidence_key"
+            elif ((evidence_present == 0)); then
+                mariadb_missing+="${mariadb_missing:+,}$evidence_key"
+            elif ! dbtune_audit_mariadb_evidence_valid "$validator" "$first_value"; then
+                mariadb_invalid+="${mariadb_invalid:+,}$evidence_key=${DBTUNE_AUDIT_EVIDENCE_ERROR:-malformed}"
+            fi
+        done < <(dbtune_audit_mariadb_evidence_schema)
+        if command awk -F '\t' '
+            $1=="finding.global_variables_query_failed" ||
+            $1=="finding.global_status_query_failed" ||
+            $1=="finding.dataset_query_failed" {bad=1}
+            END {exit !bad}
+        ' "$audit" || command awk -F '\t' '$2=="audit_error.dataset" {bad=1} END {exit !bad}' "$database_file"; then
+            mariadb_status=partial
+        fi
+        if [[ -n $mariadb_missing || -n $mariadb_invalid || -n $mariadb_conflicting ]]; then
+            mariadb_status=partial
+        fi
+    fi
+
+    cpu=$(command awk -F '\t' '$1=="hw.cpu_count" {print $2; exit}' "$audit")
+    ram=$(command awk -F '\t' '$1=="hw.ram_bytes" {print $2; exit}' "$audit")
+    storage=$(command awk -F '\t' '$1=="hw.storage_class" {print tolower($2); exit}' "$audit")
+    [[ $cpu =~ ^[1-9][0-9]*$ ]] && hardware_evidence=$((hardware_evidence + 1))
+    [[ $ram =~ ^[1-9][0-9]*$ ]] && hardware_evidence=$((hardware_evidence + 1))
+    [[ -n $storage && $storage != unknown ]] && hardware_evidence=$((hardware_evidence + 1))
+    case $hardware_evidence in
+        3) hardware_status=complete ;;
+        0) hardware_status=failed ;;
+        *) hardware_status=partial ;;
+    esac
+
+    discovery=$(command awk -F '\t' '$1=="app.discovery_status" {print tolower($2); exit}' "$audit")
+    app_count=$(command awk -F '\t' '$1=="app.count" {print $2; exit}' "$audit")
+    [[ $app_count =~ ^[0-9]+$ ]] || app_count=0
+    read -r _ app_partial app_failed app_status_count < <(command awk -F '\t' '
+        $2=="audit_status" {
+            count++
+            if ($3=="complete") complete++
+            else if ($3=="partial") partial++
+            else if ($3=="failed") failed++
+        }
+        END {print complete+0, partial+0, failed+0, count+0}
+    ' "$apps")
+    if [[ $discovery != complete ]]; then
+        applications_status=failed
+    elif ((app_count == 0)); then
+        applications_status=complete
+    elif ((app_status_count == 0 || app_failed == app_count)); then
+        applications_status=failed
+    elif ((app_partial > 0 || app_failed > 0 || app_status_count < app_count)); then
+        applications_status=partial
+    else
+        applications_status=complete
+    fi
+
+    grants=$(command awk -F '\t' '$1=="security.grants_audited" {print $2; exit}' "$audit")
+    listener=$(command awk -F '\t' '$1=="security.port_3306" {print tolower($2); exit}' "$audit")
+    if [[ $grants == 1 && -n $listener && $listener != unknown ]]; then
+        security_status=complete
+    elif [[ $grants != 1 && ( -z $listener || $listener == unknown ) ]]; then
+        security_status=failed
+    else
+        security_status=partial
+    fi
+
+    statuses[mariadb]=$mariadb_status
+    statuses[hardware]=$hardware_status
+    statuses[applications]=$applications_status
+    statuses[security]=$security_status
+    domains[mariadb]=server_tuning,database_inventory
+    domains[hardware]=capacity_sizing,storage_tuning
+    domains[applications]=application_health,application_database
+    domains[security]=security
+
+    dbtune_audit_put "$audit" audit.section.mariadb.evidence_schema_version 1
+    dbtune_audit_put "$audit" audit.section.mariadb.missing_evidence "${mariadb_missing:-none}"
+    dbtune_audit_put "$audit" audit.section.mariadb.invalid_evidence "${mariadb_invalid:-none}"
+    dbtune_audit_put "$audit" audit.section.mariadb.conflicting_evidence "${mariadb_conflicting:-none}"
+    dbtune_audit_put "$audit" audit.section.mariadb.optional_evidence "${mariadb_optional:-none}"
+
+    for section in "${sections[@]}"; do
+        status=${statuses[$section]}
+        domain=${domains[$section]}
+        dbtune_audit_put "$audit" "audit.section.$section.status" "$status"
+        dbtune_audit_put "$audit" "audit.section.$section.domains" "$domain"
+        case $status in
+            failed)
+                failed_count=$((failed_count + 1))
+                incomplete=$((incomplete + 1))
+                failed_sections+="${failed_sections:+,}$section"
+                ;;
+            partial)
+                incomplete=$((incomplete + 1))
+                partial_sections+="${partial_sections:+,}$section"
+                ;;
+        esac
+        if [[ $status != complete ]]; then
+            while IFS= read -r domain; do
+                [[ -n $domain ]] && affected["$domain"]=1
+            done < <(tr ',' '\n' <<<"${domains[$section]}")
+        fi
+    done
+    for domain in server_tuning database_inventory capacity_sizing storage_tuning application_health application_database security; do
+        [[ -n ${affected[$domain]+x} ]] || continue
+        affected_domains+="${affected_domains:+,}$domain"
+    done
+    findings=$(command awk -F '\t' '
+        FNR==1 {file++}
+        (file==1 && $1 ~ /^finding\./) || (file>1 && $2 ~ /^finding(\.|$)/) {count++}
+        END {print count+0}
+    ' "$audit" "$apps" "$database_file")
+    if ((failed_count == ${#sections[@]})); then
+        overall=ERROR
+        exit_status=1
+    elif ((incomplete > 0)); then
+        overall=UNKNOWN
+        exit_status=2
+    elif ((findings > 0)); then
+        overall=FINDINGS
+        exit_status=0
+    else
+        overall=PASS
+        exit_status=0
+    fi
+
+    dbtune_audit_put "$audit" audit.required_sections "$(IFS=,; printf '%s' "${sections[*]}")"
+    dbtune_audit_put "$audit" audit.failed_sections "${failed_sections:-none}"
+    dbtune_audit_put "$audit" audit.partial_sections "${partial_sections:-none}"
+    dbtune_audit_put "$audit" audit.affected_domains "${affected_domains:-none}"
+    dbtune_audit_put "$audit" audit.finding_count "$findings"
+    dbtune_audit_put "$audit" audit.overall_status "$overall"
+    dbtune_audit_put "$audit" audit.exit_status "$exit_status"
+}
+
 dbtune_audit_json() {
     local audit=${1:-}
     local apps=${2:-}
@@ -975,24 +1454,29 @@ dbtune_audit_json() {
     local -a fields=()
     local -A json_seen=()
 
+    dbtune_audit_validate "$audit" || return
     while IFS=$'\t' read -r key value; do
+        dbtune_is_sensitive_key "$key" && continue
+        key=$(dbtune_audit_key_canonical "$key") || return
         [[ -n $key && -z ${json_seen[$key]+x} ]] || continue
         json_seen["$key"]=1
-        fields+=("$key" "$value")
+        fields+=("$(dbtune_redact "$key")" "$(dbtune_redact "$value")")
     done <"$audit"
     while IFS=$'\t' read -r scope key value; do
         [[ -n $scope && -n $key ]] || continue
+        dbtune_is_sensitive_key "$key" && continue
         key="$scope.$key"
         [[ -z ${json_seen[$key]+x} ]] || continue
         json_seen["$key"]=1
-        fields+=("$key" "$value")
+        fields+=("$(dbtune_redact "$key")" "$(dbtune_redact "$value")")
     done <"$apps"
     while IFS=$'\t' read -r scope key value; do
         [[ -n $scope && -n $key ]] || continue
+        dbtune_is_sensitive_key "$key" && continue
         key="database.$(dbtune_audit_slug "$scope").$key"
         [[ -z ${json_seen[$key]+x} ]] || continue
         json_seen["$key"]=1
-        fields+=("$key" "$value")
+        fields+=("$(dbtune_redact "$key")" "$(dbtune_redact "$value")")
     done <"$database_file"
     dbtune_json_emit "${fields[@]}"
 }
@@ -1002,6 +1486,8 @@ dbtune_audit_summary() {
     local apps=${2:-}
     local database_file=${3:-}
     local version cpu ram dataset storage app_count db_count critical warning
+    local overall required failed partial affected finding_count
+    local mariadb_missing mariadb_invalid mariadb_conflicting mariadb_optional
 
     version=$(command awk -F '\t' '$1=="mariadb.version" { print $2; exit }' "$audit")
     cpu=$(command awk -F '\t' '$1=="hw.cpu_count" { print $2; exit }' "$audit")
@@ -1012,18 +1498,41 @@ dbtune_audit_summary() {
     db_count=$(command awk -F '\t' '$2=="size_bytes" { seen[$1]=1 } END { print length(seen) }' "$database_file")
     critical=$(command awk -F '\t' '$1 ~ /^finding\./ && $2=="critical" { n++ } END { print n+0 }' "$audit")
     critical=$((critical + $(command awk -F '\t' '$2 ~ /^finding/ && $3=="critical" { n++ } END { print n+0 }' "$apps")))
+    critical=$((critical + $(command awk -F '\t' '$2 ~ /^finding/ && $3=="critical" { n++ } END { print n+0 }' "$database_file")))
     warning=$(command awk -F '\t' '$1 ~ /^finding\./ && $2=="warning" { n++ } END { print n+0 }' "$audit")
+    warning=$((warning + $(command awk -F '\t' '$2 ~ /^finding/ && $3=="warning" { n++ } END { print n+0 }' "$apps")))
+    warning=$((warning + $(command awk -F '\t' '$2 ~ /^finding/ && $3=="warning" { n++ } END { print n+0 }' "$database_file")))
+    overall=$(command awk -F '\t' '$1=="audit.overall_status" {print $2; exit}' "$audit")
+    required=$(command awk -F '\t' '$1=="audit.required_sections" {print $2; exit}' "$audit")
+    failed=$(command awk -F '\t' '$1=="audit.failed_sections" {print $2; exit}' "$audit")
+    partial=$(command awk -F '\t' '$1=="audit.partial_sections" {print $2; exit}' "$audit")
+    affected=$(command awk -F '\t' '$1=="audit.affected_domains" {print $2; exit}' "$audit")
+    finding_count=$(command awk -F '\t' '$1=="audit.finding_count" {print $2; exit}' "$audit")
+    mariadb_missing=$(command awk -F '\t' '$1=="audit.section.mariadb.missing_evidence" {print $2; exit}' "$audit")
+    mariadb_invalid=$(command awk -F '\t' '$1=="audit.section.mariadb.invalid_evidence" {print $2; exit}' "$audit")
+    mariadb_conflicting=$(command awk -F '\t' '$1=="audit.section.mariadb.conflicting_evidence" {print $2; exit}' "$audit")
+    mariadb_optional=$(command awk -F '\t' '$1=="audit.section.mariadb.optional_evidence" {print $2; exit}' "$audit")
 
-    printf 'DBTune audit bol dokonceny.\n'
-    printf 'Server: %s CPU, %s RAM, ulozisko %s.\n' "${cpu:-nezistene}" "${ram:-nezistena}" "${storage:-nezistene}"
-    printf 'MariaDB: %s, dataset %s, databazy %s.\n' "${version:-nedostupna}" "${dataset:-nezisteny}" "${db_count:-0}"
-    printf 'Aplikacie: %s. Kriticke nalezy: %s, varovania: %s.\n' "${app_count:-0}" "$critical" "$warning"
-    printf 'Data: %s/{audit,apps,databases}.tsv\n' "$DBTUNE_STATE_DIR"
+    printf 'DBTune audit status: %s.\n' "$(dbtune_redact "${overall:-ERROR}")"
+    printf 'Povinne sekcie: %s. Zlyhane: %s. Ciastocne: %s.\n' \
+        "$(dbtune_redact "${required:-nezistene}")" "$(dbtune_redact "${failed:-nezistene}")" "$(dbtune_redact "${partial:-nezistene}")"
+    printf 'Ovplyvnene domeny odporucani: %s.\n' "$(dbtune_redact "${affected:-nezistene}")"
+    printf 'MariaDB dokazy: chybajuce=%s; neplatne=%s; konfliktne=%s; volitelne=%s.\n' \
+        "$(dbtune_redact "${mariadb_missing:-nezistene}")" "$(dbtune_redact "${mariadb_invalid:-nezistene}")" \
+        "$(dbtune_redact "${mariadb_conflicting:-nezistene}")" "$(dbtune_redact "${mariadb_optional:-nezistene}")"
+    printf 'Server: %s CPU, %s RAM, ulozisko %s.\n' \
+        "$(dbtune_redact "${cpu:-nezistene}")" "$(dbtune_redact "${ram:-nezistena}")" "$(dbtune_redact "${storage:-nezistene}")"
+    printf 'MariaDB: %s, dataset %s, databazy %s.\n' \
+        "$(dbtune_redact "${version:-nedostupna}")" "$(dbtune_redact "${dataset:-nezisteny}")" "$(dbtune_redact "${db_count:-0}")"
+    printf 'Aplikacie: %s. Nalezy spolu: %s, kriticke: %s, varovania: %s.\n' \
+        "$(dbtune_redact "${app_count:-0}")" "$(dbtune_redact "${finding_count:-0}")" \
+        "$(dbtune_redact "$critical")" "$(dbtune_redact "$warning")"
+    printf 'Data: %s/{audit,apps,databases}.tsv\n' "$(dbtune_redact "$DBTUNE_STATE_DIR")"
 }
 
 cmd_audit() {
     local json=0 argument scratch audit apps databases manifest version
-    local run_id old_run_id archive='' current_manifest audit_hash
+    local run_id old_run_id archive='' current_manifest audit_hash overall_exit
 
     for argument in "$@"; do
         case $argument in
@@ -1063,8 +1572,28 @@ cmd_audit() {
     dbtune_audit_collect_hw "$audit"
     dbtune_audit_collect_platform "$audit"
     dbtune_audit_collect_apps "$audit" "$apps" "$databases"
+    if ! dbtune_audit_quarantine_mariadb_conflicts "$audit"; then
+        rm -rf "$scratch"
+        dbtune_log error "Konfliktne MariaDB auditne dokazy sa nepodarilo bezpecne izolovat"
+        return 65
+    fi
+    if ! dbtune_audit_normalize_in_place "$audit"; then
+        rm -rf "$scratch"
+        dbtune_log error "Audit obsahuje konfliktne aliasy alebo duplicitne hodnoty"
+        return 65
+    fi
     version=$(command awk -F '\t' '$1=="mariadb.version" { print $2; exit }' "$audit")
     dbtune_audit_add_findings "$audit" "${version:-0}"
+    dbtune_audit_finalize_status "$audit" "$apps" "$databases" || {
+        rm -rf "$scratch"
+        dbtune_log error "Celkovy stav auditu sa nepodarilo vyhodnotit"
+        return 1
+    }
+    if ! dbtune_audit_normalize_in_place "$audit"; then
+        rm -rf "$scratch"
+        dbtune_log error "Audit obsahuje konfliktne aliasy alebo duplicitne hodnoty"
+        return 65
+    fi
 
     dbtune_provenance_write_audit_manifest "$manifest" "$run_id" "$audit" "$apps" "$databases" || {
         rm -rf "$scratch"
@@ -1094,11 +1623,16 @@ cmd_audit() {
     dbtune_cycle_invalidate_downstream || return
     dbtune_state_record_audit "$run_id" "$archive" || return
     audit_hash=$(dbtune_manifest_value "$current_manifest" audit_hash) || return
-    dbtune_event audit_completed run_id "$run_id" audit_hash "$audit_hash" || true
+    overall_exit=$(command awk -F '\t' '$1=="audit.exit_status" {print $2; exit}' "$DBTUNE_STATE_DIR/audit.tsv")
+    [[ $overall_exit =~ ^[012]$ ]] || overall_exit=1
+    dbtune_event audit_completed run_id "$run_id" audit_hash "$audit_hash" \
+        overall_status "$(command awk -F '\t' '$1=="audit.overall_status" {print $2; exit}' "$DBTUNE_STATE_DIR/audit.tsv")" \
+        exit_status "$overall_exit" || true
 
     if ((json)); then
         dbtune_audit_json "$DBTUNE_STATE_DIR/audit.tsv" "$DBTUNE_STATE_DIR/apps.tsv" "$DBTUNE_STATE_DIR/databases.tsv"
     else
         dbtune_audit_summary "$DBTUNE_STATE_DIR/audit.tsv" "$DBTUNE_STATE_DIR/apps.tsv" "$DBTUNE_STATE_DIR/databases.tsv"
     fi
+    return "$overall_exit"
 }

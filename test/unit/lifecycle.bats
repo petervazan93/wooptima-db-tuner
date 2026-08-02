@@ -11,7 +11,11 @@ setup() {
     export DBTUNE_SQL_AUTH_METHOD=socket
     export DBTUNE_BACKUP_EVIDENCE_UID
     DBTUNE_BACKUP_EVIDENCE_UID=$(id -u)
+    export DBTUNE_NOW_EPOCH=1785499200
+    export DBTUNE_MAX_BACKUP_AGE_SECONDS=86400
     export DBTUNE_FLOCK=fake_flock
+    export DBTUNE_SYNC=true
+    unset DBTUNE_FAULT_INJECT
     export DBTUNE_RACE_LOCK_DIR="$BATS_TEST_TMPDIR/lifecycle-held"
     export STUB_TIME=1200
     export STUB_WSREP_ON=OFF
@@ -25,11 +29,16 @@ setup() {
     export STUB_FAIL_CP_MATCH=
     export STUB_FAIL_MV_MATCH=
     export STUB_FAIL_CHOWN_MATCH=
+    unset DBTUNE_PUBLISH_FAIL_MATCH
+    unset DBTUNE_PUBLISH_FAULT_HOOK
+    unset DBTUNE_PUBLISH_CRASH_POINT
+    unset DBTUNE_PUBLISH_CRASH_MATCH
     export STUB_GLOBAL_NAMES=$'max_connections\nskip_name_resolve'
     export STUB_EFFECTIVE=$'max_connections\t300\nskip_name_resolve\tON'
     export STUB_STATUS=$'uptime\t100\ninnodb_buffer_pool_wait_free\t0\ninnodb_log_waits\t0\naborted_connects\t0'
     export PATH="$BATS_TEST_TMPDIR/bin:$PATH"
     mkdir -p "$BATS_TEST_TMPDIR/bin" "$DBTUNE_STATE_DIR" "${DBTUNE_CONFIG_TARGET%/*}"
+    chmod 700 "$DBTUNE_STATE_DIR"
     make_stubs
     source "$BATS_TEST_DIRNAME/../../lib/00-header.sh"
     source "$BATS_TEST_DIRNAME/../../lib/10-util.sh"
@@ -55,10 +64,11 @@ R-PINNED	server	medium	CHANGE	skip_name_resolve	1	current=OFF	Test name resolve.
 EOF
     printf 'timestamp\tuptime\tbp_hit_pct\tbp_misses_s\tdata_read_s\trnd_next_s\ttmp_disk_pct\tthreads_running\tthreads_connected\tqcache_hit_pct\tlog_waits_delta\twait_free_delta\tcpu_pct\tmem_available_kb\tswap_used_kb\tload1\trestart_flag\tqcache_queries_delta\tinterval_seconds\tsample_status\n' >"$DBTUNE_STATE_DIR/samples.tsv"
     printf '2026-07-31T12:00:00Z\t100\t99\t0\t0\t0\t0\t1\t1\t30\t0\t0\t1\t1000\t0\t1\t0\t1\t60\tok\n' >>"$DBTUNE_STATE_DIR/samples.tsv"
+    printf 'timestamp\tdatabase\tsize_bytes\n' >"$DBTUNE_STATE_DIR/dbsize.tsv"
     dbtune_provenance_write_audit_manifest "$DBTUNE_STATE_DIR/audit-manifest.tsv" \
         lifecycle-run "$DBTUNE_STATE_DIR/audit.tsv" "$DBTUNE_STATE_DIR/apps.tsv" "$DBTUNE_STATE_DIR/databases.tsv"
     dbtune_provenance_write_analysis_manifest "$DBTUNE_STATE_DIR/analysis-manifest.tsv" \
-        "$DBTUNE_STATE_DIR/analysis.tsv" "$DBTUNE_STATE_DIR/samples.tsv"
+        "$DBTUNE_STATE_DIR/analysis.tsv" "$DBTUNE_STATE_DIR/samples.tsv" "$DBTUNE_STATE_DIR/dbsize.tsv"
     printf 'proposed\n' >"$DBTUNE_STATE_DIR/state"
     write_proposal
     write_manifest
@@ -162,7 +172,8 @@ STUB
 
 write_backup_evidence() {
     local status=${1:-verified}
-    local success=2026-07-31T11:00:00Z
+    local success=${2:-2026-07-31T11:00:00Z}
+    local checked=${3:-2026-07-31T11:30:00Z}
 
     [[ $status != missing ]] || success=none
     [[ $status != unknown ]] || success=unknown
@@ -170,7 +181,7 @@ write_backup_evidence() {
         printf 'schema\t1\n'
         printf 'status\t%s\n' "$status"
         printf 'source\tunit-test-backup-api\n'
-        printf 'checked_at\t2026-07-31T11:30:00Z\n'
+        printf 'checked_at\t%s\n' "$checked"
         printf 'last_success\t%s\n' "$success"
     } >"$(dbtune_backup_evidence_file)"
     chmod 600 "$(dbtune_backup_evidence_file)"
@@ -189,7 +200,7 @@ write_manifest() {
     local proposal_records_hash
 
     dbtune_provenance_write_analysis_manifest "$analysis_manifest" \
-        "$DBTUNE_STATE_DIR/analysis.tsv" "$DBTUNE_STATE_DIR/samples.tsv"
+        "$DBTUNE_STATE_DIR/analysis.tsv" "$DBTUNE_STATE_DIR/samples.tsv" "$DBTUNE_STATE_DIR/dbsize.tsv"
     DBTUNE_AUDIT_FILE="$DBTUNE_STATE_DIR/audit.tsv"
     dbtune_analysis_load "$DBTUNE_STATE_DIR/analysis.tsv"
     dbtune_proposals_load "$DBTUNE_AUDIT_FILE"
@@ -200,10 +211,110 @@ write_manifest() {
         printf 'audit_hash\t%s\n' "$(dbtune_manifest_value "$analysis_manifest" audit_hash)"
         printf 'samples_hash\t%s\n' "$(dbtune_manifest_value "$analysis_manifest" samples_hash)"
         printf 'analysis_hash\t%s\n' "$(dbtune_manifest_value "$analysis_manifest" analysis_hash)"
+        printf 'analysis_fingerprint\t%s\n' "$(dbtune_manifest_value "$analysis_manifest" analysis_fingerprint)"
         printf 'proposal_count\t%s\n' "${#DBTUNE_PROPOSAL_LINES[@]}"
         printf 'proposal_records_hash\t%s\n' "$proposal_records_hash"
         printf 'proposal_hash\t%s\n' "$(dbtune_sha256_file "$DBTUNE_STATE_DIR/proposed-99-zz-tuning.cnf")"
     } >"$DBTUNE_STATE_DIR/proposal-manifest.tsv"
+}
+
+prepare_apply_a_b() {
+    printf 'external\n' >"$DBTUNE_CONFIG_TARGET"
+    cmd_apply >/dev/null
+    TEST_HISTORY_A=$(cat "$DBTUNE_STATE_DIR/apply/current")
+    TEST_CYCLE_A=$(dbtune_lifecycle_manifest_value "$TEST_HISTORY_A" cycle_id)
+    TEST_HASH_A=$(dbtune_lifecycle_manifest_value "$TEST_HISTORY_A" proposal_hash)
+    cp "$DBTUNE_CONFIG_TARGET" "$BATS_TEST_TMPDIR/applied-a.cnf"
+
+    printf '%s\n' \
+        $'rule_id\tscope\tseverity\tverdict\tproposed_key\tproposed_value\tevidence\treason_sk' \
+        $'R-MAXCONN\tserver\thigh\tCHANGE\tmax_connections\t400\tcurrent=300\tTest max connections B.' \
+        $'R-PINNED\tserver\tmedium\tCHANGE\tskip_name_resolve\t1\tcurrent=OFF\tTest name resolve.' \
+        >"$DBTUNE_STATE_DIR/analysis.tsv"
+    cat >"$DBTUNE_STATE_DIR/proposed-99-zz-tuning.cnf" <<'CNF'
+[mysqld]
+max-connections = 400
+skip_name_resolve = 1
+CNF
+    write_manifest
+    dbtune_state_write proposed
+    cmd_apply >/dev/null
+    TEST_HISTORY_B=$(cat "$DBTUNE_STATE_DIR/apply/current")
+    TEST_CYCLE_B=$(dbtune_lifecycle_manifest_value "$TEST_HISTORY_B" cycle_id)
+    cp "$DBTUNE_CONFIG_TARGET" "$BATS_TEST_TMPDIR/applied-b.cnf"
+}
+
+assert_apply_a_restored_from_b() {
+    cmp "$DBTUNE_CONFIG_TARGET" "$BATS_TEST_TMPDIR/applied-a.cnf"
+    [ "$(cat "$DBTUNE_STATE_DIR/apply/current")" = "$TEST_HISTORY_A" ]
+    [ "$(cat "$(dbtune_lifecycle_last_rollback_file)")" = "$TEST_HISTORY_B" ]
+    [ "$(dbtune_manifest_value "$TEST_HISTORY_B/ROLLBACK_COMPLETED.tsv" rolled_back_cycle_id)" = "$TEST_CYCLE_B" ]
+    [ "$(dbtune_manifest_value "$TEST_HISTORY_B/ROLLBACK_COMPLETED.tsv" restored_cycle_id)" = "$TEST_CYCLE_A" ]
+    [ "$(dbtune_manifest_value "$TEST_HISTORY_B/ROLLBACK_COMPLETED.tsv" restored_history)" = "$TEST_HISTORY_A" ]
+    [ "$(dbtune_manifest_value "$TEST_HISTORY_B/ROLLBACK_COMPLETED.tsv" restored_backup)" = "$TEST_HISTORY_B/original.cnf" ]
+    [ "$(dbtune_state_read)" = rolled_back ]
+    [ ! -e "$(dbtune_lifecycle_rollback_intent_file)" ]
+}
+
+publish_fixture() {
+    local temporary
+
+    printf 'original\n' >"$DBTUNE_CONFIG_TARGET"
+    chmod 644 "$DBTUNE_CONFIG_TARGET"
+    dbtune_lifecycle_validate_target_path "$DBTUNE_CONFIG_TARGET"
+    PUBLISH_TOPOLOGY=$DBTUNE_LIFECYCLE_TARGET_TOPOLOGY
+    PUBLISH_DIRECTORY_IDENTITY=$DBTUNE_LIFECYCLE_DIRECTORY_IDENTITY
+    PUBLISH_TARGET_IDENTITY=$DBTUNE_LIFECYCLE_TARGET_IDENTITY
+    PUBLISH_TARGET_HASH=$DBTUNE_LIFECYCLE_TARGET_HASH
+    PUBLISH_PARENT_IDENTITIES=$DBTUNE_LIFECYCLE_PARENT_IDENTITIES
+    temporary=$(mktemp "$DBTUNE_CONFIG_ALLOWED_DIR/.publisher-test.tmp.XXXXXX")
+    printf 'published\n' >"$temporary"
+    chmod 644 "$temporary"
+    PUBLISH_SOURCE=$temporary
+    PUBLISH_SOURCE_HASH=$(dbtune_sha256_file "$temporary")
+}
+
+run_publish_fixture() {
+    dbtune_lifecycle_publish_managed_config "$PUBLISH_SOURCE" "$DBTUNE_CONFIG_TARGET" \
+        "$PUBLISH_TOPOLOGY" "$PUBLISH_DIRECTORY_IDENTITY" "$PUBLISH_TARGET_IDENTITY" \
+        "$PUBLISH_TARGET_HASH" "$PUBLISH_SOURCE_HASH" "$PUBLISH_PARENT_IDENTITIES"
+}
+
+@test "lifecycle lock rejects symlinks without opening their target" {
+    printf 'unchanged\n' >"$BATS_TEST_TMPDIR/lock-target"
+    ln -s "$BATS_TEST_TMPDIR/lock-target" "$(dbtune_lifecycle_lock_file)"
+
+    run dbtune_with_lifecycle_lock wait test true
+
+    [ "$status" -eq 65 ]
+    [[ "$output" == *"regularny subor"* ]]
+    [ "$(cat "$BATS_TEST_TMPDIR/lock-target")" = unchanged ]
+    [ ! -e "$DBTUNE_RACE_LOCK_DIR" ]
+}
+
+@test "lifecycle lock accepts a safe existing regular file" {
+    : >"$(dbtune_lifecycle_lock_file)"
+    chmod 600 "$(dbtune_lifecycle_lock_file)"
+
+    run dbtune_with_lifecycle_lock wait test true
+
+    [ "$status" -eq 0 ]
+    [ -f "$(dbtune_lifecycle_lock_file)" ]
+    [ ! -L "$(dbtune_lifecycle_lock_file)" ]
+    [ "$(file_mode "$(dbtune_lifecycle_lock_file)")" = 600 ]
+}
+
+@test "lifecycle lock rejects an externally hard-linked lock file" {
+    : >"$(dbtune_lifecycle_lock_file)"
+    chmod 600 "$(dbtune_lifecycle_lock_file)"
+    ln "$(dbtune_lifecycle_lock_file)" "$BATS_TEST_TMPDIR/lock-alias"
+
+    run dbtune_with_lifecycle_lock wait test true
+
+    [ "$status" -eq 65 ]
+    [[ "$output" == *"links=2, ocakavane=1"* ]]
+    [ ! -e "$DBTUNE_RACE_LOCK_DIR" ]
+    [ -f "$BATS_TEST_TMPDIR/lock-alias" ]
 }
 
 @test "apply rejects an unknown live variable before writing" {
@@ -224,7 +335,7 @@ write_manifest() {
 
 @test "degraded samples do not satisfy the apply measurement minimum" {
     export DBTUNE_MIN_APPLY_SAMPLES=2
-    printf 'degraded\t200\t0\t999\t999\t999\t100\t999\t999\t0\t999\t999\t999\t1\t1\t1\t0\t1\t999\tdegraded_interval\n' >>"$DBTUNE_STATE_DIR/samples.tsv"
+    printf '2026-07-31T12:05:00Z\t200\t0\t999\t999\t999\t100\t999\t999\t0\t999\t999\t999\t1\t1\t1\t0\t1\t999\tdegraded_interval\n' >>"$DBTUNE_STATE_DIR/samples.tsv"
     write_manifest
 
     run cmd_apply
@@ -248,6 +359,7 @@ write_manifest() {
     [ "$status" -eq 0 ]
     [ -f "$DBTUNE_CONFIG_TARGET" ]
     [ ! -L "$DBTUNE_CONFIG_TARGET" ]
+    [ "$(dbtune_lifecycle_file_links "$DBTUNE_CONFIG_TARGET")" = 1 ]
 }
 
 @test "apply accepts and backs up a regular target in the explicit allowed directory" {
@@ -328,8 +440,11 @@ write_manifest() {
 
 @test "apply revalidates parent identity immediately before atomic publish" {
     dbtune_lifecycle_before_publish() {
-        mv "$DBTUNE_CONFIG_ALLOWED_DIR" "$BATS_TEST_TMPDIR/original-config-dir"
-        mkdir "$DBTUNE_CONFIG_ALLOWED_DIR"
+        if [[ ! -e $BATS_TEST_TMPDIR/parent-swapped ]]; then
+            mv "$DBTUNE_CONFIG_ALLOWED_DIR" "$BATS_TEST_TMPDIR/original-config-dir"
+            mkdir "$DBTUNE_CONFIG_ALLOWED_DIR"
+            touch "$BATS_TEST_TMPDIR/parent-swapped"
+        fi
     }
 
     run cmd_apply
@@ -337,6 +452,142 @@ write_manifest() {
     [[ "$output" == *"adresar bol pocas apply vymeneny"* ]]
     [ ! -e "$BATS_TEST_TMPDIR/original-config-dir/99-zz-tuning.cnf" ]
     [ ! -e "$DBTUNE_CONFIG_TARGET" ]
+}
+
+@test "apply detects replacement of a validated ancestor while the trusted directory remains" {
+    mkdir "$BATS_TEST_TMPDIR/config-parent"
+    mv "$DBTUNE_CONFIG_ALLOWED_DIR" "$BATS_TEST_TMPDIR/config-parent/etc"
+    export DBTUNE_CONFIG_ALLOWED_DIR="$BATS_TEST_TMPDIR/config-parent/etc"
+    export DBTUNE_CONFIG_TARGET="$DBTUNE_CONFIG_ALLOWED_DIR/99-zz-tuning.cnf"
+    cat >"$BATS_TEST_TMPDIR/swap-config-parent" <<'STUB'
+#!/usr/bin/env bash
+[[ -e $BATS_TEST_TMPDIR/parent-swapped ]] && exit 0
+mv "$BATS_TEST_TMPDIR/config-parent" "$BATS_TEST_TMPDIR/original-config-parent"
+mkdir "$BATS_TEST_TMPDIR/config-parent"
+mv "$BATS_TEST_TMPDIR/original-config-parent/etc" "$DBTUNE_CONFIG_ALLOWED_DIR"
+touch "$BATS_TEST_TMPDIR/parent-swapped"
+STUB
+    chmod +x "$BATS_TEST_TMPDIR/swap-config-parent"
+    export DBTUNE_PUBLISH_FAULT_HOOK="$BATS_TEST_TMPDIR/swap-config-parent"
+
+    run cmd_apply
+
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"config parent bol pocas publikovania vymeneny"* ]]
+    [ ! -e "$DBTUNE_CONFIG_TARGET" ]
+}
+
+@test "apply detects a target swap after validation before publication" {
+    printf 'original\n' >"$DBTUNE_CONFIG_TARGET"
+    cat >"$BATS_TEST_TMPDIR/swap-config-target" <<'STUB'
+#!/usr/bin/env bash
+[[ -e $BATS_TEST_TMPDIR/target-swapped ]] && exit 0
+mv "$DBTUNE_CONFIG_TARGET" "$BATS_TEST_TMPDIR/original-target.cnf"
+printf 'replacement\n' >"$DBTUNE_CONFIG_TARGET"
+chmod 644 "$DBTUNE_CONFIG_TARGET"
+touch "$BATS_TEST_TMPDIR/target-swapped"
+STUB
+    chmod +x "$BATS_TEST_TMPDIR/swap-config-target"
+    export DBTUNE_PUBLISH_FAULT_HOOK="$BATS_TEST_TMPDIR/swap-config-target"
+
+    run cmd_apply
+
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"vymeneny"* || "$output" == *"nezodpoveda"* ]]
+    [ "$(cat "$DBTUNE_CONFIG_TARGET")" = replacement ]
+    [ "$(cat "$BATS_TEST_TMPDIR/original-target.cnf")" = original ]
+}
+
+@test "publisher crash after validation leaves the original target intact" {
+    publish_fixture
+    export DBTUNE_PUBLISH_CRASH_POINT=after_validation
+
+    run run_publish_fixture
+
+    [ "$status" -eq 99 ]
+    [ "$(cat "$DBTUNE_CONFIG_TARGET")" = original ]
+    [ "$(dbtune_lifecycle_file_links "$DBTUNE_CONFIG_TARGET")" = 1 ]
+    [ "$(cat "$PUBLISH_SOURCE")" = published ]
+}
+
+@test "publisher crash after atomic exchange leaves a complete published target" {
+    publish_fixture
+    export DBTUNE_PUBLISH_CRASH_POINT=after_commit
+
+    run run_publish_fixture
+
+    [ "$status" -eq 99 ]
+    [ "$(cat "$DBTUNE_CONFIG_TARGET")" = published ]
+    [ "$(dbtune_lifecycle_file_links "$DBTUNE_CONFIG_TARGET")" = 1 ]
+    [ "$(cat "$PUBLISH_SOURCE")" = original ]
+    [ "$(dbtune_lifecycle_file_links "$PUBLISH_SOURCE")" = 1 ]
+}
+
+@test "publisher crash after absent-target commit leaves one complete target inode" {
+    dbtune_lifecycle_validate_target_path "$DBTUNE_CONFIG_TARGET"
+    PUBLISH_TOPOLOGY=$DBTUNE_LIFECYCLE_TARGET_TOPOLOGY
+    PUBLISH_DIRECTORY_IDENTITY=$DBTUNE_LIFECYCLE_DIRECTORY_IDENTITY
+    PUBLISH_TARGET_IDENTITY=$DBTUNE_LIFECYCLE_TARGET_IDENTITY
+    PUBLISH_TARGET_HASH=$DBTUNE_LIFECYCLE_TARGET_HASH
+    PUBLISH_PARENT_IDENTITIES=$DBTUNE_LIFECYCLE_PARENT_IDENTITIES
+    PUBLISH_SOURCE=$(mktemp "$DBTUNE_CONFIG_ALLOWED_DIR/.publisher-absent-test.tmp.XXXXXX")
+    printf 'published\n' >"$PUBLISH_SOURCE"
+    chmod 644 "$PUBLISH_SOURCE"
+    PUBLISH_SOURCE_HASH=$(dbtune_sha256_file "$PUBLISH_SOURCE")
+    export DBTUNE_PUBLISH_CRASH_POINT=after_commit
+
+    run run_publish_fixture
+
+    [ "$status" -eq 99 ]
+    [ "$(cat "$DBTUNE_CONFIG_TARGET")" = published ]
+    [ "$(dbtune_lifecycle_file_links "$DBTUNE_CONFIG_TARGET")" = 1 ]
+    [ ! -e "$PUBLISH_SOURCE" ]
+}
+
+@test "publisher crash after post-validation keeps both exchange endpoints valid" {
+    publish_fixture
+    export DBTUNE_PUBLISH_CRASH_POINT=after_postvalidation
+
+    run run_publish_fixture
+
+    [ "$status" -eq 99 ]
+    [ "$(cat "$DBTUNE_CONFIG_TARGET")" = published ]
+    [ "$(dbtune_lifecycle_file_links "$DBTUNE_CONFIG_TARGET")" = 1 ]
+    [ "$(cat "$PUBLISH_SOURCE")" = original ]
+    [ "$(dbtune_lifecycle_file_links "$PUBLISH_SOURCE")" = 1 ]
+}
+
+@test "apply auto-recovers an internal publisher crash after exchange" {
+    printf 'original\n' >"$DBTUNE_CONFIG_TARGET"
+    export DBTUNE_PUBLISH_CRASH_POINT=after_commit
+    export DBTUNE_PUBLISH_CRASH_MATCH=.99-zz-tuning.cnf.tmp
+
+    run cmd_apply
+
+    [ "$status" -ne 0 ]
+    [ "$(cat "$DBTUNE_CONFIG_TARGET")" = original ]
+    [ "$(dbtune_lifecycle_file_links "$DBTUNE_CONFIG_TARGET")" = 1 ]
+    [ "$(dbtune_state_read)" = proposed ]
+    [ ! -e "$(dbtune_lifecycle_intent_file)" ]
+}
+
+@test "rollback detects a parent swap after validation before publication" {
+    printf 'original\n' >"$DBTUNE_CONFIG_TARGET"
+    cmd_apply >/dev/null
+    cat >"$BATS_TEST_TMPDIR/swap-rollback-parent" <<'STUB'
+#!/usr/bin/env bash
+mv "$DBTUNE_CONFIG_ALLOWED_DIR" "$BATS_TEST_TMPDIR/deployed-config-dir"
+mkdir "$DBTUNE_CONFIG_ALLOWED_DIR"
+STUB
+    chmod +x "$BATS_TEST_TMPDIR/swap-rollback-parent"
+    export DBTUNE_PUBLISH_FAULT_HOOK="$BATS_TEST_TMPDIR/swap-rollback-parent"
+
+    run cmd_rollback
+
+    [ "$status" -ne 0 ]
+    [ "$(cat "$BATS_TEST_TMPDIR/deployed-config-dir/99-zz-tuning.cnf")" != original ]
+    [ ! -e "$DBTUNE_CONFIG_TARGET" ]
+    [ "$(dbtune_state_read)" = rollback_failed ]
 }
 
 @test "validation parser ignores benign invalid words in help output" {
@@ -411,6 +662,125 @@ write_manifest() {
     [ ! -L "$DBTUNE_CONFIG_TARGET" ]
 }
 
+@test "apply A apply B rollback publishes the restored A lineage and preserves the B rollback event" {
+    prepare_apply_a_b
+
+    [ "$TEST_HISTORY_B" != "$TEST_HISTORY_A" ]
+    [ "$TEST_CYCLE_B" != "$TEST_CYCLE_A" ]
+    [ "$(dbtune_lifecycle_manifest_value "$TEST_HISTORY_B" original_source)" = apply_cycle ]
+    [ "$(dbtune_lifecycle_manifest_value "$TEST_HISTORY_B" original_cycle_id)" = "$TEST_CYCLE_A" ]
+    [ "$(dbtune_lifecycle_manifest_value "$TEST_HISTORY_B" original_cycle_history)" = "$TEST_HISTORY_A" ]
+    [ "$(dbtune_lifecycle_manifest_value "$TEST_HISTORY_B" original_backup)" = original.cnf ]
+    [ "$(dbtune_lifecycle_manifest_value "$TEST_HISTORY_B" original_hash)" = "$TEST_HASH_A" ]
+    cmp "$TEST_HISTORY_B/original.cnf" "$TEST_HISTORY_A/proposed.cnf"
+
+    run cmd_rollback
+
+    [ "$status" -eq 0 ]
+    assert_apply_a_restored_from_b
+    grep -F '"event":"rollback_completed"' "$DBTUNE_STATE_DIR/events.log"
+    grep -F '"restored_cycle_id":"'"$TEST_CYCLE_A"'"' "$DBTUNE_STATE_DIR/events.log"
+
+    run cmd_status
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"apply_history: $TEST_HISTORY_A"* ]]
+    [[ "$output" == *"last_rollback: $TEST_HISTORY_B"* ]]
+    [[ "$output" == *"runcloud_restart_required: ano"* ]]
+}
+
+@test "rollback recovery after durable intent restores A without partial metadata" {
+    prepare_apply_a_b
+    export DBTUNE_FAULT_INJECT=after_rollback_intent
+
+    run cmd_rollback
+
+    [ "$status" -eq 99 ]
+    cmp "$DBTUNE_CONFIG_TARGET" "$BATS_TEST_TMPDIR/applied-b.cnf"
+    [ ! -e "$TEST_HISTORY_B/ROLLBACK_COMPLETED.tsv" ]
+    [ "$(cat "$DBTUNE_STATE_DIR/apply/current")" = "$TEST_HISTORY_B" ]
+    [ "$(dbtune_state_read)" = applied ]
+    [ -r "$(dbtune_lifecycle_rollback_intent_file)" ]
+
+    unset DBTUNE_FAULT_INJECT
+    run dbtune_lifecycle_recover_if_needed
+    [ "$status" -eq 0 ]
+    assert_apply_a_restored_from_b
+}
+
+@test "next locked command recovers rollback after target restore" {
+    prepare_apply_a_b
+    export DBTUNE_FAULT_INJECT=after_rollback_config
+
+    run cmd_rollback
+
+    [ "$status" -eq 99 ]
+    cmp "$DBTUNE_CONFIG_TARGET" "$BATS_TEST_TMPDIR/applied-a.cnf"
+    [ ! -e "$TEST_HISTORY_B/ROLLBACK_COMPLETED.tsv" ]
+    [ "$(cat "$DBTUNE_STATE_DIR/apply/current")" = "$TEST_HISTORY_B" ]
+    [ "$(dbtune_state_read)" = applied ]
+
+    unset DBTUNE_FAULT_INJECT
+    run dbtune_with_lifecycle_lock wait rollback-recovery true
+    [ "$status" -eq 0 ]
+    assert_apply_a_restored_from_b
+}
+
+@test "rollback retry reuses durable completion metadata" {
+    prepare_apply_a_b
+    export DBTUNE_FAULT_INJECT=after_rollback_metadata
+
+    run cmd_rollback
+
+    [ "$status" -eq 99 ]
+    [ -r "$TEST_HISTORY_B/ROLLBACK_COMPLETED.tsv" ]
+    [ "$(cat "$(dbtune_lifecycle_last_rollback_file)")" = "$TEST_HISTORY_B" ]
+    [ "$(cat "$DBTUNE_STATE_DIR/apply/current")" = "$TEST_HISTORY_B" ]
+    [ "$(dbtune_state_read)" = applied ]
+
+    unset DBTUNE_FAULT_INJECT
+    run cmd_rollback
+    [ "$status" -eq 0 ]
+    assert_apply_a_restored_from_b
+}
+
+@test "rollback retry uses journal after current pointer moves to A" {
+    prepare_apply_a_b
+    export DBTUNE_FAULT_INJECT=after_rollback_current
+
+    run cmd_rollback
+
+    [ "$status" -eq 99 ]
+    [ -r "$TEST_HISTORY_B/ROLLBACK_COMPLETED.tsv" ]
+    [ "$(cat "$DBTUNE_STATE_DIR/apply/current")" = "$TEST_HISTORY_A" ]
+    [ "$(dbtune_state_read)" = applied ]
+    [ -r "$(dbtune_lifecycle_rollback_intent_file)" ]
+
+    unset DBTUNE_FAULT_INJECT
+    run cmd_rollback
+    [ "$status" -eq 0 ]
+    assert_apply_a_restored_from_b
+    [ ! -e "$TEST_HISTORY_A/ROLLBACK_COMPLETED.tsv" ]
+}
+
+@test "rollback recovery clears journal only after durable rolled back state" {
+    prepare_apply_a_b
+    export DBTUNE_FAULT_INJECT=after_rollback_state
+
+    run cmd_rollback
+
+    [ "$status" -eq 99 ]
+    [ -r "$TEST_HISTORY_B/ROLLBACK_COMPLETED.tsv" ]
+    [ "$(cat "$DBTUNE_STATE_DIR/apply/current")" = "$TEST_HISTORY_A" ]
+    [ "$(dbtune_state_read)" = rolled_back ]
+    [ -r "$(dbtune_lifecycle_rollback_intent_file)" ]
+
+    unset DBTUNE_FAULT_INJECT
+    run dbtune_lifecycle_recover_if_needed
+    [ "$status" -eq 0 ]
+    assert_apply_a_restored_from_b
+    [ -r "$TEST_HISTORY_B/ROLLBACK_EVENT_RECORDED" ]
+}
+
 @test "unattended-upgrades window blocks apply without force" {
     export STUB_TIME=0610
     run cmd_apply
@@ -431,6 +801,64 @@ write_manifest() {
     run cmd_apply
     [ "$status" -eq 77 ]
     [[ "$output" == *"backup-evidence.tsv"* ]]
+    [ ! -e "$DBTUNE_CONFIG_TARGET" ]
+}
+
+@test "fresh backup evidence exposes its evaluated age and policy" {
+    write_backup_evidence verified 2026-07-31T11:59:00Z 2026-07-31T12:00:00Z
+
+    dbtune_backup_evidence_validate "$(dbtune_backup_evidence_file)"
+
+    [ "$DBTUNE_BACKUP_EVIDENCE_AGE_SECONDS" -eq 60 ]
+    [ "$DBTUNE_BACKUP_EVIDENCE_MAX_AGE_SECONDS" -eq 86400 ]
+}
+
+@test "backup evidence exactly at the maximum age is accepted" {
+    export DBTUNE_MAX_BACKUP_AGE_SECONDS=3600
+    write_backup_evidence verified 2026-07-31T11:00:00Z 2026-07-31T12:00:00Z
+
+    run cmd_apply
+
+    [ "$status" -eq 0 ]
+    history=$(cat "$DBTUNE_STATE_DIR/apply/current")
+    [ "$(dbtune_lifecycle_manifest_value "$history" backup_age_seconds)" -eq 3600 ]
+    [ "$(dbtune_lifecycle_manifest_value "$history" backup_max_age_seconds)" -eq 3600 ]
+}
+
+@test "stale backup evidence blocks apply and reports age and policy" {
+    export DBTUNE_MAX_BACKUP_AGE_SECONDS=3600
+    write_backup_evidence verified 2026-07-31T10:59:59Z 2026-07-31T11:30:00Z
+
+    run cmd_apply
+
+    [ "$status" -eq 65 ]
+    [[ "$output" == *"reason=expired"* ]]
+    [[ "$output" == *"age_seconds=3601"* ]]
+    [[ "$output" == *"max_age_seconds=3600"* ]]
+    [ ! -e "$DBTUNE_CONFIG_TARGET" ]
+}
+
+@test "future backup evidence blocks apply fail-closed" {
+    write_backup_evidence verified 2026-07-31T12:00:01Z 2026-07-31T12:00:00Z
+
+    run cmd_apply
+
+    [ "$status" -eq 65 ]
+    [[ "$output" == *"reason=future_last_success"* ]]
+    [[ "$output" == *"age_seconds=-1"* ]]
+    [[ "$output" == *"max_age_seconds=86400"* ]]
+    [ ! -e "$DBTUNE_CONFIG_TARGET" ]
+}
+
+@test "malformed backup timestamp blocks apply fail-closed" {
+    write_backup_evidence verified 2026-02-30T11:00:00Z 2026-07-31T11:30:00Z
+
+    run cmd_apply
+
+    [ "$status" -eq 65 ]
+    [[ "$output" == *"reason=malformed_last_success"* ]]
+    [[ "$output" == *"age_seconds=unknown"* ]]
+    [[ "$output" == *"max_age_seconds=86400"* ]]
     [ ! -e "$DBTUNE_CONFIG_TARGET" ]
 }
 
@@ -519,6 +947,33 @@ write_manifest() {
     [ "$(dbtune_state_read)" = applied ]
 }
 
+@test "verify rejects a hard-linked managed target" {
+    cmd_apply >/dev/null
+    ln "$DBTUNE_CONFIG_TARGET" "$BATS_TEST_TMPDIR/verify-target-alias.cnf"
+
+    run cmd_verify --post
+
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"hardlink topologiu"* ]]
+    [ "$(dbtune_state_read)" = applied ]
+    cmp "$DBTUNE_CONFIG_TARGET" "$BATS_TEST_TMPDIR/verify-target-alias.cnf"
+}
+
+@test "rollback rejects a hard-linked target before target mutation" {
+    printf 'original\n' >"$DBTUNE_CONFIG_TARGET"
+    cmd_apply >/dev/null
+    cp "$DBTUNE_CONFIG_TARGET" "$BATS_TEST_TMPDIR/deployed-before-rollback.cnf"
+    ln "$DBTUNE_CONFIG_TARGET" "$BATS_TEST_TMPDIR/rollback-target-alias.cnf"
+
+    run cmd_rollback
+
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"viac hardlinkov"* ]]
+    cmp "$DBTUNE_CONFIG_TARGET" "$BATS_TEST_TMPDIR/deployed-before-rollback.cnf"
+    cmp "$BATS_TEST_TMPDIR/rollback-target-alias.cnf" "$BATS_TEST_TMPDIR/deployed-before-rollback.cnf"
+    [ "$(dbtune_lifecycle_file_links "$DBTUNE_CONFIG_TARGET")" = 2 ]
+}
+
 @test "health counters use reset-aware deltas from the post-restart baseline" {
     export STUB_STATUS=$'uptime\t100\ninnodb_buffer_pool_wait_free\t5\ninnodb_log_waits\t7\naborted_connects\t9'
     cmd_apply >/dev/null
@@ -560,7 +1015,7 @@ write_manifest() {
     [ -r "$DBTUNE_STATE_DIR/apply/current" ]
 }
 
-@test "copy mv and chown failures leave the previous state and target" {
+@test "copy publish and chown failures leave the previous state and target" {
     export STUB_FAIL_CP_MATCH=/proposed.cnf
     run cmd_apply
     [ "$status" -ne 0 ]
@@ -568,14 +1023,13 @@ write_manifest() {
     [ ! -e "$DBTUNE_CONFIG_TARGET" ]
 
     export STUB_FAIL_CP_MATCH=
-    export STUB_FAIL_MV_MATCH=.99-zz-tuning.cnf.tmp
-    rm -f "$DBTUNE_STATE_DIR/.mv-failed"
+    export DBTUNE_PUBLISH_FAIL_MATCH=.99-zz-tuning.cnf.tmp
     run cmd_apply
     [ "$status" -ne 0 ]
     [ "$(dbtune_state_read)" = proposed ]
     [ ! -e "$DBTUNE_CONFIG_TARGET" ]
 
-    export STUB_FAIL_MV_MATCH=
+    unset DBTUNE_PUBLISH_FAIL_MATCH
     export STUB_FAIL_CHOWN_MATCH=root:root
     run cmd_apply
     [ "$status" -ne 0 ]
@@ -583,10 +1037,124 @@ write_manifest() {
     [ ! -e "$DBTUNE_CONFIG_TARGET" ]
 }
 
+@test "interrupted apply after intent publication recovers without mutating the target" {
+    printf 'original\n' >"$DBTUNE_CONFIG_TARGET"
+    export DBTUNE_FAULT_INJECT=after_intent
+
+    run cmd_apply
+    [ "$status" -eq 99 ]
+    [ "$(cat "$DBTUNE_CONFIG_TARGET")" = original ]
+    [ "$(dbtune_state_read)" = proposed ]
+    [ -r "$(dbtune_lifecycle_intent_file)" ]
+
+    unset DBTUNE_FAULT_INJECT
+    run dbtune_lifecycle_recover_if_needed
+    [ "$status" -eq 0 ]
+    [ "$(cat "$DBTUNE_CONFIG_TARGET")" = original ]
+    [ "$(dbtune_state_read)" = proposed ]
+    [ ! -e "$(dbtune_lifecycle_intent_file)" ]
+}
+
+@test "interrupted apply after config install restores the exact previous cycle" {
+    printf 'original\n' >"$DBTUNE_CONFIG_TARGET"
+    export DBTUNE_FAULT_INJECT=after_config
+
+    run cmd_apply
+    [ "$status" -eq 99 ]
+    cmp "$DBTUNE_STATE_DIR/proposed-99-zz-tuning.cnf" "$DBTUNE_CONFIG_TARGET"
+    [ "$(dbtune_state_read)" = proposed ]
+    [ -r "$(dbtune_lifecycle_intent_file)" ]
+
+    unset DBTUNE_FAULT_INJECT
+    run dbtune_lifecycle_recover_if_needed
+    [ "$status" -eq 0 ]
+    [ "$(cat "$DBTUNE_CONFIG_TARGET")" = original ]
+    [ "$(dbtune_state_read)" = proposed ]
+    [ ! -e "$DBTUNE_STATE_DIR/apply/current" ]
+    [ ! -e "$(dbtune_lifecycle_intent_file)" ]
+}
+
+@test "recovery detects a target swap after validation before restore publication" {
+    printf 'original\n' >"$DBTUNE_CONFIG_TARGET"
+    export DBTUNE_FAULT_INJECT=after_config
+    run cmd_apply
+    [ "$status" -eq 99 ]
+    unset DBTUNE_FAULT_INJECT
+
+    cat >"$BATS_TEST_TMPDIR/swap-recovery-target" <<'STUB'
+#!/usr/bin/env bash
+mv "$DBTUNE_CONFIG_TARGET" "$BATS_TEST_TMPDIR/interrupted-proposal.cnf"
+printf 'replacement\n' >"$DBTUNE_CONFIG_TARGET"
+chmod 644 "$DBTUNE_CONFIG_TARGET"
+STUB
+    chmod +x "$BATS_TEST_TMPDIR/swap-recovery-target"
+    export DBTUNE_PUBLISH_FAULT_HOOK="$BATS_TEST_TMPDIR/swap-recovery-target"
+    run dbtune_lifecycle_recover_if_needed
+
+    [ "$status" -ne 0 ]
+    [ "$(cat "$DBTUNE_CONFIG_TARGET")" = replacement ]
+    [ "$(dbtune_state_read)" = recovery_required ]
+    [ -r "$(dbtune_lifecycle_intent_file)" ]
+}
+
+@test "interrupted apply after current publication restores previous bookkeeping" {
+    printf 'original\n' >"$DBTUNE_CONFIG_TARGET"
+    export DBTUNE_FAULT_INJECT=after_current
+
+    run cmd_apply
+    [ "$status" -eq 99 ]
+    [ -r "$DBTUNE_STATE_DIR/apply/current" ]
+    [ "$(dbtune_state_read)" = proposed ]
+    cmp "$DBTUNE_STATE_DIR/proposed-99-zz-tuning.cnf" "$DBTUNE_CONFIG_TARGET"
+
+    unset DBTUNE_FAULT_INJECT
+    run dbtune_lifecycle_recover_if_needed
+    [ "$status" -eq 0 ]
+    [ "$(cat "$DBTUNE_CONFIG_TARGET")" = original ]
+    [ "$(dbtune_state_read)" = proposed ]
+    [ ! -e "$DBTUNE_STATE_DIR/apply/current" ]
+    [ ! -e "$(dbtune_lifecycle_intent_file)" ]
+}
+
+@test "interrupted apply after state publication finalizes the committed cycle" {
+    export DBTUNE_FAULT_INJECT=after_state
+
+    run cmd_apply
+    [ "$status" -eq 99 ]
+    history=$(cat "$DBTUNE_STATE_DIR/apply/current")
+    [ "$(dbtune_state_read)" = applied ]
+    cmp "$history/proposed.cnf" "$DBTUNE_CONFIG_TARGET"
+    [ -r "$(dbtune_lifecycle_intent_file)" ]
+
+    unset DBTUNE_FAULT_INJECT
+    run dbtune_lifecycle_recover_if_needed
+    [ "$status" -eq 0 ]
+    [ "$(dbtune_state_read)" = applied ]
+    [ "$(cat "$DBTUNE_STATE_DIR/apply/current")" = "$history" ]
+    cmp "$history/proposed.cnf" "$DBTUNE_CONFIG_TARGET"
+    [ ! -e "$(dbtune_lifecycle_intent_file)" ]
+}
+
+@test "next locked lifecycle command recovers a published apply intent" {
+    printf 'original\n' >"$DBTUNE_CONFIG_TARGET"
+    export DBTUNE_FAULT_INJECT=after_config
+
+    run dbtune_dispatch apply
+    [ "$status" -eq 99 ]
+    cmp "$DBTUNE_STATE_DIR/proposed-99-zz-tuning.cnf" "$DBTUNE_CONFIG_TARGET"
+
+    unset DBTUNE_FAULT_INJECT
+    run dbtune_dispatch rollback
+    [ "$status" -eq 65 ]
+    [ "$(cat "$DBTUNE_CONFIG_TARGET")" = original ]
+    [ "$(dbtune_state_read)" = proposed ]
+    [ ! -e "$(dbtune_lifecycle_intent_file)" ]
+}
+
 @test "failed restore preserves current and exposes recovery instructions" {
     printf 'original\n' >"$DBTUNE_CONFIG_TARGET"
     export STUB_RESTART_FAIL=1
-    export STUB_FAIL_MV_MATCH=.99-zz-restore
+    export DBTUNE_PUBLISH_FAIL_MATCH=.99-zz-restore
     run cmd_apply --restart
     [ "$status" -ne 0 ]
     [ "$(dbtune_state_read)" = recovery_required ]
@@ -617,7 +1185,7 @@ write_manifest() {
     printf 'original\n' >"$DBTUNE_CONFIG_TARGET"
     cmd_apply >/dev/null
     history=$(cat "$DBTUNE_STATE_DIR/apply/current")
-    export STUB_FAIL_MV_MATCH=.99-zz-restore
+    export DBTUNE_PUBLISH_FAIL_MATCH=.99-zz-restore
     run cmd_rollback
     [ "$status" -ne 0 ]
     [ "$(dbtune_state_read)" = rollback_failed ]

@@ -1,6 +1,8 @@
 #!/usr/bin/env bats
 
 setup() {
+    BATS_TEST_TMPDIR=$(CDPATH='' cd -- "$BATS_TEST_TMPDIR" && pwd -P)
+    export BATS_TEST_TMPDIR
     export DBTUNE_STATE_DIR="$BATS_TEST_TMPDIR/state"
     export DBTUNE_SYSTEMD_DIR="$BATS_TEST_TMPDIR/systemd"
     export DBTUNE_SLOW_LOG="$BATS_TEST_TMPDIR/log/slow.log"
@@ -9,6 +11,7 @@ setup() {
     export DBTUNE_SYSTEMCTL=fake_systemctl
     export DBTUNE_FLOCK=fake_flock
     mkdir -p "$DBTUNE_STATE_DIR" "$DBTUNE_SYSTEMD_DIR" "${DBTUNE_SLOW_LOG%/*}"
+    chmod 700 "$DBTUNE_STATE_DIR"
     source "$BATS_TEST_DIRNAME/../../lib/00-header.sh"
     source "$BATS_TEST_DIRNAME/../../lib/10-util.sh"
     source "$BATS_TEST_DIRNAME/../../lib/30-collect.sh"
@@ -67,7 +70,7 @@ write_sample_rows() {
     file=$(dbtune_collect_samples_file)
     printf 'timestamp\tuptime\tbp_hit_pct\tbp_misses_s\tdata_read_s\trnd_next_s\ttmp_disk_pct\tthreads_running\tthreads_connected\tqcache_hit_pct\tlog_waits_delta\twait_free_delta\tcpu_pct\tmem_available_kb\tswap_used_kb\tload1\trestart_flag\tqcache_queries_delta\tinterval_seconds\tsample_status\n' >"$file"
     for ((i = 0; i < count; i++)); do
-        printf 'sample-%s\t%s\t99\t0\t0\t0\t0\t1\t1\t100\t0\t0\t1\t1000\t0\t1\t0\t1\t60\tok\n' "$i" "$i" >>"$file"
+        printf '2026-07-24T00:00:00Z\t%s\t99\t0\t0\t0\t0\t1\t1\t100\t0\t0\t1\t1000\t0\t1\t0\t1\t60\tok\n' "$i" >>"$file"
     done
 }
 
@@ -142,6 +145,81 @@ dbtune_embedded_get() {
     [ "$(awk -F '\t' '{print $4, $5, $6, $13, $19, $20}' <<<"$output")" = '0.00 0.00 0.00 0.00 121.000000 degraded_interval' ]
 }
 
+@test "sample validation rejects malformed rows with diagnostics" {
+    local file valid
+
+    file=$(dbtune_collect_samples_file)
+    dbtune_collect_sample_header >"$file"
+    valid=$'2026-07-24T00:00:00Z\t300\t99\t1\t1024\t100\t20\t2\t5\t30\t0\t0\t5\t12000000\t0\t1\t0\t10\t60\tok'
+    {
+        printf '%s\n' "$valid"
+        printf '2026-07-24T00:01:00Z\t360\t99\n'
+        printf '%s\textra\n' "$valid"
+        printf '2026-07-24T00:02:00Z\t420\t99\t1\t1024\t100\t20\t2\t5\t30\tnot-a-counter\t0\t5\t12000000\t0\t1\t0\t10\t60\tok\n'
+        printf '2026-07-24T00:03:00Z\t480\t99\t1\t1024\t100\t20\t2\t5\t30\t0\t0\t5\t12000000\t0\t1\t0\t10\t0\tok\n'
+        printf '2026-07-24T00:04:00Z\t540\t99\t0\t0\t0\t0\t1\t1\t0\t0\t0\t0\t12000000\t0\t1\t0\t0\t0\tdegraded_interval\n'
+        printf '2026-07-24T00:05:00Z\t10\t99\t0\t0\t0\t0\t1\t1\t0\t0\t0\t0\t12000000\t0\t1\t1\t0\t60\tok\n'
+    } >>"$file"
+
+    run dbtune_collect_sample_count
+    [ "$status" -eq 0 ]
+    [ "$output" = 1 ]
+    run dbtune_samples_diagnostics "$file"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *$'valid_rows\t1'* ]]
+    [[ "$output" == *$'rejected_rows\t4'* ]]
+    [[ "$output" == *$'excluded_status_rows\t1'* ]]
+    [[ "$output" == *$'excluded_restart_rows\t1'* ]]
+    [[ "$output" == *'truncated=1,extra_fields=1,non_numeric=1,invalid_timestamp=0,invalid_value=0,non_monotonic=1'* ]]
+
+    dbtune_state_write collecting
+    run cmd_collect status
+    [ "$status" -eq 0 ]
+    [[ "$output" == *$'sample_valid_rows\t1'* ]]
+    [[ "$output" == *$'sample_rejected_rows\t4'* ]]
+    [[ "$output" == *$'sample_rejected_reasons\ttruncated=1,extra_fields=1,non_numeric=1,invalid_timestamp=0,invalid_value=0,non_monotonic=1'* ]]
+}
+
+@test "sample validation enforces Gregorian calendar dates and leap years" {
+    local file timestamp
+    local row=$'\t300\t99\t1\t1024\t100\t20\t2\t5\t30\t0\t0\t5\t12000000\t0\t1\t0\t10\t60\tok'
+
+    file=$(dbtune_collect_samples_file)
+    dbtune_collect_sample_header >"$file"
+    for timestamp in 2024-02-29T00:00:00Z 2000-02-29T00:00:00Z \
+        2026-02-29T00:00:00Z 2026-02-31T00:00:00Z 2026-04-31T00:00:00Z 2100-02-29T00:00:00Z; do
+        printf '%s%s\n' "$timestamp" "$row" >>"$file"
+    done
+
+    run dbtune_samples_diagnostics "$file"
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *$'valid_rows\t2'* ]]
+    [[ "$output" == *$'rejected_rows\t4'* ]]
+    [[ "$output" == *'invalid_timestamp=4'* ]]
+}
+
+@test "collector lock rejects symlinks before flock for tick and stop" {
+    dbtune_state_write collecting
+    write_collect_config
+    printf 'unchanged\n' >"$BATS_TEST_TMPDIR/collect-lock-target"
+    ln -s "$BATS_TEST_TMPDIR/collect-lock-target" "$(dbtune_collect_lock_file)"
+    fake_flock() { touch "$BATS_TEST_TMPDIR/collect-flock-called"; }
+    dbtune_collect_tick_body() { touch "$BATS_TEST_TMPDIR/tick-body-called"; }
+
+    run cmd_tick
+    [ "$status" -eq 0 ]
+    [ "$(cat "$BATS_TEST_TMPDIR/collect-lock-target")" = unchanged ]
+    [ ! -e "$BATS_TEST_TMPDIR/collect-flock-called" ]
+    [ ! -e "$BATS_TEST_TMPDIR/tick-body-called" ]
+
+    run cmd_collect stop
+    [ "$status" -eq 65 ]
+    [ "$(cat "$BATS_TEST_TMPDIR/collect-lock-target")" = unchanged ]
+    [ ! -e "$BATS_TEST_TMPDIR/collect-flock-called" ]
+    [ "$(dbtune_state_read)" = collecting ]
+}
+
 @test "tick rates and CPU use the real monotonic interval including second snapshot delay" {
     dbtune_state_write collecting
     write_collect_config
@@ -213,7 +291,7 @@ dbtune_embedded_get() {
 
     run cmd_collect status
     [ "$status" -eq 0 ]
-    [ "$output" = $'state\taudited\nhealth_timestamp\tunknown\nhealth_status\tunknown\nhealth_detail\t\nlast_sample_age_seconds\tunknown\nsample_state\tmissing\nguard_state\tnone' ]
+    [ "$output" = $'state\taudited\nhealth_timestamp\tunknown\nhealth_status\tunknown\nhealth_detail\t\nsample_valid_rows\t0\nsample_rejected_rows\t0\nsample_excluded_status_rows\t0\nsample_excluded_restart_rows\t0\nsample_rejected_reasons\tunavailable\nlast_sample_age_seconds\tunknown\nsample_state\tmissing\nguard_state\tnone' ]
     [ ! -e "$BATS_TEST_TMPDIR/sql.log" ]
     [ ! -e "$BATS_TEST_TMPDIR/systemctl.log" ]
 }

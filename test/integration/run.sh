@@ -64,6 +64,7 @@ integration_dbtune() {
     shift
 
     integration_compose exec -T "$service" env \
+        PATH=/var/lib/dbtune-bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
         DBTUNE_STATE_DIR=/var/lib/dbtune \
         DBTUNE_CONFIG_ALLOWED_DIR=/etc/mysql/mariadb.conf.d \
         DBTUNE_SYSTEMD_DIR=/var/lib/dbtune-systemd \
@@ -74,18 +75,22 @@ integration_dbtune() {
         DBTUNE_MIN_FREE_KB=1 \
         DBTUNE_MIN_APPLY_SAMPLES=5 \
         DBTUNE_NOW_HHMM=1200 \
+        DBTUNE_NOW_EPOCH=1785578400 \
         /usr/local/bin/dbtune "$@"
 }
 
 integration_lifecycle() {
     local service=$1
+    local audit_output
 
     printf 'integration: %s dbtune lifecycle\n' "$service"
     integration_compose exec -T "$service" sh -eu -c '
         install -d -m 755 /var/lib/dbtune-bin /var/log/mysql
         chown mysql:mysql /var/log/mysql
         printf "%s\n" "#!/bin/sh" "exit 0" >/var/lib/dbtune-bin/systemctl
-        chmod 755 /var/lib/dbtune-bin/systemctl
+        printf "%s\n" "#!/bin/sh" "printf \"%s\\n\" /dev/dbtune-integration" >/var/lib/dbtune-bin/findmnt
+        printf "%s\n" "#!/bin/sh" "printf \"%s\\n\" \"dbtune-integration disk 0 Integration_NVMe\"" >/var/lib/dbtune-bin/lsblk
+        chmod 755 /var/lib/dbtune-bin/systemctl /var/lib/dbtune-bin/findmnt /var/lib/dbtune-bin/lsblk
         rm -rf /var/lib/dbtune
         install -d -m 700 /var/lib/dbtune
         printf "%b\n" \
@@ -96,7 +101,26 @@ integration_lifecycle() {
             "last_success\t2026-08-01T09:00:00Z" >/var/lib/dbtune/backup-evidence.tsv
         chmod 600 /var/lib/dbtune/backup-evidence.tsv
     ' || return 1
-    integration_dbtune "$service" audit >/dev/null || return 1
+    if ! audit_output=$(integration_dbtune "$service" audit); then
+        printf 'integration: %s audit nie je autoritativny\n%s\n' "$service" "$audit_output" >&2
+        # shellcheck disable=SC2016
+        integration_compose exec -T "$service" awk -F '\t' \
+            '$1 ~ /^audit\.(overall_status|failed_sections|partial_sections|affected_domains|section\.)/ {print}' \
+            /var/lib/dbtune/audit.tsv >&2 || true
+        return 1
+    fi
+    # shellcheck disable=SC2016
+    integration_compose exec -T "$service" awk -F '\t' '
+        $1=="audit.overall_status" && ($2=="PASS" || $2=="FINDINGS") {authoritative=1}
+        $1=="audit.section.hardware.status" && $2=="complete" {hardware=1}
+        $1=="audit.section.mariadb.status" && $2=="complete" {mariadb=1}
+        $1=="audit.section.mariadb.evidence_schema_version" && $2=="1" {schema=1}
+        $1=="audit.section.mariadb.missing_evidence" && $2=="none" {missing=1}
+        $1=="audit.section.mariadb.invalid_evidence" && $2=="none" {invalid=1}
+        $1=="audit.section.mariadb.conflicting_evidence" && $2=="none" {conflicting=1}
+        $1=="hw.storage_class" && $2=="nvme" {storage=1}
+        END {exit !(authoritative && hardware && mariadb && schema && missing && invalid && conflicting && storage)}
+    ' /var/lib/dbtune/audit.tsv || return 1
     integration_dbtune "$service" collect start --days 1 >/dev/null || return 1
     for _ in 1 2 3 4 5; do
         integration_dbtune "$service" _tick >/dev/null || return 1
@@ -140,7 +164,7 @@ integration_main() {
         return 0
     fi
     trap 'integration_compose down -v >/dev/null 2>&1 || true' EXIT
-    integration_compose up -d || return 1
+    integration_compose up -d --build || return 1
     integration_wait_healthy mariadb106 || return 1
     integration_wait_healthy mariadb114 || return 1
     integration_smoke mariadb106 || status=1
