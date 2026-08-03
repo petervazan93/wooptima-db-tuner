@@ -69,6 +69,16 @@ setup() {
     [[ "$output" != *'Pouzitie:'* ]]
 }
 
+@test "message locale does not select the interface language" {
+    export LC_MESSAGES=sk_SK.UTF-8
+
+    run dbtune_main --help
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == 'Usage: dbtune <command> [options]'* ]]
+    [[ "$output" != *'Pouzitie:'* ]]
+}
+
 @test "catalog formatting treats dynamic values as arguments" {
     dbtune_i18n_set en
 
