@@ -6,6 +6,7 @@ setup() {
     export DBTUNE_STATE_DIR="$BATS_TEST_TMPDIR/state"
     export DBTUNE_LOG_LEVEL=quiet
     source "$BATS_TEST_DIRNAME/../../lib/00-header.sh"
+    source "$BATS_TEST_DIRNAME/../../lib/05-i18n.sh"
     source "$BATS_TEST_DIRNAME/../../lib/10-util.sh"
     source "$BATS_TEST_DIRNAME/../../lib/90-main.sh"
 }
@@ -220,7 +221,7 @@ file_mode() {
 @test "CLI help and version are always available" {
     run dbtune_main --help
     [ "$status" -eq 0 ]
-    [[ "$output" == *'Pouzitie: dbtune'* ]]
+    [[ "$output" == *'Usage: dbtune <command> [options]'* ]]
 
     run dbtune_main version
     [ "$status" -eq 0 ]

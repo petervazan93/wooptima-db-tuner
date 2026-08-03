@@ -1,23 +1,5 @@
 dbtune_usage() {
-    cat <<'USAGE'
-Pouzitie: dbtune <prikaz> [volby]
-
-Prikazy:
-  audit [--json]                  Read-only audit a novy meraci cyklus
-  collect start [--days N]       Zber metrik, predvolene 7 dni
-  collect status | stop          Stav alebo zastavenie zberu
-  analyze [--min-samples N]      Analyza nazbieranych metrik
-  report                         Vygenerovanie reportu
-  propose                        Navrh MariaDB konfiguracie
-  apply [--restart] [--force]    Bezpecne nasadenie navrhu
-  verify --post | --24h          Kontrola po nasadeni
-  rollback                       Obnovenie povodnej konfiguracie
-  status                         Stav dbtune
-  version                        Verzia programu
-  _tick                          Interny timer tick
-
-  -h, --help                     Tato napoveda
-USAGE
+    dbtune_msg cli_usage
 }
 
 dbtune_version() {
@@ -28,7 +10,7 @@ dbtune_call_command() {
     local function_name=${1:-}
     shift || true
     if ! declare -F "$function_name" >/dev/null 2>&1; then
-        dbtune_log error "Modul pre '$function_name' nie je v tomto builde dostupny"
+        dbtune_log error "$(dbtune_printf cli_module_unavailable "$function_name")"
         return 69
     fi
     "$function_name" "$@"
@@ -84,7 +66,7 @@ dbtune_dispatch() {
             ;;
         collect)
             operation=$(dbtune_collect_operation "${1:-}") || {
-                dbtune_log error "Pouzitie: dbtune collect start|status|stop"
+                dbtune_log error "$(dbtune_msg cli_collect_usage)"
                 return 64
             }
             if [[ $operation == collect_status ]]; then
@@ -117,7 +99,7 @@ dbtune_dispatch() {
             return 0
             ;;
         *)
-            dbtune_log error "Neznamy prikaz: $command"
+            dbtune_log error "$(dbtune_printf cli_unknown_command "$command")"
             dbtune_usage >&2
             return 64
             ;;
@@ -126,6 +108,7 @@ dbtune_dispatch() {
 
 dbtune_main() {
     umask 077
+    dbtune_i18n_init || return
     dbtune_dispatch "$@"
 }
 
