@@ -74,8 +74,15 @@ dbtune_collect_write_config() {
     local original_file=$7
     local original_long=$8
     local original_verbosity=$9
+    local ui_lang=$DBTUNE_I18N_LANGUAGE
+
+    case $ui_lang in
+        en|sk) ;;
+        *) return 64 ;;
+    esac
 
     {
+        printf 'ui_lang\t%s\n' "$ui_lang"
         printf 'days\t%s\n' "$days"
         printf 'long_query_time\t%s\n' "$long_query_time"
         printf 'slow_log_file\t%s\n' "$slow_log"
@@ -715,20 +722,27 @@ dbtune_collect_finalize() {
         dbtune_event collect_finalize_failed step stop || true
         return 0
     fi
-    # Automaticke dokoncenie zamerne pouziva default argumenty.
+    # Automatic completion intentionally uses default arguments.
     # shellcheck disable=SC2119
     if ! declare -F cmd_analyze >/dev/null 2>&1 || ! cmd_analyze; then
         dbtune_log error "$(dbtune_msg collect_auto_analyze_failed)"
         dbtune_event collect_finalize_failed step analyze || true
         return 0
     fi
-    # Report nema pri automatickom dokonceni argumenty.
+    # Automatic report generation takes no arguments.
     # shellcheck disable=SC2119
     if ! declare -F cmd_report >/dev/null 2>&1 || ! cmd_report; then
         dbtune_log error "$(dbtune_msg collect_auto_report_failed)"
         dbtune_event collect_finalize_failed step report || true
     fi
     return 0
+}
+
+dbtune_collect_restore_language() {
+    local ui_lang
+
+    ui_lang=$(dbtune_collect_value ui_lang 2>/dev/null) || ui_lang=en
+    dbtune_i18n_set "$ui_lang"
 }
 
 dbtune_collect_tick_body() {
@@ -828,6 +842,7 @@ dbtune_collect_tick_body() {
 cmd_tick() {
     local lock_file lock_identity lock_fd
 
+    dbtune_collect_restore_language || return 0
     if (($#)); then
         dbtune_log warn "$(dbtune_msg collect_tick_arguments_ignored)"
     fi

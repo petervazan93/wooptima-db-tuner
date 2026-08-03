@@ -50,8 +50,10 @@ fake_flock() {
 
 write_collect_config() {
     local deadline=${1:-2000000}
+    local ui_lang=${2:-en}
 
     {
+        printf 'ui_lang\t%s\n' "$ui_lang"
         printf 'slow_log_file\t%s\n' "$DBTUNE_SLOW_LOG"
         printf 'long_query_time\t0.5\n'
         printf 'deadline_epoch\t%s\n' "$deadline"
@@ -300,6 +302,7 @@ dbtune_embedded_get() {
     [ "$(dbtune_state_read)" = collecting ]
     [ "$(dbtune_collect_value days)" = 3 ]
     [ "$(dbtune_collect_value deadline_epoch)" = 1259200 ]
+    [ "$(dbtune_collect_value ui_lang)" = en ]
     grep -F 'ExecStart=/usr/local/bin/dbtune _tick' "$DBTUNE_SYSTEMD_DIR/dbtune-collect.service"
     grep -F 'OnCalendar=*:0/5' "$DBTUNE_SYSTEMD_DIR/dbtune-collect.timer"
     grep -F 'enable --now dbtune-collect.timer' "$BATS_TEST_TMPDIR/systemctl.log"
@@ -314,6 +317,28 @@ dbtune_embedded_get() {
 
     [ "$status" -eq 0 ]
     [ "$output" = 'Zber spusteny na 3 dni (deadline epoch 1259200).' ]
+    [ "$(dbtune_collect_value ui_lang)" = sk ]
+}
+
+@test "tick restores the persisted language before diagnostics and automatic reporting" {
+    dbtune_state_write collecting
+    write_collect_config 999999 sk
+    write_sample_rows 288
+    dbtune_i18n_set en
+    export DBTUNE_LOG_LEVEL=warn
+    cmd_analyze() {
+        printf '%s\n' "$DBTUNE_I18N_LANGUAGE" >"$BATS_TEST_TMPDIR/analyze-language"
+    }
+    cmd_report() {
+        dbtune_printf report_title >"$BATS_TEST_TMPDIR/automatic-report.md"
+    }
+
+    run cmd_tick unexpected
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *'_tick ignoruje argumenty'* ]]
+    [ "$(cat "$BATS_TEST_TMPDIR/analyze-language")" = sk ]
+    [ "$(cat "$BATS_TEST_TMPDIR/automatic-report.md")" = '# dbtune správa' ]
 }
 
 @test "status does not invoke SQL or systemctl" {

@@ -46,7 +46,7 @@ dbtune_lifecycle_validate_parent_components() {
         [[ -n $component ]] || continue
         current+="/$component"
         if [[ -L $current || ! -d $current ]]; then
-            dbtune_log error "Config parent komponent nie je bezpecny regularny adresar: $current"
+            dbtune_log error "$(dbtune_printf lifecycle_config_parent_unsafe "$current")"
             return 65
         fi
     done
@@ -79,13 +79,13 @@ dbtune_lifecycle_validate_target_path() {
     allowed=$(dbtune_lifecycle_allowed_directory)
     if ! dbtune_lifecycle_path_is_canonical_absolute "$target" ||
         ! dbtune_lifecycle_path_is_canonical_absolute "$allowed"; then
-        dbtune_log error "Config target a povoleny adresar musia byt kanonicke absolutne cesty"
+        dbtune_log error "$(dbtune_msg lifecycle_target_paths_absolute)"
         return 65
     fi
     directory=${target%/*}
     base=${target##*/}
     if [[ $directory != "$allowed" || ! $base =~ ^[A-Za-z0-9][A-Za-z0-9._-]*[.]cnf$ ]]; then
-        dbtune_log error "Config target musi byt .cnf priamo v povolenom adresari $allowed"
+        dbtune_log error "$(dbtune_printf lifecycle_target_allowed "$allowed")"
         return 65
     fi
     dbtune_lifecycle_validate_parent_components "$allowed" || return
@@ -98,33 +98,33 @@ dbtune_lifecycle_validate_target_path() {
     expected_mode=${expected_mode#0}
     read -r uid gid mode < <(dbtune_file_stat "$allowed") || return 1
     if [[ $uid != "$expected_uid" || $gid != "$expected_gid" || ${mode: -2:1} == [2367] || ${mode: -1} == [2367] ]]; then
-        dbtune_log error "Povoleny config adresar ma neocakavane vlastnictvo alebo je group/world writable: $allowed ($uid:$gid $mode)"
+        dbtune_log error "$(dbtune_printf lifecycle_allowed_dir_metadata "$allowed" "$uid" "$gid" "$mode")"
         return 65
     fi
     DBTUNE_LIFECYCLE_DIRECTORY_IDENTITY=$(dbtune_lifecycle_file_identity "$allowed") || return
     if [[ -n $expected_directory_identity && $DBTUNE_LIFECYCLE_DIRECTORY_IDENTITY != "$expected_directory_identity" ]]; then
-        dbtune_log error "Povoleny config adresar bol pocas apply vymeneny"
+        dbtune_log error "$(dbtune_msg lifecycle_allowed_dir_replaced_apply)"
         return 65
     fi
 
     DBTUNE_LIFECYCLE_TARGET_IDENTITY=
     DBTUNE_LIFECYCLE_TARGET_HASH=
     if [[ -L $target ]]; then
-        dbtune_log error "Config target je symlink alebo dangling symlink: $target"
+        dbtune_log error "$(dbtune_printf lifecycle_target_symlink "$target")"
         return 65
     elif [[ -e $target ]]; then
         if [[ ! -f $target ]]; then
-            dbtune_log error "Config target nie je regularny subor: $target"
+            dbtune_log error "$(dbtune_printf lifecycle_target_not_regular "$target")"
             return 65
         fi
         read -r uid gid mode < <(dbtune_file_stat "$target") || return 1
         if [[ $uid != "$expected_uid" || $gid != "$expected_gid" || $mode != "$expected_mode" ]]; then
-            dbtune_log error "Config target ma neocakavane vlastnictvo alebo mode: $target ($uid:$gid $mode)"
+            dbtune_log error "$(dbtune_printf lifecycle_target_metadata "$target" "$uid" "$gid" "$mode")"
             return 65
         fi
         links=$(dbtune_lifecycle_file_links "$target") || return 1
         if [[ $links != 1 ]]; then
-            dbtune_log error "Config target ma viac hardlinkov a jeho topologiu nie je mozne bezpecne obnovit: $target"
+            dbtune_log error "$(dbtune_printf lifecycle_target_hardlinks "$target")"
             return 65
         fi
         DBTUNE_LIFECYCLE_TARGET_TOPOLOGY=regular
@@ -134,15 +134,15 @@ dbtune_lifecycle_validate_target_path() {
         DBTUNE_LIFECYCLE_TARGET_TOPOLOGY=absent
     fi
     if [[ $expected_topology != any && $DBTUNE_LIFECYCLE_TARGET_TOPOLOGY != "$expected_topology" ]]; then
-        dbtune_log error "Config target zmenil pocas operacie topologiu ($expected_topology -> $DBTUNE_LIFECYCLE_TARGET_TOPOLOGY)"
+        dbtune_log error "$(dbtune_printf lifecycle_target_topology_changed "$expected_topology" "$DBTUNE_LIFECYCLE_TARGET_TOPOLOGY")"
         return 65
     fi
     if [[ -n $expected_target_identity && $DBTUNE_LIFECYCLE_TARGET_IDENTITY != "$expected_target_identity" ]]; then
-        dbtune_log error "Config target bol pocas operacie vymeneny"
+        dbtune_log error "$(dbtune_msg lifecycle_target_replaced)"
         return 65
     fi
     if [[ -n $expected_target_hash && $DBTUNE_LIFECYCLE_TARGET_HASH != "$expected_target_hash" ]]; then
-        dbtune_log error "Config target bol pocas operacie zmeneny"
+        dbtune_log error "$(dbtune_msg lifecycle_target_changed)"
         return 65
     fi
 }
@@ -177,17 +177,27 @@ dbtune_lifecycle_fault_inject() {
     local boundary=${1:-}
 
     if [[ ${DBTUNE_FAULT_INJECT:-} == "$boundary" ]]; then
-        dbtune_log error "Fault injection na lifecycle hranici: $boundary"
+        dbtune_log error "$(dbtune_printf lifecycle_fault_injection "$boundary")"
         return 99
     fi
 }
 
 dbtune_lifecycle_force_phrase() {
-    printf '%s\n' 'APLIKUJ BEZ MERANIA'
+    dbtune_msg lifecycle_force_phrase
+    printf '\n'
 }
 
 dbtune_lifecycle_backup_phrase() {
-    printf '%s\n' 'POTVRDZUJEM OBNOVITELNU ZALOHU'
+    dbtune_msg lifecycle_backup_phrase
+    printf '\n'
+}
+
+dbtune_lifecycle_bool() {
+    case ${1:-} in
+        0) printf 'false\n' ;;
+        1) printf 'true\n' ;;
+        *) return 64 ;;
+    esac
 }
 
 dbtune_lifecycle_is_interactive() {
@@ -203,7 +213,7 @@ dbtune_lifecycle_parse_args() {
             --restart) restart=1 ;;
             --force) force=1 ;;
             *)
-                dbtune_log error "Neznama volba apply: $1"
+                dbtune_log error "$(dbtune_printf lifecycle_apply_unknown_option "$1")"
                 return 64
                 ;;
         esac
@@ -217,15 +227,16 @@ dbtune_lifecycle_confirm_force() {
 
     phrase=$(dbtune_lifecycle_force_phrase)
     if ! dbtune_lifecycle_is_interactive; then
-        dbtune_log error "--force je povoleny iba interaktivne na TTY"
+        dbtune_log error "$(dbtune_msg lifecycle_force_tty)"
         return 77
     fi
-    printf 'Pre pokracovanie napiste presne: %s\n> ' "$phrase" >&2
+    dbtune_eprintf lifecycle_confirmation_prompt "$phrase"
     IFS= read -r answer || return 77
     if [[ $answer != "$phrase" ]]; then
-        dbtune_log error "Potvrdzovacia fraza nesuhlasi"
+        dbtune_log error "$(dbtune_msg lifecycle_force_confirmation_mismatch)"
         return 77
     fi
+    dbtune_event safety_confirmation confirmation_id apply_without_measurements ui_lang "$DBTUNE_I18N_LANGUAGE" || true
 }
 
 dbtune_lifecycle_confirm_backup() {
@@ -233,20 +244,24 @@ dbtune_lifecycle_confirm_backup() {
 
     phrase=$(dbtune_lifecycle_backup_phrase)
     if ! dbtune_lifecycle_is_interactive; then
-        dbtune_log error "Apply vyzaduje overeny backup-evidence.tsv alebo interaktivne potvrdenie na TTY"
+        dbtune_log error "$(dbtune_msg lifecycle_backup_tty)"
         return 77
     fi
-    printf 'Chyba autoritativny dokaz poslednej uspesnej zalohy. Overte obnovu mimo dbtune.\n' >&2
-    printf 'Pre pokracovanie napiste presne: %s\n> ' "$phrase" >&2
+    dbtune_eprintf lifecycle_backup_missing_intro
+    dbtune_eprintf lifecycle_confirmation_prompt "$phrase"
     IFS= read -r answer || return 77
     if [[ $answer != "$phrase" ]]; then
-        dbtune_log error "Potvrdenie obnovitelnej zalohy nesuhlasi"
+        dbtune_log error "$(dbtune_msg lifecycle_backup_confirmation_mismatch)"
         return 77
     fi
+    dbtune_event safety_confirmation confirmation_id restorable_backup ui_lang "$DBTUNE_I18N_LANGUAGE" || true
 }
 
 dbtune_lifecycle_log_backup_rejection() {
-    dbtune_log error "Apply je zablokovany: backup evidence bol odmietnuty; reason=${DBTUNE_BACKUP_EVIDENCE_ERROR:-invalid}; age_seconds=${DBTUNE_BACKUP_EVIDENCE_AGE_SECONDS:-unknown}; max_age_seconds=${DBTUNE_BACKUP_EVIDENCE_MAX_AGE_SECONDS:-${DBTUNE_MAX_BACKUP_AGE_SECONDS:-86400}}"
+    dbtune_log error "$(dbtune_printf lifecycle_backup_rejected \
+        "${DBTUNE_BACKUP_EVIDENCE_ERROR:-invalid}" \
+        "${DBTUNE_BACKUP_EVIDENCE_AGE_SECONDS:-unknown}" \
+        "${DBTUNE_BACKUP_EVIDENCE_MAX_AGE_SECONDS:-${DBTUNE_MAX_BACKUP_AGE_SECONDS:-86400}}")"
 }
 
 dbtune_lifecycle_check_backup() {
@@ -273,7 +288,7 @@ dbtune_lifecycle_check_backup() {
             return 0
         fi
         if [[ $status == missing ]]; then
-            dbtune_log error "Apply je zablokovany: autoritativny backup evidence potvrdzuje absenciu zalohy"
+            dbtune_log error "$(dbtune_msg lifecycle_backup_confirmed_missing)"
             return 65
         fi
     fi
@@ -305,7 +320,7 @@ dbtune_lifecycle_validate_proposal_manifest() {
     local analysis_manifest analysis key expected actual proposal_count proposal_records_hash
 
     [[ -r $manifest ]] || {
-        dbtune_log error "Chyba proposal manifest: $manifest"
+        dbtune_log error "$(dbtune_printf lifecycle_proposal_manifest_missing "$manifest")"
         return 66
     }
     dbtune_provenance_validate_analysis || return
@@ -313,30 +328,30 @@ dbtune_lifecycle_validate_proposal_manifest() {
     for key in run_id audit_hash samples_hash analysis_hash analysis_fingerprint; do
         expected=$(dbtune_manifest_value "$analysis_manifest" "$key") || return 65
         actual=$(dbtune_manifest_value "$manifest" "$key") || {
-            dbtune_log error "Proposal manifest nema provenance zaznam $key"
+            dbtune_log error "$(dbtune_printf lifecycle_proposal_manifest_key_missing "$key")"
             return 65
         }
         if [[ $actual != "$expected" ]]; then
-            dbtune_log error "Proposal patri inemu analysis runu ($key)"
+            dbtune_log error "$(dbtune_printf lifecycle_proposal_other_run "$key")"
             return 65
         fi
     done
     expected=$(dbtune_manifest_value "$manifest" proposal_hash) || {
-        dbtune_log error "Proposal manifest nema proposal_hash"
+        dbtune_log error "$(dbtune_msg lifecycle_proposal_hash_missing)"
         return 65
     }
     [[ $expected =~ ^[0-9a-f]{64}$ && -r $proposal ]] || return 65
     actual=$(dbtune_sha256_file "$proposal") || return
     if [[ $actual != "$expected" ]]; then
-        dbtune_log error "Proposal snapshot sa zmenil alebo nezodpoveda manifestu"
+        dbtune_log error "$(dbtune_msg lifecycle_proposal_changed)"
         return 65
     fi
     proposal_count=$(dbtune_manifest_value "$manifest" proposal_count) || {
-        dbtune_log error "Proposal manifest nema proposal_count"
+        dbtune_log error "$(dbtune_msg lifecycle_proposal_count_missing)"
         return 65
     }
     proposal_records_hash=$(dbtune_manifest_value "$manifest" proposal_records_hash) || {
-        dbtune_log error "Proposal manifest nema proposal_records_hash"
+        dbtune_log error "$(dbtune_msg lifecycle_proposal_records_hash_missing)"
         return 65
     }
     [[ $proposal_count =~ ^[0-9]+$ && $proposal_records_hash =~ ^[0-9a-f]{64}$ ]] || return 65
@@ -346,7 +361,7 @@ dbtune_lifecycle_validate_proposal_manifest() {
     dbtune_proposals_load "$DBTUNE_AUDIT_FILE" || return
     if ((${#DBTUNE_PROPOSAL_LINES[@]} != proposal_count)) ||
         [[ $(dbtune_proposal_records_hash) != "$proposal_records_hash" ]]; then
-        dbtune_log error "Proposal manifest nezodpoveda kanonickemu zoznamu zmien"
+        dbtune_log error "$(dbtune_msg lifecycle_proposal_records_mismatch)"
         return 65
     fi
     dbtune_lifecycle_validate_proposal_records "$proposal" || return
@@ -364,18 +379,18 @@ dbtune_lifecycle_validate_proposal_records() {
     while IFS=$'\t' read -r key value; do
         [[ -n $key ]] || continue
         if [[ -n ${actual[$key]+x} ]]; then
-            dbtune_log error "Nasadeny CNF obsahuje duplicitny kluc $key"
+            dbtune_log error "$(dbtune_printf lifecycle_cnf_duplicate "$key")"
             return 65
         fi
         actual["$key"]=$value
     done < <(dbtune_lifecycle_config_entries "$proposal")
     if ((${#expected[@]} != ${#actual[@]})); then
-        dbtune_log error "CNF a kanonicky proposal maju rozdielny pocet zmien"
+        dbtune_log error "$(dbtune_msg lifecycle_cnf_count_mismatch)"
         return 65
     fi
     for key in "${!expected[@]}"; do
         if [[ -z ${actual[$key]+x} || ${actual[$key]} != "${expected[$key]}" ]]; then
-            dbtune_log error "CNF nezodpoveda kanonickej zmene $key"
+            dbtune_log error "$(dbtune_printf lifecycle_cnf_record_mismatch "$key")"
             return 65
         fi
     done
@@ -389,15 +404,15 @@ dbtune_lifecycle_check_apply_inputs() {
     [[ -n $proposal ]] || proposal=$(dbtune_lifecycle_proposal)
     state=$(dbtune_state_read) || return
     if ((force == 0)) && [[ $state != proposed ]]; then
-        dbtune_log error "Apply vyzaduje aktualny stav proposed; aktualny stav je '$state'"
+        dbtune_log error "$(dbtune_printf lifecycle_apply_state_required "$state")"
         return 65
     fi
     if ((force == 1)) && [[ $state != audited && $state != analyzed && $state != proposed ]]; then
-        dbtune_log error "Vynuteny apply vyzaduje stav audited, analyzed alebo proposed; aktualny stav je '$state'"
+        dbtune_log error "$(dbtune_printf lifecycle_force_state_required "$state")"
         return 65
     fi
     if [[ ! -s $proposal ]]; then
-        dbtune_log error "Chyba navrh konfiguracie: $proposal"
+        dbtune_log error "$(dbtune_printf lifecycle_proposal_missing "$proposal")"
         return 66
     fi
     analysis=$(dbtune_path analysis.tsv) || return
@@ -405,7 +420,7 @@ dbtune_lifecycle_check_apply_inputs() {
         dbtune_analysis_validate_schema "$analysis" || return
     fi
     if ! dbtune_lifecycle_has_measurement && ((force == 0)); then
-        dbtune_log error "Apply je zablokovany: chyba samples.tsv alebo analysis.tsv; preset bez merania je hadanie"
+        dbtune_log error "$(dbtune_msg lifecycle_measurement_missing)"
         return 65
     fi
     if ((force == 0)); then
@@ -421,14 +436,14 @@ dbtune_lifecycle_check_time_window() {
     clock=${DBTUNE_NOW_HHMM:-}
     [[ -n $clock ]] || clock=$(date '+%H%M') || return 1
     if [[ ! $clock =~ ^[0-2][0-9][0-5][0-9]$ ]]; then
-        dbtune_log error "Neplatny lokalny cas z date: $clock"
+        dbtune_log error "$(dbtune_printf lifecycle_invalid_clock "$clock")"
         return 70
     fi
     hour=${clock:0:2}
     minute=${clock:2:2}
     total=$((10#$hour * 60 + 10#$minute))
     if ((total >= 330 && total <= 450)); then
-        dbtune_log error "Apply je medzi 05:30 a 07:30 lokalne blokovany kvoli unattended-upgrades; pouzite interaktivny --force"
+        dbtune_log error "$(dbtune_msg lifecycle_blocked_time_window)"
         return 75
     fi
 }
@@ -488,7 +503,7 @@ dbtune_lifecycle_validate_variable_names() {
         separator=,
     done < <(dbtune_lifecycle_variable_names "$proposal")
     if ((${#requested[@]} == 0)); then
-        dbtune_log error "Navrh nema ziadne aktivne premenne v sekcii [mysqld]"
+        dbtune_log error "$(dbtune_msg lifecycle_no_active_variables)"
         return 65
     fi
 
@@ -496,7 +511,7 @@ dbtune_lifecycle_validate_variable_names() {
     output_file=$(mktemp "$DBTUNE_STATE_DIR/.variables.XXXXXX") || return 1
     if ! dbtune_sql "$query" >"$output_file"; then
         rm -f "$output_file"
-        dbtune_log error "Ziva kontrola nazvov premennych zlyhala"
+        dbtune_log error "$(dbtune_msg lifecycle_live_variable_check_failed)"
         return 69
     fi
     while IFS= read -r name; do
@@ -507,7 +522,7 @@ dbtune_lifecycle_validate_variable_names() {
 
     for name in "${!requested[@]}"; do
         if [[ -z ${found[$name]+x} ]]; then
-            dbtune_log error "Neznama alebo neaktivna MariaDB premenna: $name"
+            dbtune_log error "$(dbtune_printf lifecycle_unknown_variable "$name")"
             return 65
         fi
     done
@@ -520,7 +535,7 @@ dbtune_lifecycle_reject_galera() {
     IFS=$'\t' read -r wsrep_on cluster_address <<<"$result"
     wsrep_on=${wsrep_on^^}
     if [[ $wsrep_on == ON || $wsrep_on == 1 || -n $cluster_address ]]; then
-        dbtune_log error "Galera/wsrep je aktivna alebo nakonfigurovana; apply sa odmieta"
+        dbtune_log error "$(dbtune_msg lifecycle_galera_rejected)"
         return 65
     fi
 }
@@ -530,11 +545,11 @@ dbtune_lifecycle_reject_mydumper() {
 
     count=$(dbtune_sql "SELECT COUNT(*) FROM information_schema.PROCESSLIST WHERE ID <> CONNECTION_ID() AND (LOWER(COALESCE(USER,'')) LIKE '%mydumper%' OR LOWER(COALESCE(INFO,'')) LIKE '%mydumper%' OR COALESCE(INFO,'') LIKE '%SQL_NO_CACHE%')") || return
     if [[ ! $count =~ ^[0-9]+$ ]]; then
-        dbtune_log error "Kontrola mydumper procesu vratila neplatny vysledok"
+        dbtune_log error "$(dbtune_msg lifecycle_mydumper_invalid)"
         return 70
     fi
     if ((count > 0)); then
-        dbtune_log error "Bezi mydumper backup; config ani restart pokyn sa nevykona"
+        dbtune_log error "$(dbtune_msg lifecycle_mydumper_running)"
         return 75
     fi
 }
@@ -552,7 +567,7 @@ dbtune_lifecycle_reject_critical_analysis() {
         }
     ' "$analysis")
     if [[ -n $findings ]]; then
-        dbtune_log error "Apply blokuje kriticky serverovy nalez: $findings"
+        dbtune_log error "$(dbtune_printf lifecycle_critical_finding "$findings")"
         return 65
     fi
 }
@@ -589,7 +604,7 @@ dbtune_lifecycle_write_rollback_instructions() {
     backup_q=$(dbtune_lifecycle_shell_quote "$history/original.cnf")
     removed_q=$(dbtune_lifecycle_shell_quote "$history/rollback-deployed.cnf")
     {
-        printf '# Filesystem-first rollback; nevyzaduje funkcnu MariaDB ani dbtune.\n'
+        dbtune_printf lifecycle_rollback_intro
         printf 'sudo test -d %s\n' "$history_q"
         printf 'sudo test ! -L %s\n' "$target_q"
         printf 'if sudo test -e %s; then sudo test -f %s && sudo mv %s %s; fi\n' "$target_q" "$target_q" "$target_q" "$removed_q"
@@ -597,7 +612,7 @@ dbtune_lifecycle_write_rollback_instructions() {
             printf 'sudo install -o root -g root -m 0644 %s %s\n' "$backup_q" "$target_q"
         fi
         printf 'if sudo systemctl is-active --quiet mariadb; then\n'
-        printf '  printf "Config je obnoveny; restartujte MariaDB cez RunCloud panel.\\n"\n'
+        dbtune_printf lifecycle_rollback_restored_shell
         printf 'else\n'
         printf '  sudo systemctl start mariadb\n'
         printf 'fi\n'
@@ -626,7 +641,7 @@ dbtune_lifecycle_prepare_history() {
     dbtune_lifecycle_validate_target_path "$target" "$expected_topology" \
         "$expected_directory_identity" "$expected_target_identity" "$expected_target_hash" || return
     if [[ $DBTUNE_LIFECYCLE_PARENT_IDENTITIES != "$expected_parent_identities" ]]; then
-        dbtune_log error "Config parent bol pocas pripravy apply vymeneny"
+        dbtune_log error "$(dbtune_msg lifecycle_parent_replaced_prepare)"
         return 65
     fi
     if [[ $DBTUNE_LIFECYCLE_TARGET_TOPOLOGY == regular ]]; then
@@ -636,7 +651,7 @@ dbtune_lifecycle_prepare_history() {
             "$expected_directory_identity" "$expected_target_identity" "$expected_target_hash" || return
         original_hash=$(dbtune_sha256_file "$history/original.cnf") || return
         [[ $original_hash == "$expected_target_hash" ]] || {
-            dbtune_log error "Backup povodneho config targetu nezodpoveda zdroju"
+            dbtune_log error "$(dbtune_msg lifecycle_original_backup_mismatch)"
             return 65
         }
         had_original=1
@@ -758,7 +773,7 @@ if not sys.platform.startswith("linux") and sys.platform != "darwin":
     sys.exit(1)
 PY
     then
-        dbtune_log error "Bezpecne publikovanie configu vyzaduje python3 s podporou dir_fd a atomickeho rename exchange"
+        dbtune_log error "$(dbtune_msg lifecycle_publisher_required)"
         return 69
     fi
 }
@@ -773,6 +788,9 @@ dbtune_lifecycle_publish_managed_config() {
     local expected_source_hash=${7:-}
     local expected_parent_identities=${8:-}
     local directory base source_base=- python expected_uid expected_gid expected_mode status=0
+    local message_not_regular message_metadata message_hardlinks message_replaced message_changed
+    local message_open_dir message_dir_replaced message_parent_chain message_parent_replaced
+    local message_topology message_fault_hook message_atomic_flags message_fault_before message_failed
 
     directory=${target%/*}
     base=${target##*/}
@@ -788,19 +806,36 @@ dbtune_lifecycle_publish_managed_config() {
     [[ $expected_directory_identity =~ ^[0-9]+:[0-9]+$ ]] || return 64
     python=${DBTUNE_PYTHON:-python3}
     dbtune_lifecycle_require_publisher || return
+    message_not_regular=$(dbtune_msg lifecycle_publisher_not_regular) || return
+    message_metadata=$(dbtune_msg lifecycle_publisher_metadata) || return
+    message_hardlinks=$(dbtune_msg lifecycle_publisher_hardlinks) || return
+    message_replaced=$(dbtune_msg lifecycle_publisher_replaced) || return
+    message_changed=$(dbtune_msg lifecycle_publisher_changed) || return
+    message_open_dir=$(dbtune_msg lifecycle_publisher_open_dir_identity) || return
+    message_dir_replaced=$(dbtune_msg lifecycle_publisher_dir_replaced) || return
+    message_parent_chain=$(dbtune_msg lifecycle_publisher_parent_chain) || return
+    message_parent_replaced=$(dbtune_msg lifecycle_publisher_parent_replaced) || return
+    message_topology=$(dbtune_msg lifecycle_publisher_topology_changed) || return
+    message_fault_hook=$(dbtune_msg lifecycle_publisher_fault_hook) || return
+    message_atomic_flags=$(dbtune_msg lifecycle_publisher_atomic_flags) || return
+    message_fault_before=$(dbtune_msg lifecycle_publisher_fault_before) || return
+    message_failed=$(dbtune_msg lifecycle_publisher_failed) || return
 
     dbtune_lifecycle_validate_parent_components "$directory" || return
     if [[ -z $expected_parent_identities ]]; then
         expected_parent_identities=$(dbtune_lifecycle_parent_identity_chain "$directory") || return
     elif [[ $(dbtune_lifecycle_parent_identity_chain "$directory") != "$expected_parent_identities" ]]; then
-        dbtune_log error "Config parent bol od povodnej validacie vymeneny"
+        dbtune_log error "$(dbtune_msg lifecycle_parent_replaced_validation)"
         return 65
     fi
     dbtune_lifecycle_before_publish "$target" "$source" || return
     "$python" - "$directory" "$base" "$source_base" \
         "$expected_directory_identity" "$expected_parent_identities" "$expected_topology" "$expected_target_identity" \
         "$expected_target_hash" "$expected_source_hash" "$expected_uid" "$expected_gid" \
-        "$expected_mode" <<'PY' || status=$?
+        "$expected_mode" "$message_not_regular" "$message_metadata" "$message_hardlinks" \
+        "$message_replaced" "$message_changed" "$message_open_dir" "$message_dir_replaced" \
+        "$message_parent_chain" "$message_parent_replaced" "$message_topology" "$message_fault_hook" \
+        "$message_atomic_flags" "$message_fault_before" "$message_failed" <<'PY' || status=$?
 import ctypes
 import errno
 import hashlib
@@ -822,6 +857,20 @@ import sys
     expected_uid,
     expected_gid,
     expected_mode,
+    message_not_regular,
+    message_metadata,
+    message_hardlinks,
+    message_replaced,
+    message_changed,
+    message_open_dir,
+    message_dir_replaced,
+    message_parent_chain,
+    message_parent_replaced,
+    message_topology,
+    message_fault_hook,
+    message_atomic_flags,
+    message_fault_before,
+    message_failed,
 ) = sys.argv[1:]
 fail_match = os.environ.get("DBTUNE_PUBLISH_FAIL_MATCH", "")
 fault_hook = os.environ.get("DBTUNE_PUBLISH_FAULT_HOOK", "")
@@ -870,7 +919,7 @@ def rename_with_flags(old_name, new_name, linux_flags, darwin_flags):
         function.restype = ctypes.c_int
         result = function(directory_fd, old_name, directory_fd, new_name, darwin_flags)
     else:
-        raise OSError(errno.ENOSYS, "atomic rename flags are unavailable")
+        raise OSError(errno.ENOSYS, message_atomic_flags)
     if result != 0:
         error = ctypes.get_errno()
         raise OSError(error, os.strerror(error))
@@ -895,19 +944,19 @@ def open_regular(name, expected_identity, expected_hash, links=1):
     details = os.fstat(fd)
     if not stat.S_ISREG(details.st_mode):
         os.close(fd)
-        raise UnsafePublication(f"{name} nie je regularny subor")
+        raise UnsafePublication(message_not_regular % name)
     if details.st_uid != expected_uid or details.st_gid != expected_gid or stat.S_IMODE(details.st_mode) != expected_mode:
         os.close(fd)
-        raise UnsafePublication(f"{name} ma neocakavane vlastnictvo alebo mode")
+        raise UnsafePublication(message_metadata % name)
     if links is not None and details.st_nlink != links:
         os.close(fd)
-        raise UnsafePublication(f"{name} ma neocakavany pocet hardlinkov")
+        raise UnsafePublication(message_hardlinks % name)
     if expected_identity and identity(details) != expected_identity:
         os.close(fd)
-        raise UnsafePublication(f"{name} bol pocas publikovania vymeneny")
+        raise UnsafePublication(message_replaced % name)
     if expected_hash and hash_fd(fd) != expected_hash:
         os.close(fd)
-        raise UnsafePublication(f"{name} bol pocas publikovania zmeneny")
+        raise UnsafePublication(message_changed % name)
     return fd, details
 
 
@@ -915,18 +964,18 @@ def require_parent_identity():
     opened = os.fstat(directory_fd)
     current = os.stat(directory, follow_symlinks=False)
     if not stat.S_ISDIR(opened.st_mode) or identity(opened) != expected_directory_identity:
-        raise UnsafePublication("otvoreny config adresar nema ocakavanu identitu")
+        raise UnsafePublication(message_open_dir)
     if not stat.S_ISDIR(current.st_mode) or identity(current) != expected_directory_identity:
-        raise UnsafePublication("config adresar bol pocas publikovania vymeneny")
+        raise UnsafePublication(message_dir_replaced)
     components = [component for component in directory.split("/") if component]
     if len(components) != len(expected_parent_identities):
-        raise UnsafePublication("retazec config parentov je neplatny")
+        raise UnsafePublication(message_parent_chain)
     current_path = ""
     for component, expected_identity in zip(components, expected_parent_identities):
         current_path += "/" + component
         details = os.stat(current_path, follow_symlinks=False)
         if not stat.S_ISDIR(details.st_mode) or identity(details) != expected_identity:
-            raise UnsafePublication(f"config parent bol pocas publikovania vymeneny: {current_path}")
+            raise UnsafePublication(message_parent_replaced % current_path)
 
 
 def require_absent(name):
@@ -934,7 +983,7 @@ def require_absent(name):
         os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
     except FileNotFoundError:
         return
-    raise UnsafePublication(f"{name} zmenil pocas publikovania topologiu")
+    raise UnsafePublication(message_topology % name)
 
 
 def rollback_commit():
@@ -969,7 +1018,7 @@ try:
     if fault_hook:
         result = subprocess.run((fault_hook, directory, target, source), check=False)
         if result.returncode != 0:
-            raise UnsafePublication("fault hook zlyhal")
+            raise UnsafePublication(message_fault_hook)
     require_parent_identity()
     if expected_topology == "regular":
         target_fd, _ = open_regular(target, expected_target_identity, expected_target_hash)
@@ -982,7 +1031,7 @@ try:
 
     crash_at("after_validation")
     if fail_match and fail_match in source:
-        raise OSError("fault injection before publication")
+        raise OSError(message_fault_before)
     if source == "-":
         if expected_topology == "regular":
             os.unlink(target, dir_fd=directory_fd)
@@ -1018,7 +1067,7 @@ try:
     sys.exit(0)
 except (OSError, UnsafePublication) as error:
     rollback_commit()
-    print(f"dbtune: bezpecne publikovanie configu zlyhalo: {error}", file=sys.stderr)
+    print(message_failed % error, file=sys.stderr)
     sys.exit(65)
 finally:
     if source_fd is not None:
@@ -1070,7 +1119,7 @@ dbtune_lifecycle_validate_config() {
     elif command -v mysqld >/dev/null 2>&1; then
         server=$(command -v mysqld)
     else
-        dbtune_log error "Nenasiel sa mariadbd ani mysqld pre validaciu"
+        dbtune_log error "$(dbtune_msg lifecycle_validation_server_missing)"
         return 69
     fi
     validate_dir=$(mktemp -d "${TMPDIR:-/tmp}/dbtune-validate.XXXXXX") || return 1
@@ -1090,16 +1139,16 @@ dbtune_lifecycle_validate_config() {
     fi
     if ! dbtune_lifecycle_validation_output_ok "$output_file"; then
         rm -rf "$validate_dir"
-        dbtune_log error "mariadbd validacia nasla neplatnu konfiguraciu"
+        dbtune_log error "$(dbtune_msg lifecycle_validation_invalid)"
         return 65
     fi
     if ((command_status != 0)) && ! dbtune_lifecycle_validation_has_tolerated_error "$output_file"; then
         rm -rf "$validate_dir"
-        dbtune_log error "mariadbd validacia zlyhala bez dokumentovanej lock/engine init chyby"
+        dbtune_log error "$(dbtune_msg lifecycle_validation_failed)"
         return 65
     fi
     if ((command_status != 0)); then
-        dbtune_log warn "mariadbd vratil $command_status, ale vystup obsahoval iba dokumentovane lock/engine init chyby"
+        dbtune_log warn "$(dbtune_printf lifecycle_validation_tolerated "$command_status")"
     fi
     rm -rf "$validate_dir"
 }
@@ -1117,13 +1166,13 @@ dbtune_lifecycle_cycle_id() {
 
     if [[ ${history%/*} != "$DBTUNE_STATE_DIR/apply" || ! ${history##*/} =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ||
         ! -d $history || -L $history || ! -f $history/manifest.tsv || -L $history/manifest.tsv ]]; then
-        dbtune_log error "Neplatna apply historia pre identitu cyklu: ${history:-<prazdna>}"
+        dbtune_log error "$(dbtune_printf lifecycle_history_identity_invalid "${history:-$(dbtune_msg core_value_empty)}")"
         return 65
     fi
     cycle_id=$(dbtune_lifecycle_manifest_value "$history" cycle_id)
     [[ -n $cycle_id ]] || cycle_id=${history##*/}
     if [[ $cycle_id != "${history##*/}" ]]; then
-        dbtune_log error "Apply cycle_id nezodpoveda nemennej identite historie: $history"
+        dbtune_log error "$(dbtune_printf lifecycle_cycle_id_mismatch "$history")"
         return 65
     fi
     printf '%s\n' "$cycle_id"
@@ -1168,7 +1217,7 @@ dbtune_lifecycle_resolve_restore_lineage() {
             snapshot_hash=$(dbtune_sha256_file "$source_history/proposed.cnf") || return
             if [[ $source_target != "$(dbtune_lifecycle_manifest_value "$history" target)" ||
                 $source_hash != "$original_hash" || $snapshot_hash != "$original_hash" ]]; then
-                dbtune_log error "Zdrojovy apply cyklus nezodpoveda config backupu obnovy"
+                dbtune_log error "$(dbtune_msg lifecycle_source_cycle_mismatch)"
                 return 65
             fi
             DBTUNE_LIFECYCLE_RESTORED_CYCLE_ID=$source_cycle_id
@@ -1181,7 +1230,7 @@ dbtune_lifecycle_resolve_restore_lineage() {
             ((had_original == 0)) || return 65
             ;;
         *)
-            dbtune_log error "Neznamy zdroj config backupu: $source"
+            dbtune_log error "$(dbtune_printf lifecycle_backup_source_unknown "$source")"
             return 65
             ;;
     esac
@@ -1200,7 +1249,7 @@ dbtune_lifecycle_restore_config() {
     dbtune_lifecycle_validate_target_path "$target" any "$manifest_directory_identity" || return
     manifest_parent_identities=$(dbtune_lifecycle_manifest_value "$history" parent_identities 2>/dev/null || true)
     if [[ -n $manifest_parent_identities && $DBTUNE_LIFECYCLE_PARENT_IDENTITIES != "$manifest_parent_identities" ]]; then
-        dbtune_log error "Config parent bol od apply validacie vymeneny"
+        dbtune_log error "$(dbtune_msg lifecycle_parent_replaced_apply)"
         return 65
     fi
     [[ -n $manifest_parent_identities ]] || manifest_parent_identities=$DBTUNE_LIFECYCLE_PARENT_IDENTITIES
@@ -1213,21 +1262,21 @@ dbtune_lifecycle_restore_config() {
     if [[ $topology == regular ]]; then
         if [[ $target_hash != "$proposal_hash" ]] &&
             { ((had_original == 0)) || [[ $target_hash != "$original_hash" ]]; }; then
-            dbtune_log error "Config target nezodpoveda povodnemu ani publikovanemu apply snapshotu"
+            dbtune_log error "$(dbtune_msg lifecycle_target_snapshot_mismatch)"
             return 65
         fi
     elif ((had_original == 1)); then
-        dbtune_log error "Povodne existujuci config target pocas obnovy zmizol"
+        dbtune_log error "$(dbtune_msg lifecycle_original_target_missing)"
         return 65
     fi
     if ((had_original == 1)); then
         if [[ ! -f $history/original.cnf || -L $history/original.cnf ]]; then
-            dbtune_log error "V apply historii chyba regularny povodny config: $history/original.cnf"
+            dbtune_log error "$(dbtune_printf lifecycle_original_config_missing "$history")"
             return 66
         fi
         backup_hash=$(dbtune_sha256_file "$history/original.cnf") || return
         if [[ -n $original_hash && $original_hash != "$backup_hash" ]]; then
-            dbtune_log error "Povodny config v apply historii ma neplatny hash"
+            dbtune_log error "$(dbtune_msg lifecycle_original_config_hash_invalid)"
             return 65
         fi
     fi
@@ -1275,7 +1324,7 @@ dbtune_lifecycle_restore_config() {
     fi
     dbtune_lifecycle_validate_target_path "$target" regular "$directory_identity" || return
     if [[ $DBTUNE_LIFECYCLE_TARGET_HASH != "$backup_hash" ]]; then
-        dbtune_log error "Obnoveny config nezodpoveda povodnemu backupu"
+        dbtune_log error "$(dbtune_msg lifecycle_restored_config_mismatch)"
         return 65
     fi
 }
@@ -1404,7 +1453,7 @@ dbtune_lifecycle_read_rollback_intent() {
                 created !~ timestamp)
         }
     ' "$intent"; then
-        dbtune_log error "Rollback intent journal je neplatny: $intent"
+        dbtune_log error "$(dbtune_printf lifecycle_rollback_intent_invalid "$intent")"
         return 65
     fi
     DBTUNE_ROLLBACK_INTENT_HISTORY=$(dbtune_manifest_value "$intent" history) || return 65
@@ -1436,7 +1485,7 @@ dbtune_lifecycle_read_rollback_intent() {
         $DBTUNE_LIFECYCLE_RESTORED_CYCLE_ID != "$DBTUNE_ROLLBACK_INTENT_RESTORED_CYCLE_ID" ||
         $DBTUNE_LIFECYCLE_RESTORED_HISTORY != "$DBTUNE_ROLLBACK_INTENT_RESTORED_HISTORY" ||
         $DBTUNE_LIFECYCLE_RESTORED_BACKUP != "$DBTUNE_ROLLBACK_INTENT_RESTORED_BACKUP" ]]; then
-        dbtune_log error "Rollback intent nezodpoveda nemennej restore lineage"
+        dbtune_log error "$(dbtune_msg lifecycle_rollback_lineage_mismatch)"
         return 65
     fi
 }
@@ -1480,7 +1529,7 @@ dbtune_lifecycle_read_rollback_completion() {
                 hash == "" || status !~ /^[0-9]+$/ || restart !~ /^[01]$/ || created !~ timestamp)
         }
     ' "$record"; then
-        dbtune_log error "Rollback completion metadata su neplatne: $record"
+        dbtune_log error "$(dbtune_printf lifecycle_rollback_completion_invalid "$record")"
         return 65
     fi
     cycle_id=$(dbtune_lifecycle_cycle_id "$history") || return
@@ -1497,7 +1546,7 @@ dbtune_lifecycle_read_rollback_completion() {
         $(dbtune_manifest_value "$record" restored_backup) != "$DBTUNE_LIFECYCLE_RESTORED_BACKUP" ||
         $(dbtune_manifest_value "$record" restored_hash) != "$DBTUNE_ROLLBACK_INTENT_RESTORED_HASH" ||
         $(dbtune_manifest_value "$record" created_at) != "$DBTUNE_ROLLBACK_INTENT_CREATED_AT" ]]; then
-        dbtune_log error "Rollback completion metadata nezodpovedaju journalu: $record"
+        dbtune_log error "$(dbtune_printf lifecycle_rollback_completion_mismatch "$record")"
         return 65
     fi
 }
@@ -1514,7 +1563,7 @@ dbtune_lifecycle_publish_intent() {
     if [[ -n $previous_current ]]; then
         if [[ ${previous_current%/*} != "$DBTUNE_STATE_DIR/apply" || ! -d $previous_current ||
             -L $previous_current || ! -f $previous_current/manifest.tsv || -L $previous_current/manifest.tsv ]]; then
-            dbtune_log error "Predchadzajuci apply pointer nie je bezpecna historia: $previous_current"
+            dbtune_log error "$(dbtune_printf lifecycle_previous_pointer_unsafe "$previous_current")"
             return 65
         fi
     else
@@ -1554,7 +1603,7 @@ dbtune_lifecycle_read_intent() {
                 current == "" || hash !~ /^[0-9a-f]{64}$/ || created !~ timestamp)
         }
     ' "$intent"; then
-        dbtune_log error "Apply intent journal je neplatny: $intent"
+        dbtune_log error "$(dbtune_printf lifecycle_apply_intent_invalid "$intent")"
         return 65
     fi
     DBTUNE_LIFECYCLE_INTENT_HISTORY=$(dbtune_manifest_value "$intent" history) || return 65
@@ -1566,7 +1615,7 @@ dbtune_lifecycle_read_intent() {
         ! -d $DBTUNE_LIFECYCLE_INTENT_HISTORY || -L $DBTUNE_LIFECYCLE_INTENT_HISTORY ||
         ! -f $DBTUNE_LIFECYCLE_INTENT_HISTORY/manifest.tsv || -L $DBTUNE_LIFECYCLE_INTENT_HISTORY/manifest.tsv ||
         ! -f $DBTUNE_LIFECYCLE_INTENT_HISTORY/proposed.cnf || -L $DBTUNE_LIFECYCLE_INTENT_HISTORY/proposed.cnf ]]; then
-        dbtune_log error "Apply intent odkazuje na neplatnu historiu"
+        dbtune_log error "$(dbtune_msg lifecycle_apply_intent_history_invalid)"
         return 65
     fi
     if [[ $DBTUNE_LIFECYCLE_INTENT_PREVIOUS_CURRENT != - ]] &&
@@ -1574,14 +1623,14 @@ dbtune_lifecycle_read_intent() {
             ! -d $DBTUNE_LIFECYCLE_INTENT_PREVIOUS_CURRENT || -L $DBTUNE_LIFECYCLE_INTENT_PREVIOUS_CURRENT ||
             ! -f $DBTUNE_LIFECYCLE_INTENT_PREVIOUS_CURRENT/manifest.tsv ||
             -L $DBTUNE_LIFECYCLE_INTENT_PREVIOUS_CURRENT/manifest.tsv ]]; then
-        dbtune_log error "Apply intent obsahuje neplatny predchadzajuci pointer"
+        dbtune_log error "$(dbtune_msg lifecycle_apply_intent_pointer_invalid)"
         return 65
     fi
     manifest_hash=$(dbtune_lifecycle_manifest_value "$DBTUNE_LIFECYCLE_INTENT_HISTORY" proposal_hash) || return 65
     snapshot_hash=$(dbtune_sha256_file "$DBTUNE_LIFECYCLE_INTENT_HISTORY/proposed.cnf") || return
     if [[ $manifest_hash != "$DBTUNE_LIFECYCLE_INTENT_PROPOSAL_HASH" ||
         $snapshot_hash != "$DBTUNE_LIFECYCLE_INTENT_PROPOSAL_HASH" ]]; then
-        dbtune_log error "Apply intent nezodpoveda ulozenemu proposal snapshotu"
+        dbtune_log error "$(dbtune_msg lifecycle_apply_intent_snapshot_mismatch)"
         return 65
     fi
 }
@@ -1603,12 +1652,12 @@ dbtune_lifecycle_read_current() {
 
     current_file=$(dbtune_lifecycle_current_file)
     [[ -r $current_file ]] || {
-        dbtune_log error "Chyba zaznam aktualneho apply: $current_file"
+        dbtune_log error "$(dbtune_printf lifecycle_current_missing "$current_file")"
         return 66
     }
     IFS= read -r history <"$current_file" || return 1
     if [[ $history != "$DBTUNE_STATE_DIR"/apply/* || ! -d $history || ! -r $history/manifest.tsv ]]; then
-        dbtune_log error "Neplatna apply historia: ${history:-<prazdna>}"
+        dbtune_log error "$(dbtune_printf lifecycle_history_invalid "${history:-$(dbtune_msg core_value_empty)}")"
         return 65
     fi
     printf '%s\n' "$history"
@@ -1626,7 +1675,7 @@ dbtune_lifecycle_mark_recovery_required() {
     dbtune_lifecycle_publish_current "$history" || true
     dbtune_state_write recovery_required || true
     dbtune_event recovery_required phase "$phase" history "$history" || true
-    dbtune_log error "KRITICKE: obnova konfiguracie zlyhala; pouzite $history/ROLLBACK.txt"
+    dbtune_log error "$(dbtune_printf lifecycle_recovery_critical "$history")"
 }
 
 dbtune_lifecycle_restore_previous_pointer() {
@@ -1648,7 +1697,7 @@ dbtune_lifecycle_mark_rollback_failed() {
     } | dbtune_atomic_write "$history/ROLLBACK_FAILED" 600 || true
     dbtune_state_write rollback_failed || dbtune_state_write recovery_required || true
     dbtune_event rollback_failed history "$history" || true
-    dbtune_log error "Filesystem rollback zlyhal; pouzite $history/ROLLBACK.txt"
+    dbtune_log error "$(dbtune_printf lifecycle_rollback_failed "$history")"
 }
 
 dbtune_lifecycle_restore_rollback_target() {
@@ -1668,7 +1717,7 @@ dbtune_lifecycle_restore_rollback_target() {
     fi
     if [[ $DBTUNE_LIFECYCLE_TARGET_TOPOLOGY != regular ||
         $DBTUNE_LIFECYCLE_TARGET_HASH != "$DBTUNE_ROLLBACK_INTENT_PROPOSAL_HASH" ]]; then
-        dbtune_log error "Rollback target nezodpoveda nasadenemu ani obnovenemu snapshotu"
+        dbtune_log error "$(dbtune_msg lifecycle_rollback_target_mismatch)"
         return 65
     fi
     dbtune_lifecycle_restore_config "$history" || return
@@ -1690,7 +1739,7 @@ dbtune_lifecycle_prepare_rollback_service() {
     rm -f "$history/SERVICE_START_FAILED"
     if "$systemctl_command" is-active --quiet mariadb; then
         DBTUNE_ROLLBACK_COMPLETION_RESTART_REQUIRED=1
-        printf 'Config bol obnoveny. Restartujte MariaDB manualne cez RunCloud panel, aby sa obnovili aj efektivne hodnoty.\n'
+        dbtune_printf lifecycle_rollback_restart_required
         printf '%s\n' "$(dbtune_now)" | dbtune_atomic_write "$history/RESTART_REQUIRED" 600 || return 1
     else
         "$systemctl_command" start mariadb || DBTUNE_ROLLBACK_COMPLETION_START_STATUS=$?
@@ -1710,7 +1759,7 @@ dbtune_lifecycle_record_rollback_event() {
         restored_source "$DBTUNE_LIFECYCLE_RESTORED_SOURCE" restored_cycle_id "$DBTUNE_LIFECYCLE_RESTORED_CYCLE_ID" \
         restored_history "$DBTUNE_LIFECYCLE_RESTORED_HISTORY" restored_backup "$DBTUNE_LIFECYCLE_RESTORED_BACKUP" \
         service_start_status "$DBTUNE_ROLLBACK_COMPLETION_START_STATUS" \
-        restart_required "$DBTUNE_ROLLBACK_COMPLETION_RESTART_REQUIRED"; then
+        restart_required "$(dbtune_lifecycle_bool "$DBTUNE_ROLLBACK_COMPLETION_RESTART_REQUIRED")"; then
         printf '%s\n' "$(dbtune_now)" | dbtune_atomic_write "$marker" 600 || return 1
     fi
 }
@@ -1748,7 +1797,7 @@ dbtune_lifecycle_continue_rollback() {
     if [[ $current == "$history" ]]; then
         dbtune_lifecycle_publish_current "$desired_current" || return
     elif [[ $current != "$desired_current" ]]; then
-        dbtune_log error "Rollback pointer nezodpoveda povodnemu ani obnovenemu cyklu"
+        dbtune_log error "$(dbtune_msg lifecycle_rollback_pointer_mismatch)"
         return 65
     fi
     dbtune_lifecycle_sync || return 1
@@ -1758,7 +1807,7 @@ dbtune_lifecycle_continue_rollback() {
     if [[ $state != rolled_back ]]; then
         if [[ $state != "$DBTUNE_ROLLBACK_INTENT_PREVIOUS_STATE" &&
             $state != rollback_failed && $state != recovery_required ]]; then
-            dbtune_log error "Rollback state nezodpoveda journalu: $state"
+            dbtune_log error "$(dbtune_printf lifecycle_rollback_state_mismatch "$state")"
             return 65
         fi
         dbtune_state_transition rolled_back || dbtune_state_write rolled_back || return
@@ -1775,7 +1824,7 @@ dbtune_lifecycle_continue_rollback() {
     dbtune_lifecycle_sync || return 1
     dbtune_lifecycle_clear_rollback_intent "$history" || return
     if ((DBTUNE_ROLLBACK_COMPLETION_START_STATUS != 0)); then
-        dbtune_log error "Config bol obnoveny, ale systemctl start mariadb zlyhal"
+        dbtune_log error "$(dbtune_msg lifecycle_service_start_failed)"
         ((report_service_status == 0)) || return "$DBTUNE_ROLLBACK_COMPLETION_START_STATUS"
     fi
 }
@@ -1882,27 +1931,29 @@ dbtune_lifecycle_recover_if_needed() {
 dbtune_lifecycle_mark_unmeasured() {
     local history=${1:-}
     local report="$DBTUNE_STATE_DIR/report.md"
-    local stamp='BEZ MERANIA'
+    local stamp
+
+    stamp=$(dbtune_msg lifecycle_without_measurements) || return
 
     {
-        printf '# APPLY REPORT\n\n'
-        printf '**%s** - konfiguracia bola aplikovana cez interaktivny --force.\n' "$stamp"
+        dbtune_printf lifecycle_apply_report_title
+        dbtune_printf lifecycle_apply_report_forced "$stamp"
     } | dbtune_atomic_write "$history/apply-report.md" 600 || return 1
     if [[ -f $report ]]; then
-        printf '\n> **%s** - apply bol vynuteny bez kompletneho measurement/analysis artefaktu.\n' "$stamp" >>"$report" || return 1
+        dbtune_printf lifecycle_report_forced_note "$stamp" >>"$report" || return 1
     fi
-    dbtune_event apply_force measurement "$stamp" || true
+    dbtune_event apply_force measurement without_measurements ui_lang "$DBTUNE_I18N_LANGUAGE" || true
 }
 
 dbtune_lifecycle_print_runcloud_instructions() {
     local history=${1:-}
     local target=${2:-}
 
-    printf 'Config bol zapisany do %s.\n' "$target"
-    printf 'Restartujte cez RunCloud: Services -> MariaDB -> Restart.\n'
-    printf 'Pri zmene redo logu moze prvy start trvat dlhsie.\n'
-    printf 'Po restarte spustite: dbtune verify --post\n'
-    printf 'Nudzove doslovne prikazy: %s/ROLLBACK.txt\n' "$history"
+    dbtune_printf lifecycle_config_written "$target"
+    dbtune_printf lifecycle_runcloud_restart
+    dbtune_printf lifecycle_redo_start_delay
+    dbtune_printf lifecycle_run_verify
+    dbtune_printf lifecycle_emergency_commands "$history"
 }
 
 dbtune_lifecycle_after_manifest_check() {
@@ -1954,21 +2005,21 @@ dbtune_lifecycle_apply_snapshot() {
         "$target_topology" "$directory_identity" "$target_identity" "$target_hash" \
         "$parent_identities" "$previous_current") || return
     dbtune_lifecycle_capture_baseline "$history" || {
-        dbtune_log error "Nepodarilo sa ulozit baseline; config sa nezapisal"
+        dbtune_log error "$(dbtune_msg lifecycle_baseline_failed)"
         return 1
     }
     dbtune_lifecycle_publish_intent "$history" "$previous_state" "$previous_current" || return
     dbtune_lifecycle_fault_inject after_intent || return
     if ! dbtune_lifecycle_install_config "$proposal" "$target" "$target_topology" \
         "$directory_identity" "$target_identity" "$target_hash" "$parent_identities"; then
-        dbtune_log error "Atomicky zapis konfiguracie zlyhal"
+        dbtune_log error "$(dbtune_msg lifecycle_atomic_write_failed)"
         dbtune_lifecycle_recover_failed_apply "$history" "$previous_state" "$previous_current" install || true
         return 1
     fi
     dbtune_lifecycle_fault_inject after_config || return
     if ! dbtune_lifecycle_validate_target_path "$target" regular "$directory_identity" ||
         [[ $DBTUNE_LIFECYCLE_TARGET_HASH != "$(dbtune_sha256_file "$proposal")" ]]; then
-        dbtune_log error "Publikovany config nepresiel finalnou filesystem kontrolou"
+        dbtune_log error "$(dbtune_msg lifecycle_final_check_failed)"
         dbtune_lifecycle_recover_failed_apply "$history" "$previous_state" "$previous_current" publish || true
         return 65
     fi
@@ -2001,12 +2052,12 @@ dbtune_lifecycle_apply_snapshot() {
     fi
     dbtune_lifecycle_fault_inject after_state || return
     if ! dbtune_lifecycle_sync || ! dbtune_lifecycle_clear_intent "$history"; then
-        dbtune_log error "Apply bol publikovany, ale intent journal sa nepodarilo bezpecne finalizovat"
+        dbtune_log error "$(dbtune_msg lifecycle_intent_finalize_failed)"
         return 1
     fi
     if ((restart == 1)); then
         if ! "$systemctl_command" restart mariadb || ! "$systemctl_command" is-active --quiet mariadb; then
-            dbtune_log error "Restart MariaDB zlyhal; obnovujem povodny config a spustam sluzbu"
+            dbtune_log error "$(dbtune_msg lifecycle_restart_failed)"
             if dbtune_lifecycle_recover_failed_apply "$history" "$previous_state" "$previous_current" restart; then
                 if ! "$systemctl_command" start mariadb; then
                     dbtune_lifecycle_mark_recovery_required "$history" service_start
@@ -2018,7 +2069,9 @@ dbtune_lifecycle_apply_snapshot() {
     else
         dbtune_lifecycle_print_runcloud_instructions "$history" "$target"
     fi
-    dbtune_event apply_completed target "$target" history "$history" restart "$restart" force "$force" original "$had_original" || true
+    dbtune_event apply_completed target "$target" history "$history" \
+        restart "$(dbtune_lifecycle_bool "$restart")" force "$(dbtune_lifecycle_bool "$force")" \
+        original "$(dbtune_lifecycle_bool "$had_original")" ui_lang "$DBTUNE_I18N_LANGUAGE" || true
 }
 
 cmd_apply() {
@@ -2033,7 +2086,7 @@ cmd_apply() {
     fi
     proposal=$(dbtune_lifecycle_proposal)
     [[ -s $proposal ]] || {
-        dbtune_log error "Chyba navrh konfiguracie: $proposal"
+        dbtune_log error "$(dbtune_printf lifecycle_proposal_missing "$proposal")"
         return 66
     }
     snapshot=$(mktemp "$DBTUNE_STATE_DIR/.apply-proposal.XXXXXX") || return 1
@@ -2118,17 +2171,17 @@ dbtune_lifecycle_verify_target() {
     target=$(dbtune_lifecycle_manifest_value "$history" target) || return 65
     expected_hash=$(dbtune_lifecycle_manifest_value "$history" proposal_hash) || return 65
     if [[ ! -f $target || -L $target ]]; then
-        printf 'TARGET CHYBA: %s nie je regularny subor alebo je symlink\n' "$target"
+        dbtune_printf lifecycle_target_missing "$target"
         return 1
     fi
     links=$(dbtune_lifecycle_file_links "$target") || return 1
     if [[ $links != 1 ]]; then
-        printf 'TARGET CHYBA: %s nema ocakavanu hardlink topologiu (links=%s, ocakavane=1)\n' "$target" "$links"
+        dbtune_printf lifecycle_target_hardlink_error "$target" "$links"
         return 1
     fi
     read -r uid gid mode < <(dbtune_file_stat "$target") || return 1
     if [[ $uid != "$expected_uid" || $gid != "$expected_gid" || $mode != "$expected_mode" ]]; then
-        printf 'TARGET CHYBA: owner=%s:%s mode=%s, ocakavane=%s:%s %s\n' \
+        dbtune_printf lifecycle_target_metadata_error \
             "$uid" "$gid" "$mode" "$expected_uid" "$expected_gid" "$expected_mode"
         return 1
     fi
@@ -2136,17 +2189,20 @@ dbtune_lifecycle_verify_target() {
     snapshot_hash=$(dbtune_sha256_file "$history/proposed.cnf") || return
     actual_hash=$(dbtune_sha256_file "$target") || return
     if [[ $snapshot_hash != "$expected_hash" || $actual_hash != "$expected_hash" ]]; then
-        printf 'TARGET CHYBA: hash nasadeneho configu nezodpoveda apply snapshotu\n'
+        dbtune_printf lifecycle_target_hash_error
         return 1
     fi
-    printf 'TARGET OK: %s owner=%s:%s mode=%s hash=%s\n' "$target" "$uid" "$gid" "$mode" "$actual_hash"
+    dbtune_printf lifecycle_target_ok "$target" "$uid" "$gid" "$mode" "$actual_hash"
 }
 
 dbtune_lifecycle_verify_values() {
     local proposal=${1:-}
     local names='' separator='' name expected actual output_file query
     local -A expected_values=() actual_values=()
-    local failures=0
+    local failures=0 missing missing_upper
+
+    missing=$(dbtune_msg lifecycle_value_missing) || return
+    missing_upper=$(dbtune_msg lifecycle_value_missing_upper) || return
 
     while IFS=$'\t' read -r name expected; do
         [[ -n $name ]] || continue
@@ -2167,12 +2223,12 @@ dbtune_lifecycle_verify_values() {
 
     for name in "${!expected_values[@]}"; do
         expected=$(dbtune_lifecycle_canonical_value "${expected_values[$name]}")
-        actual=$(dbtune_lifecycle_canonical_value "${actual_values[$name]-<chyba>}")
+        actual=$(dbtune_lifecycle_canonical_value "${actual_values[$name]-$missing}")
         if [[ $expected != "$actual" ]]; then
-            printf 'MISMATCH %s: proposal=%s effective=%s\n' "$name" "${expected_values[$name]}" "${actual_values[$name]-CHYBA}"
+            dbtune_printf lifecycle_value_mismatch "$name" "${expected_values[$name]}" "${actual_values[$name]-$missing_upper}"
             failures=1
         else
-            printf 'OK %s=%s\n' "$name" "${actual_values[$name]}"
+            dbtune_printf lifecycle_value_ok "$name" "${actual_values[$name]}"
         fi
     done
     ((failures == 0))
@@ -2191,15 +2247,17 @@ dbtune_lifecycle_verify_health() {
     local baseline_status="$history/baseline-status.tsv"
     local current_status="$history/verify-status.tsv"
     local current_memory="$history/verify-memory.tsv"
-    local metric before value delta reset baseline_uptime current_uptime
+    local metric before value delta reset baseline_uptime current_uptime missing_upper
     local baseline_swap current_swap available total
     local status memory
     local failures=0
 
+    missing_upper=$(dbtune_msg lifecycle_value_missing_upper) || return
+
     if [[ -r $history/post-status.tsv ]]; then
         baseline_status="$history/post-status.tsv"
     elif [[ $mode == --24h ]]; then
-        dbtune_log error "verify --24h vyzaduje uspesny verify --post po restarte"
+        dbtune_log error "$(dbtune_msg lifecycle_verify_post_required)"
         return 66
     fi
     status=$(dbtune_lifecycle_capture_status) || return 1
@@ -2212,17 +2270,17 @@ dbtune_lifecycle_verify_health() {
     for metric in innodb_buffer_pool_wait_free innodb_log_waits aborted_connects; do
         before=$(dbtune_lifecycle_tsv_value "$baseline_status" "$metric")
         value=$(dbtune_lifecycle_tsv_value "$current_status" "$metric")
-        delta=CHYBA
-        reset=nie
+        delta=$(dbtune_msg lifecycle_value_missing_upper)
+        reset=false
         if [[ $before =~ ^[0-9]+$ && $value =~ ^[0-9]+$ && $baseline_uptime =~ ^[0-9]+$ && $current_uptime =~ ^[0-9]+$ ]]; then
             if ((current_uptime < baseline_uptime || value < before)); then
                 delta=$value
-                reset=ano
+                reset=true
             else
                 delta=$((value - before))
             fi
         fi
-        printf '%s baseline=%s current=%s delta=%s reset=%s\n' "$metric" "${before:-CHYBA}" "${value:-CHYBA}" "$delta" "$reset"
+        dbtune_printf lifecycle_health_line "$metric" "${before:-$missing_upper}" "${value:-$missing_upper}" "$delta" "$reset"
         if [[ ! $delta =~ ^[0-9]+$ ]] || ((delta != 0)); then
             failures=1
         fi
@@ -2231,7 +2289,7 @@ dbtune_lifecycle_verify_health() {
     current_swap=$(dbtune_lifecycle_tsv_value "$current_memory" swap_used_mb)
     available=$(dbtune_lifecycle_tsv_value "$current_memory" mem_available_mb)
     total=$(dbtune_lifecycle_tsv_value "$current_memory" mem_total_mb)
-    printf 'memory_available_mb=%s swap_used_mb=%s baseline_swap_used_mb=%s\n' "$available" "$current_swap" "$baseline_swap"
+    dbtune_printf lifecycle_memory_line "$available" "$current_swap" "$baseline_swap"
     if [[ ! $baseline_swap =~ ^[0-9]+$ || ! $current_swap =~ ^[0-9]+$ || ! $available =~ ^[0-9]+$ || ! $total =~ ^[0-9]+$ ]]; then
         failures=1
     elif ((current_swap > baseline_swap || available * 20 < total)); then
@@ -2247,7 +2305,7 @@ dbtune_lifecycle_verify_24h_comparison() {
     local metric before after delta
 
     [[ -r $baseline && -r $current ]] || return 66
-    printf 'METRIC\tBASELINE\tCURRENT\tDELTA_OR_RESET\n'
+    dbtune_printf lifecycle_verify_table_header
     while IFS=$'\t' read -r metric before; do
         after=$(dbtune_lifecycle_tsv_value "$current" "$metric")
         [[ $before =~ ^[0-9]+$ && $after =~ ^[0-9]+$ ]] || continue
@@ -2265,7 +2323,7 @@ cmd_verify() {
     local history proposal state failures=0
 
     if (($# != 1)) || [[ $mode != --post && $mode != --24h ]]; then
-        dbtune_log error "Pouzitie: dbtune verify --post|--24h"
+        dbtune_log error "$(dbtune_msg lifecycle_verify_usage)"
         return 64
     fi
     history=$(dbtune_lifecycle_read_current) || return
@@ -2296,7 +2354,7 @@ cmd_rollback() {
     local history previous_state rollback_intent
 
     (($# == 0)) || {
-        dbtune_log error "rollback nema volby"
+        dbtune_log error "$(dbtune_msg lifecycle_rollback_no_options)"
         return 64
     }
     rollback_intent=$(dbtune_lifecycle_rollback_intent_file)
@@ -2315,12 +2373,12 @@ cmd_rollback() {
 }
 
 cmd_status() {
-    local state target current_file history='-' rollback='nie' baseline='nie' restart_required='nie'
-    local recovery='nie' recovery_instruction='-' last_rollback='-'
+    local state target current_file history='-' rollback=false baseline=false restart_required=false
+    local recovery=false recovery_instruction='-' last_rollback='-'
     local candidate
 
     (($# == 0)) || {
-        dbtune_log error "status nema volby"
+        dbtune_log error "$(dbtune_msg lifecycle_status_no_options)"
         return 64
     }
     state=$(dbtune_state_read) || return
@@ -2337,14 +2395,14 @@ cmd_status() {
         done
     fi
     if [[ $history != - ]]; then
-        [[ -r $history/ROLLBACK.txt ]] && rollback=ano
-        [[ -r $history/baseline-status.tsv && -r $history/baseline-memory.tsv ]] && baseline=ano
-        [[ -r $history/RESTART_REQUIRED ]] && restart_required=ano
+        [[ -r $history/ROLLBACK.txt ]] && rollback=true
+        [[ -r $history/baseline-status.tsv && -r $history/baseline-memory.tsv ]] && baseline=true
+        [[ -r $history/RESTART_REQUIRED ]] && restart_required=true
         if [[ $state == recovery_required || $state == rollback_failed || -r $history/RECOVERY_REQUIRED || -r $history/ROLLBACK_FAILED ]]; then
-            recovery=ano
-            recovery_instruction="sudo dbtune rollback; manualne: $history/ROLLBACK.txt"
+            recovery=true
+            recovery_instruction=$(dbtune_printf lifecycle_recovery_manual "$history")
         elif [[ -r $history/SERVICE_START_FAILED ]]; then
-            recovery=ano
+            recovery=true
             recovery_instruction='sudo systemctl start mariadb'
         fi
     fi
@@ -2355,15 +2413,15 @@ cmd_status() {
         fi
     fi
     if [[ $state == rolled_back && $last_rollback != - ]]; then
-        [[ -r $last_rollback/RESTART_REQUIRED ]] && restart_required=ano
+        [[ -r $last_rollback/RESTART_REQUIRED ]] && restart_required=true
         if [[ -r $last_rollback/SERVICE_START_FAILED ]]; then
-            recovery=ano
+            recovery=true
             recovery_instruction='sudo systemctl start mariadb'
         fi
     fi
     printf 'state: %s\n' "$state"
     printf 'config_target: %s\n' "$target"
-    printf 'config_present: %s\n' "$([[ -f $target ]] && printf ano || printf nie)"
+    printf 'config_present: %s\n' "$([[ -f $target ]] && printf true || printf false)"
     printf 'apply_history: %s\n' "$history"
     printf 'baseline_present: %s\n' "$baseline"
     printf 'rollback_instructions: %s\n' "$rollback"

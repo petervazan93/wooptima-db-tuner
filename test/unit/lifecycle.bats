@@ -1,6 +1,7 @@
 #!/usr/bin/env bats
 
 setup() {
+    unset DBTUNE_UI_LANG
     BATS_TEST_TMPDIR=$(CDPATH='' cd -- "$BATS_TEST_TMPDIR" && pwd -P)
     export BATS_TEST_TMPDIR
     export DBTUNE_STATE_DIR="$BATS_TEST_TMPDIR/state"
@@ -45,7 +46,7 @@ setup() {
     source "$BATS_TEST_DIRNAME/../../lib/10-util.sh"
     source "$BATS_TEST_DIRNAME/../../lib/60-lifecycle.sh"
     source "$BATS_TEST_DIRNAME/../../lib/50-report.sh"
-    dbtune_i18n_set sk
+    dbtune_i18n_set en
     source "$BATS_TEST_DIRNAME/../../lib/90-main.sh"
     export DBTUNE_CONFIG_UID
     export DBTUNE_CONFIG_GID
@@ -289,7 +290,7 @@ run_publish_fixture() {
     run dbtune_with_lifecycle_lock wait test true
 
     [ "$status" -eq 65 ]
-    [[ "$output" == *"regularny subor"* ]]
+    [[ "$output" == *"safe regular file"* ]]
     [ "$(cat "$BATS_TEST_TMPDIR/lock-target")" = unchanged ]
     [ ! -e "$DBTUNE_RACE_LOCK_DIR" ]
 }
@@ -314,7 +315,7 @@ run_publish_fixture() {
     run dbtune_with_lifecycle_lock wait test true
 
     [ "$status" -eq 65 ]
-    [[ "$output" == *"links=2, ocakavane=1"* ]]
+    [[ "$output" == *"links=2, expected=1"* ]]
     [ ! -e "$DBTUNE_RACE_LOCK_DIR" ]
     [ -f "$BATS_TEST_TMPDIR/lock-alias" ]
 }
@@ -331,7 +332,7 @@ run_publish_fixture() {
     printf '# tampered\n' >>"$DBTUNE_STATE_DIR/proposed-99-zz-tuning.cnf"
     run cmd_apply
     [ "$status" -eq 65 ]
-    [[ "$output" == *"sa zmenil"* ]]
+    [[ "$output" == *"changed"* ]]
     [ ! -e "$DBTUNE_CONFIG_TARGET" ]
 }
 
@@ -342,7 +343,7 @@ run_publish_fixture() {
 
     run cmd_apply
     [ "$status" -eq 65 ]
-    [[ "$output" == *"Apply je zablokovany"* ]]
+    [[ "$output" == *"Apply is blocked"* ]]
     [ ! -e "$DBTUNE_CONFIG_TARGET" ]
 }
 
@@ -395,7 +396,7 @@ run_publish_fixture() {
 
     run cmd_apply
     [ "$status" -eq 65 ]
-    [[ "$output" == *"parent komponent"* ]]
+    [[ "$output" == *"parent component"* ]]
     [ ! -e "$BATS_TEST_TMPDIR/real-config/99-zz-tuning.cnf" ]
 }
 
@@ -405,7 +406,7 @@ run_publish_fixture() {
 
     run cmd_apply
     [ "$status" -eq 65 ]
-    [[ "$output" == *"povolenom adresari"* ]]
+    [[ "$output" == *"allowed directory"* ]]
     [ ! -e "$DBTUNE_CONFIG_TARGET" ]
 }
 
@@ -415,7 +416,7 @@ run_publish_fixture() {
 
     run cmd_apply
     [ "$status" -eq 65 ]
-    [[ "$output" == *"vlastnictvo alebo mode"* ]]
+    [[ "$output" == *"ownership or mode"* ]]
     [ "$(cat "$DBTUNE_CONFIG_TARGET")" = original ]
 }
 
@@ -425,7 +426,7 @@ run_publish_fixture() {
 
     run cmd_apply
     [ "$status" -eq 65 ]
-    [[ "$output" == *"viac hardlinkov"* ]]
+    [[ "$output" == *"multiple hard links"* ]]
     [ "$(cat "$DBTUNE_CONFIG_TARGET")" = original ]
     [ "$(cat "$BATS_TEST_TMPDIR/original-hardlink.cnf")" = original ]
 }
@@ -436,7 +437,7 @@ run_publish_fixture() {
 
     run cmd_apply
     [ "$status" -eq 65 ]
-    [[ "$output" == *"neocakavane vlastnictvo"* ]]
+    [[ "$output" == *"unexpected ownership"* ]]
     [ "$(cat "$DBTUNE_CONFIG_TARGET")" = original ]
 }
 
@@ -451,7 +452,7 @@ run_publish_fixture() {
 
     run cmd_apply
     [ "$status" -ne 0 ]
-    [[ "$output" == *"adresar bol pocas apply vymeneny"* ]]
+    [[ "$output" == *"directory was replaced during apply"* ]]
     [ ! -e "$BATS_TEST_TMPDIR/original-config-dir/99-zz-tuning.cnf" ]
     [ ! -e "$DBTUNE_CONFIG_TARGET" ]
 }
@@ -475,7 +476,7 @@ STUB
     run cmd_apply
 
     [ "$status" -ne 0 ]
-    [[ "$output" == *"config parent bol pocas publikovania vymeneny"* ]]
+    [[ "$output" == *"config parent was replaced during publication"* ]]
     [ ! -e "$DBTUNE_CONFIG_TARGET" ]
 }
 
@@ -495,7 +496,7 @@ STUB
     run cmd_apply
 
     [ "$status" -ne 0 ]
-    [[ "$output" == *"vymeneny"* || "$output" == *"nezodpoveda"* ]]
+    [[ "$output" == *"replaced"* || "$output" == *"does not match"* ]]
     [ "$(cat "$DBTUNE_CONFIG_TARGET")" = replacement ]
     [ "$(cat "$BATS_TEST_TMPDIR/original-target.cnf")" = original ]
 }
@@ -682,12 +683,13 @@ STUB
     assert_apply_a_restored_from_b
     grep -F '"event":"rollback_completed"' "$DBTUNE_STATE_DIR/events.log"
     grep -F '"restored_cycle_id":"'"$TEST_CYCLE_A"'"' "$DBTUNE_STATE_DIR/events.log"
+    grep -F '"restart_required":"true"' "$DBTUNE_STATE_DIR/events.log"
 
     run cmd_status
     [ "$status" -eq 0 ]
     [[ "$output" == *"apply_history: $TEST_HISTORY_A"* ]]
     [[ "$output" == *"last_rollback: $TEST_HISTORY_B"* ]]
-    [[ "$output" == *"runcloud_restart_required: ano"* ]]
+    [[ "$output" == *"runcloud_restart_required: true"* ]]
 }
 
 @test "rollback recovery after durable intent restores A without partial metadata" {
@@ -798,6 +800,48 @@ STUB
     [[ "$output" == *"TTY"* ]]
 }
 
+@test "English force confirmation accepts only its exact trusted phrase and records a stable ID" {
+    dbtune_i18n_set en
+    dbtune_lifecycle_is_interactive() { return 0; }
+
+    run dbtune_lifecycle_confirm_force <<<'APPLY WITHOUT MEASUREMENTS'
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *'Type exactly to continue: APPLY WITHOUT MEASUREMENTS'* ]]
+    grep -F '"event":"safety_confirmation"' "$(dbtune_events_file)"
+    grep -F '"confirmation_id":"apply_without_measurements"' "$(dbtune_events_file)"
+    grep -F '"ui_lang":"en"' "$(dbtune_events_file)"
+    ! grep -F 'APPLY WITHOUT MEASUREMENTS' "$(dbtune_events_file)"
+}
+
+@test "Slovak force confirmation accepts only its exact trusted phrase and records a stable ID" {
+    dbtune_i18n_set sk
+    dbtune_lifecycle_is_interactive() { return 0; }
+
+    run dbtune_lifecycle_confirm_force <<<'APLIKUJ BEZ MERANIA'
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *'Pre pokračovanie napíšte presne: APLIKUJ BEZ MERANIA'* ]]
+    grep -F '"confirmation_id":"apply_without_measurements"' "$(dbtune_events_file)"
+    grep -F '"ui_lang":"sk"' "$(dbtune_events_file)"
+    ! grep -F 'APLIKUJ BEZ MERANIA' "$(dbtune_events_file)"
+}
+
+@test "force confirmation rejects phrases from the wrong language and different case" {
+    dbtune_lifecycle_is_interactive() { return 0; }
+    dbtune_i18n_set en
+
+    run dbtune_lifecycle_confirm_force <<<'APLIKUJ BEZ MERANIA'
+    [ "$status" -eq 77 ]
+    run dbtune_lifecycle_confirm_force <<<'apply without measurements'
+    [ "$status" -eq 77 ]
+
+    dbtune_i18n_set sk
+    run dbtune_lifecycle_confirm_force <<<'APPLY WITHOUT MEASUREMENTS'
+    [ "$status" -eq 77 ]
+    [ ! -e "$(dbtune_events_file)" ]
+}
+
 @test "apply requires independent backup evidence outside a TTY" {
     rm "$(dbtune_backup_evidence_file)"
     run cmd_apply
@@ -868,15 +912,97 @@ STUB
     write_backup_evidence missing
     run cmd_apply
     [ "$status" -eq 65 ]
-    [[ "$output" == *"potvrdzuje absenciu"* ]]
+    [[ "$output" == *"confirms that no backup exists"* ]]
     [ ! -e "$DBTUNE_CONFIG_TARGET" ]
 }
 
 @test "backup fallback requires its own exact interactive phrase" {
+    dbtune_i18n_set sk
     dbtune_lifecycle_is_interactive() { return 0; }
     run dbtune_lifecycle_check_backup "" <<<"POTVRDZUJEM OBNOVITELNU ZALOHU"
     [ "$status" -eq 0 ]
-    [[ "$output" == *"Chyba autoritativny dokaz"* ]]
+    [[ "$output" == *"Chýba autoritatívny dôkaz"* ]]
+}
+
+@test "English backup confirmation accepts only its exact trusted phrase and records a stable ID" {
+    dbtune_i18n_set en
+    dbtune_lifecycle_is_interactive() { return 0; }
+
+    run dbtune_lifecycle_check_backup "" <<<'I CONFIRM A RESTORABLE BACKUP'
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *'Type exactly to continue: I CONFIRM A RESTORABLE BACKUP'* ]]
+    grep -F '"confirmation_id":"restorable_backup"' "$(dbtune_events_file)"
+    grep -F '"ui_lang":"en"' "$(dbtune_events_file)"
+    ! grep -F 'I CONFIRM A RESTORABLE BACKUP' "$(dbtune_events_file)"
+}
+
+@test "Slovak backup confirmation accepts only its exact trusted phrase and records a stable ID" {
+    dbtune_i18n_set sk
+    dbtune_lifecycle_is_interactive() { return 0; }
+
+    run dbtune_lifecycle_check_backup "" <<<'POTVRDZUJEM OBNOVITELNU ZALOHU'
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *'Pre pokračovanie napíšte presne: POTVRDZUJEM OBNOVITELNU ZALOHU'* ]]
+    grep -F '"confirmation_id":"restorable_backup"' "$(dbtune_events_file)"
+    grep -F '"ui_lang":"sk"' "$(dbtune_events_file)"
+    ! grep -F 'POTVRDZUJEM OBNOVITELNU ZALOHU' "$(dbtune_events_file)"
+}
+
+@test "backup confirmation rejects the exact phrase from the wrong language" {
+    dbtune_lifecycle_is_interactive() { return 0; }
+    dbtune_i18n_set en
+
+    run dbtune_lifecycle_check_backup "" <<<'POTVRDZUJEM OBNOVITELNU ZALOHU'
+    [ "$status" -eq 77 ]
+
+    dbtune_i18n_set sk
+    run dbtune_lifecycle_check_backup "" <<<'I CONFIRM A RESTORABLE BACKUP'
+    [ "$status" -eq 77 ]
+    [ ! -e "$(dbtune_events_file)" ]
+}
+
+@test "rollback instructions and apply reports follow the selected language" {
+    dbtune_i18n_set en
+    run cmd_apply
+    [ "$status" -eq 0 ]
+    history=$(cat "$DBTUNE_STATE_DIR/apply/current")
+    grep -F '# Filesystem-first rollback; does not require a working MariaDB or dbtune.' "$history/ROLLBACK.txt"
+    grep -F 'Configuration restored; restart MariaDB through the RunCloud panel.' "$history/ROLLBACK.txt"
+    apply_event=$(grep -F '"event":"apply_completed"' "$(dbtune_events_file)")
+    [[ "$apply_event" == *'"restart":"false"'* ]]
+    [[ "$apply_event" == *'"force":"false"'* ]]
+    [[ "$apply_event" == *'"original":"false"'* ]]
+
+    mkdir "$BATS_TEST_TMPDIR/forced-en"
+    run dbtune_lifecycle_mark_unmeasured "$BATS_TEST_TMPDIR/forced-en"
+    [ "$status" -eq 0 ]
+    grep -F '# APPLY REPORT' "$BATS_TEST_TMPDIR/forced-en/apply-report.md"
+    grep -F '**WITHOUT MEASUREMENTS** - the configuration was applied with interactive --force.' "$BATS_TEST_TMPDIR/forced-en/apply-report.md"
+    force_event=$(grep -F '"event":"apply_force"' "$(dbtune_events_file)")
+    [[ "$force_event" == *'"measurement":"without_measurements"'* ]]
+    [[ "$force_event" == *'"ui_lang":"en"'* ]]
+    [[ "$force_event" != *'"status_id"'* ]]
+    [[ "$force_event" != *'WITHOUT MEASUREMENTS'* ]]
+
+    dbtune_i18n_set sk
+    mkdir "$BATS_TEST_TMPDIR/forced-sk"
+    run dbtune_lifecycle_mark_unmeasured "$BATS_TEST_TMPDIR/forced-sk"
+    [ "$status" -eq 0 ]
+    grep -F '# REPORT NASADENIA' "$BATS_TEST_TMPDIR/forced-sk/apply-report.md"
+    grep -F '**BEZ MERANIA** - konfigurácia bola aplikovaná cez interaktívny --force.' "$BATS_TEST_TMPDIR/forced-sk/apply-report.md"
+}
+
+@test "Slovak rollback instructions use the selected language" {
+    dbtune_i18n_set sk
+
+    run cmd_apply
+
+    [ "$status" -eq 0 ]
+    history=$(cat "$DBTUNE_STATE_DIR/apply/current")
+    grep -F '# Filesystem-first rollback; nevyžaduje funkčnú MariaDB ani dbtune.' "$history/ROLLBACK.txt"
+    grep -F 'Konfigurácia bola obnovená; reštartujte MariaDB cez RunCloud panel.' "$history/ROLLBACK.txt"
 }
 
 @test "apply and verify post preserve lifecycle artifacts" {
@@ -921,14 +1047,14 @@ STUB
     rm "$DBTUNE_CONFIG_TARGET"
     run cmd_verify --post
     [ "$status" -ne 0 ]
-    [[ "$output" == *"TARGET CHYBA"* ]]
+    [[ "$output" == *"TARGET ERROR"* ]]
 
     cp "$history/proposed.cnf" "$DBTUNE_CONFIG_TARGET"
     printf '# changed\n' >>"$DBTUNE_CONFIG_TARGET"
     chmod 644 "$DBTUNE_CONFIG_TARGET"
     run cmd_verify --post
     [ "$status" -ne 0 ]
-    [[ "$output" == *"hash nasadeneho configu"* ]]
+    [[ "$output" == *"deployed configuration hash"* ]]
 
     rm "$DBTUNE_CONFIG_TARGET"
     ln -s "$history/proposed.cnf" "$DBTUNE_CONFIG_TARGET"
@@ -956,7 +1082,7 @@ STUB
     run cmd_verify --post
 
     [ "$status" -ne 0 ]
-    [[ "$output" == *"hardlink topologiu"* ]]
+    [[ "$output" == *"hard-link topology"* ]]
     [ "$(dbtune_state_read)" = applied ]
     cmp "$DBTUNE_CONFIG_TARGET" "$BATS_TEST_TMPDIR/verify-target-alias.cnf"
 }
@@ -970,7 +1096,7 @@ STUB
     run cmd_rollback
 
     [ "$status" -ne 0 ]
-    [[ "$output" == *"viac hardlinkov"* ]]
+    [[ "$output" == *"multiple hard links"* ]]
     cmp "$DBTUNE_CONFIG_TARGET" "$BATS_TEST_TMPDIR/deployed-before-rollback.cnf"
     cmp "$BATS_TEST_TMPDIR/rollback-target-alias.cnf" "$BATS_TEST_TMPDIR/deployed-before-rollback.cnf"
     [ "$(dbtune_lifecycle_file_links "$DBTUNE_CONFIG_TARGET")" = 2 ]
@@ -982,18 +1108,18 @@ STUB
 
     run cmd_verify --post
     [ "$status" -eq 0 ]
-    [[ "$output" == *"innodb_log_waits baseline=7 current=7 delta=0 reset=nie"* ]]
+    [[ "$output" == *"innodb_log_waits baseline=7 current=7 delta=0 reset=false"* ]]
 
     dbtune_state_write applied
     export STUB_STATUS=$'uptime\t110\ninnodb_buffer_pool_wait_free\t5\ninnodb_log_waits\t8\naborted_connects\t9'
     run cmd_verify --post
     [ "$status" -ne 0 ]
-    [[ "$output" == *"innodb_log_waits baseline=7 current=8 delta=1 reset=nie"* ]]
+    [[ "$output" == *"innodb_log_waits baseline=7 current=8 delta=1 reset=false"* ]]
 
     export STUB_STATUS=$'uptime\t10\ninnodb_buffer_pool_wait_free\t0\ninnodb_log_waits\t0\naborted_connects\t0'
     run cmd_verify --post
     [ "$status" -eq 0 ]
-    [[ "$output" == *"innodb_log_waits baseline=7 current=0 delta=0 reset=ano"* ]]
+    [[ "$output" == *"innodb_log_waits baseline=7 current=0 delta=0 reset=true"* ]]
 }
 
 @test "verify 24h does not hide growth equal to a pre-restart counter" {
@@ -1005,7 +1131,7 @@ STUB
     export STUB_STATUS=$'uptime\t1000\ninnodb_buffer_pool_wait_free\t100\ninnodb_log_waits\t100\naborted_connects\t100'
     run cmd_verify --24h
     [ "$status" -ne 0 ]
-    [[ "$output" == *"innodb_log_waits baseline=0 current=100 delta=100 reset=nie"* ]]
+    [[ "$output" == *"innodb_log_waits baseline=0 current=100 delta=100 reset=false"* ]]
     [ "$(dbtune_state_read)" = applied ]
 }
 
@@ -1166,7 +1292,7 @@ STUB
 
     run cmd_status
     [ "$status" -eq 0 ]
-    [[ "$output" == *"recovery_required: ano"* ]]
+    [[ "$output" == *"recovery_required: true"* ]]
     [[ "$output" == *"sudo dbtune rollback"* ]]
     [[ "$output" == *"$history/ROLLBACK.txt"* ]]
 }
@@ -1200,7 +1326,56 @@ STUB
     run cmd_status
     [ "$status" -eq 0 ]
     [[ "$output" == *"state: proposed"* ]]
-    [[ "$output" == *"config_present: nie"* ]]
+    [[ "$output" == *"config_present: false"* ]]
+}
+
+@test "status booleans remain true or false in both interface languages" {
+    dbtune_i18n_set en
+    run cmd_status
+    [ "$status" -eq 0 ]
+    [[ "$output" == *$'config_present: false'* ]]
+    [[ "$output" == *$'baseline_present: false'* ]]
+    [[ "$output" == *$'rollback_available: false'* ]]
+    [[ "$output" == *$'recovery_required: false'* ]]
+    [[ "$output" != *': ano'* && "$output" != *': nie'* ]]
+
+    dbtune_i18n_set sk
+    run cmd_status
+    [ "$status" -eq 0 ]
+    [[ "$output" == *$'config_present: false'* ]]
+    [[ "$output" == *$'baseline_present: false'* ]]
+    [[ "$output" == *$'rollback_available: false'* ]]
+    [[ "$output" == *$'recovery_required: false'* ]]
+    [[ "$output" != *': ano'* && "$output" != *': nie'* ]]
+}
+
+@test "verify output and recovery explanations follow the selected language" {
+    dbtune_i18n_set en
+    run cmd_apply
+    [ "$status" -eq 0 ]
+    rm "$DBTUNE_CONFIG_TARGET"
+
+    run cmd_verify --post
+    [ "$status" -ne 0 ]
+    [[ "$output" == *'TARGET ERROR:'* ]]
+
+    dbtune_i18n_set sk
+    run cmd_verify --post
+    [ "$status" -ne 0 ]
+    [[ "$output" == *'CHYBA CIEĽA:'* ]]
+
+    history=$(cat "$DBTUNE_STATE_DIR/apply/current")
+    dbtune_state_write recovery_required
+    printf 'phase\ttest\n' >"$history/RECOVERY_REQUIRED"
+    dbtune_i18n_set en
+    run cmd_status
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"recovery_instruction: sudo dbtune rollback; manually: $history/ROLLBACK.txt"* ]]
+
+    dbtune_i18n_set sk
+    run cmd_status
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"recovery_instruction: sudo dbtune rollback; manuálne: $history/ROLLBACK.txt"* ]]
 }
 
 @test "paused apply deploys its verified snapshot and serializes concurrent propose" {

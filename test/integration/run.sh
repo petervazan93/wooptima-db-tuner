@@ -59,9 +59,10 @@ integration_smoke() {
     '
 }
 
-integration_dbtune() {
+integration_dbtune_language() {
     local service=$1
-    shift
+    local ui_lang=$2
+    shift 2
 
     integration_compose exec -T "$service" env \
         PATH=/var/lib/dbtune-bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
@@ -76,12 +77,57 @@ integration_dbtune() {
         DBTUNE_MIN_APPLY_SAMPLES=5 \
         DBTUNE_NOW_HHMM=1200 \
         DBTUNE_NOW_EPOCH=1785578400 \
+        DBTUNE_UI_LANG="$ui_lang" \
         /usr/local/bin/dbtune "$@"
+}
+
+integration_dbtune() {
+    local service=$1
+    shift
+
+    integration_dbtune_language "$service" "${DBTUNE_UI_LANG:-en}" "$@"
+}
+
+integration_assert_report_language() {
+    local service=$1
+    local ui_lang=$2
+    local title
+
+    case $ui_lang in
+        en) title='# dbtune report' ;;
+        sk) title='# dbtune správa' ;;
+        *) return 64 ;;
+    esac
+    # shellcheck disable=SC2016
+    integration_compose exec -T "$service" env EXPECTED_LANG="$ui_lang" EXPECTED_TITLE="$title" sh -eu -c '
+        grep -Fx "$EXPECTED_TITLE" /var/lib/dbtune/report.md >/dev/null
+        grep -F "\"report.language\":\"$EXPECTED_LANG\"" /var/lib/dbtune/report.json >/dev/null
+    '
+}
+
+integration_proposal_records() {
+    local service=$1
+
+    # shellcheck disable=SC2016
+    integration_compose exec -T "$service" awk '
+        /^[[:space:]]*\[/ { active=($0 ~ /^[[:space:]]*\[mysqld\][[:space:]]*$/); next }
+        active && /^[[:space:]]*[A-Za-z][A-Za-z0-9_-]*[[:space:]]*=/ {
+            line=$0
+            sub(/[[:space:]]*[#;].*$/, "", line)
+            split(line, fields, "=")
+            key=fields[1]
+            value=substr(line, index(line, "=") + 1)
+            gsub(/[[:space:]]/, "", key)
+            gsub(/-/, "_", key)
+            gsub(/^[[:space:]]+|[[:space:]]+$/, "", value)
+            print tolower(key) "\t" value
+        }
+    ' /var/lib/dbtune/proposed-99-zz-tuning.cnf | LC_ALL=C sort
 }
 
 integration_lifecycle() {
     local service=$1
-    local audit_output
+    local audit_output proposal_en proposal_sk
 
     printf 'integration: %s dbtune lifecycle\n' "$service"
     integration_compose exec -T "$service" sh -eu -c '
@@ -127,7 +173,17 @@ integration_lifecycle() {
     done
     integration_dbtune "$service" collect stop >/dev/null || return 1
     integration_dbtune "$service" analyze --min-samples 5 || return 1
+    integration_dbtune_language "$service" en report >/dev/null || return 1
+    integration_assert_report_language "$service" en || return 1
+    integration_dbtune_language "$service" en propose >/dev/null || return 1
+    proposal_en=$(integration_proposal_records "$service") || return 1
+    integration_dbtune_language "$service" sk report >/dev/null || return 1
+    integration_assert_report_language "$service" sk || return 1
+    integration_dbtune_language "$service" sk propose >/dev/null || return 1
+    proposal_sk=$(integration_proposal_records "$service") || return 1
+    [[ -n $proposal_en && $proposal_en == "$proposal_sk" ]] || return 1
     integration_dbtune "$service" report >/dev/null || return 1
+    integration_assert_report_language "$service" "${DBTUNE_UI_LANG:-en}" || return 1
     integration_dbtune "$service" propose >/dev/null || return 1
     integration_dbtune "$service" apply >/dev/null || return 1
     integration_compose restart "$service" || return 1
