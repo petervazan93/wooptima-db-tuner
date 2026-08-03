@@ -1,3 +1,4 @@
 dist/
 pilot-artifacts/
+.worktrees/
 .DS_Store
