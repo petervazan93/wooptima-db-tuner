@@ -35,7 +35,7 @@ while [ "$#" -gt 0 ]; do
     fi
     shift
 done
-if [ -n "$source_ref" ] && [ "$source_ref" != "${STUB_ATTESTATION_SOURCE_REF:-refs/tags/v0.2.0}" ]; then
+if [ -n "$source_ref" ] && [ "$source_ref" != "${STUB_ATTESTATION_SOURCE_REF:-refs/tags/v0.3.0}" ]; then
     exit 1
 fi
 STUB
@@ -43,7 +43,7 @@ cat >"$STUB_BIN/curl" <<'STUB'
 #!/bin/sh
 case " $* " in
     *' https://api.github.com/repos/petervazan93/wooptima-db-tuner/releases/latest '*)
-        printf '{"tag_name":"%s"}\n' "${STUB_RELEASE_TAG:-v0.2.0}"
+        printf '{"tag_name":"%s"}\n' "${STUB_RELEASE_TAG:-v0.3.0}"
         exit 0
         ;;
 esac
@@ -112,11 +112,11 @@ bats::on_failure() {
 
     [ "$status" -eq 0 ]
     [ -x "$INSTALL_DIR/dbtune" ]
-    [ "$("$INSTALL_DIR/dbtune" version)" = 'dbtune 0.2.0' ]
+    [ "$("$INSTALL_DIR/dbtune" version)" = 'dbtune 0.3.0' ]
     [[ "$output" == *'SHA-256'* || "$output" == *'hotovo'* ]]
     grep -F -- '--repo petervazan93/wooptima-db-tuner' "$ATTESTATION_LOG"
     grep -F -- '--signer-workflow petervazan93/wooptima-db-tuner/.github/workflows/release.yml' "$ATTESTATION_LOG"
-    grep -F -- '--source-ref refs/tags/v0.2.0' "$ATTESTATION_LOG"
+    grep -F -- '--source-ref refs/tags/v0.3.0' "$ATTESTATION_LOG"
 }
 
 @test "installer rejects a cross-repository override before download or verification" {
@@ -138,7 +138,7 @@ bats::on_failure() {
     cat >"$RELEASE_DIR/dbtune" <<'ARTIFACT'
 #!/usr/bin/env bash
 printf '%s\n' executed >"$ARTIFACT_EXECUTION_MARKER"
-if [[ ${1:-} == version ]]; then printf '%s\n' 'dbtune 0.2.0'; else exit 64; fi
+if [[ ${1:-} == version ]]; then printf '%s\n' 'dbtune 0.3.0'; else exit 64; fi
 ARTIFACT
     chmod +x "$RELEASE_DIR/dbtune"
     if command -v sha256sum >/dev/null 2>&1; then
@@ -158,7 +158,7 @@ ARTIFACT
     [[ "$output" == *'attestation overenie zlyhalo'* ]]
     [ ! -e "$execution_marker" ]
     [ ! -e "$INSTALL_DIR/dbtune" ]
-    grep -F -- '--source-ref refs/tags/v0.2.0' "$ATTESTATION_LOG"
+    grep -F -- '--source-ref refs/tags/v0.3.0' "$ATTESTATION_LOG"
 }
 
 @test "installer rejects an attestation failure without publishing a binary" {
