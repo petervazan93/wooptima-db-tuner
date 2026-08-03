@@ -48,7 +48,7 @@ audit -> collect -> analyze -> report -> propose -> apply -> verify
 | `collect` | Samples workload behavior for 7 days by default and preserves the selected interface language for unattended completion. |
 | `analyze` | Evaluates valid samples and current values against the versioned tuning rules. |
 | `report` / `propose` | Produces operator-reviewable findings, read-only diagnostic actions, and a hash-bound CNF proposal. |
-| `apply` | Revalidates live values, backup evidence, provenance, target safety, and configuration before an atomic publish. |
+| `apply` | Runs pre-publication live-value, provenance, backup, target, and topology checks; atomically publishes the candidate, then runs daemon configuration validation. A validation failure restores the exact prior target or absent topology, or enters recovery if restoration cannot complete. |
 | `verify` / `rollback` | Checks the deployed snapshot after restart or restores the prior filesystem state without requiring SQL. |
 
 Every successful audit creates a new `run_id`, archives the previous active cycle, and invalidates its downstream measurement and proposal artifacts. Existing apply and recovery history remains available.
@@ -73,7 +73,7 @@ An authoritative audit requires complete `mariadb`, `hardware`, `applications`, 
 - **Require measurements for normal apply.** The normal path expects state `proposed`, at least 288 valid samples, and a matching proposal manifest.
 - **Treat backup status independently.** Fresh authoritative backup evidence is checked at apply time. Confirmed missing, stale, future, or malformed evidence blocks apply; only an absent artifact or a valid `unknown` artifact can enter a separate exact TTY confirmation path.
 - **Keep hard stops in force mode.** `--force` can bypass the measurement/analysis-manifest requirement and the local time window, but not live-value validation, Galera, mydumper, backup, target, configuration-validation, or rollback guards.
-- **Publish and recover atomically.** Apply validates ownership, modes, links, parent identity, and MariaDB syntax before publishing the managed CNF with Linux atomic rename primitives. Apply history, rollback instructions, and crash-recovery intent are retained.
+- **Publish atomically, then validate and recover.** Before publication, apply checks ownership, modes, links, parent identity, target topology, live values, provenance, and backup evidence. It atomically publishes the complete candidate with Linux rename primitives, then runs daemon configuration validation. A validation failure uses the same guarded atomic path to restore the exact prior target or absent topology; if restoration or bookkeeping cannot complete, durable intent and recovery state preserve the recovery path.
 - **Make restart explicit.** Apply does not restart MariaDB unless `--restart` is supplied. The normal RunCloud workflow uses a manual panel restart followed by `verify --post` and later `verify --24h`.
 
 Read the full operational contract in the [rollout runbook](docs/RUNBOOK.md) before using `apply`.
