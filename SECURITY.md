@@ -24,11 +24,15 @@ less install.sh
 sudo sh install.sh --version "$release"
 ```
 
-The release can be pinned with `--version vX.Y.Z` or `DBTUNE_RELEASE=vX.Y.Z`. Neither `DBTUNE_VERSION` nor another runtime variable overrides the artifact's internal version. During its version check, the installer removes version/program override variables and never automatically runs audit, collection, apply, or restart. The currently published release is `v0.3.0`, and the immutable artifact version remains `0.3.0` until the separate v0.4.0 release is prepared.
+The release can be pinned with `--version vX.Y.Z` or `DBTUNE_RELEASE=vX.Y.Z`. Neither `DBTUNE_VERSION` nor another runtime variable overrides the artifact's internal version. During its version check, the installer removes version/program override variables and never automatically runs audit, collection, apply, or restart. The currently published release is `v0.3.0`, and its immutable artifact version is `0.3.0`.
+
+The commands above install the published v0.3.0 artifact; they do not provide the upcoming v0.4.0 interface or report contracts. In particular, the published v0.3.0 artifact does not implement the `DBTUNE_UI_LANG` selector or the `fleet-v3` report schema described for the current source branch.
 
 The release workflow creates one SLSA provenance statement with three subjects: `dbtune`, `dbtune.sha256`, and `install.sh`. `dbtune-attestation.jsonl` is a published offline bundle, not a subject. `dbtune.sha256` contains the digest of `dbtune`. The manual preflight verifies the `install.sh` subject; the installer checks the checksum and verifies the `dbtune` subject against the upstream repository, owner, signer workflow, exact tag, and GitHub-hosted runner policy.
 
-The installer and executable default to English. Set `DBTUNE_UI_LANG=sk` explicitly for the Slovak executable interface. Only `en` and `sk` are accepted; an unsupported non-empty value is rejected with exit status 64 before command dispatch or installer trust checks. The selected language never changes repository, provenance, checksum, publication, or runtime safety validation.
+### Upcoming v0.4.0 source contract
+
+The current source branch's upcoming v0.4.0 installer and executable default to English. Set `DBTUNE_UI_LANG=sk` explicitly for the Slovak executable interface. Only `en` and `sk` are accepted; an unsupported non-empty value is rejected with exit status 64 before command dispatch or installer trust checks. The selected language never changes repository, provenance, checksum, publication, or runtime safety validation. These statements apply to the upcoming v0.4.0 source contract, not to the published v0.3.0 artifacts installed above.
 
 ## Reporting issues
 

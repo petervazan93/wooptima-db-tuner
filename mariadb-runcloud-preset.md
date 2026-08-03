@@ -391,7 +391,7 @@ log_slow_verbosity             = query_plan
 
 # -- Query cache: INTENTIONALLY NOT SET ------------------------------------
 # Decide from measurement (Step 0). Disable ONLY if:
-#   hit rate < 20%  OR  Threads_running is commonly > 8
+#   hit rate < 20%  OR  Threads_running p95 > 8
 # query_cache_type = 0
 # query_cache_size = 0
 ```
@@ -536,8 +536,13 @@ not a regression.
 
 ```bash
 sudo mv /etc/mysql/mariadb.conf.d/99-zz-tuning.cnf /root/
-sudo systemctl start mariadb     # if it did not start
+sudo systemctl start mariadb     # only if MariaDB is inactive
 ```
+
+If MariaDB is already running, restart it through the RunCloud panel at
+*Services -> MariaDB -> Restart*. `systemctl start` is then a no-op, and the deployed
+runtime values remain effective until that restart. If MariaDB is inactive, the
+`systemctl start mariadb` command above starts it with the restored configuration.
 
 This is why the configuration uses a separate file rather than editing
 `conf.d/runcloud.cnf`: rollback is one `mv`, without reconstructing original values.
@@ -629,11 +634,11 @@ every 3 hours is unnecessarily frequent.
 
 RunCloud enables `query_cache_size=128M`, `query_cache_type=1`.
 
-| Hit rate | Threads_running | Verdict |
+| Hit rate | Threads_running p95 | Verdict |
 |---|---|---|
 | < 20% | any | disable |
-| > 20% | commonly < 8 | keep enabled |
-| > 20% | commonly > 8 | disable; the mutex costs more than the benefit |
+| >= 20% | <= 8 | keep enabled |
+| >= 20% | > 8 | disable; the mutex costs more than the benefit |
 
 **Warning:** `query_cache_type = 0` **at startup** means it cannot be enabled at runtime.
 Returning to it requires a restart.
@@ -776,7 +781,7 @@ ALTER TABLE wp_postmeta ADD INDEX idx_mk_mv (meta_key(50), meta_value(15));
 Check whether one already exists; plugins such as WP All Import add them themselves:
 
 ```sql
-SELECT INDEX_NAME, GROUP_CONCAT(CONCAT(COLUMN_NAME,IFNULL(CONCAT('(',SUB_PART,')'),'')
+SELECT INDEX_NAME, GROUP_CONCAT(CONCAT(COLUMN_NAME,IFNULL(CONCAT('(',SUB_PART,')'),''))
        ORDER BY SEQ_IN_INDEX) cols
 FROM information_schema.STATISTICS
 WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='wp_postmeta' GROUP BY INDEX_NAME;

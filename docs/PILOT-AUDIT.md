@@ -92,7 +92,7 @@ Do not run another subcommand after termination. Evaluate the local artifacts an
 The binary may remain in the root-only directory until a decision is made. If the pilot is stopped:
 
 ```bash
-ssh root@SERVER 'rm -rf /root/dbtune-pilot /var/lib/dbtune'
+ssh root@SERVER 'rm -rf /root/dbtune-pilot'
 ```
 
-Run cleanup only after downloading the required audit artifacts.
+Run cleanup only after downloading the required audit artifacts. This default cleanup intentionally leaves `/var/lib/dbtune` untouched because it may contain apply or recovery history from before the pilot. Do not remove that state directory unless you have independently proved that this pilot created it from an absent path and that it contains no apply or recovery history.
