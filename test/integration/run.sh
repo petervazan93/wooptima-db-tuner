@@ -26,7 +26,7 @@ integration_wait_healthy() {
         sleep 2
         ((attempts += 1))
     done
-    printf 'integration: %s nie je healthy\n' "$service" >&2
+    printf 'integration: %s is not healthy\n' "$service" >&2
     return 1
 }
 
@@ -148,7 +148,7 @@ integration_lifecycle() {
         chmod 600 /var/lib/dbtune/backup-evidence.tsv
     ' || return 1
     if ! audit_output=$(integration_dbtune "$service" audit); then
-        printf 'integration: %s audit nie je autoritativny\n%s\n' "$service" "$audit_output" >&2
+        printf 'integration: %s audit is not authoritative\n%s\n' "$service" "$audit_output" >&2
         # shellcheck disable=SC2016
         integration_compose exec -T "$service" awk -F '\t' \
             '$1 ~ /^audit\.(overall_status|failed_sections|partial_sections|affected_domains|section\.)/ {print}' \
@@ -205,18 +205,18 @@ integration_main() {
 
     if ! command -v docker >/dev/null 2>&1 || ! docker info >/dev/null 2>&1; then
         if [[ -n ${CI:-} && ${CI:-} != 0 && ${CI:-} != false ]] || [[ ${DBTUNE_REQUIRE_INTEGRATION:-0} == 1 ]]; then
-            printf 'integration: FAIL (Docker engine nie je dostupny v povinnom rezime)\n' >&2
+            printf 'integration: FAIL (Docker engine is unavailable in required mode)\n' >&2
             return 1
         fi
-        printf 'integration: SKIP (Docker engine nie je dostupny)\n'
+        printf 'integration: SKIP (Docker engine is unavailable)\n'
         return 0
     fi
     if ! docker compose version >/dev/null 2>&1 && ! command -v docker-compose >/dev/null 2>&1; then
         if [[ -n ${CI:-} && ${CI:-} != 0 && ${CI:-} != false ]] || [[ ${DBTUNE_REQUIRE_INTEGRATION:-0} == 1 ]]; then
-            printf 'integration: FAIL (Docker Compose nie je dostupny v povinnom rezime)\n' >&2
+            printf 'integration: FAIL (Docker Compose is unavailable in required mode)\n' >&2
             return 1
         fi
-        printf 'integration: SKIP (Docker alebo docker compose nie je dostupny)\n'
+        printf 'integration: SKIP (Docker and docker compose are unavailable)\n'
         return 0
     fi
     trap 'integration_compose down -v >/dev/null 2>&1 || true' EXIT

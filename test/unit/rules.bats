@@ -323,6 +323,32 @@ write_current_audit_manifest() {
     [[ "$output" == *'threads_running_p95=2.00'* ]]
 }
 
+@test "analysis diagnostics follow the selected interface language" {
+    DBTUNE_LOG_LEVEL=error
+    make_audit "$BATS_TEST_TMPDIR/audit.tsv"
+    make_samples "$BATS_TEST_TMPDIR/samples.tsv" 30 2 1
+    append_malformed_samples "$BATS_TEST_TMPDIR/samples.tsv"
+    dbtune_i18n_set en
+
+    run dbtune_rules_analyze "$BATS_TEST_TMPDIR/audit.tsv" "$BATS_TEST_TMPDIR/samples.tsv" "" "" "" 2
+    [ "$status" -eq 65 ]
+    [[ "$output" == *'rejected samples: 4'* ]]
+    [[ "$output" == *'too few samples: 1, minimum: 2'* ]]
+
+    run cmd_analyze --min-samples 0
+    [ "$status" -eq 64 ]
+    [[ "$output" == *'--min-samples must be a positive integer'* ]]
+
+    run cmd_analyze --unknown
+    [ "$status" -eq 64 ]
+    [[ "$output" == *'Unknown analyze option: --unknown'* ]]
+
+    dbtune_i18n_set sk
+    run cmd_analyze --min-samples 0
+    [ "$status" -eq 64 ]
+    [[ "$output" == *'--min-samples musi byt kladne cele cislo'* ]]
+}
+
 @test "buffer pool never shrinks an existing larger pool" {
     make_audit "$BATS_TEST_TMPDIR/audit.tsv" 10.6.18 1073741824 16777216 8G
     make_samples "$BATS_TEST_TMPDIR/samples.tsv" 30 2 10 0 62914560

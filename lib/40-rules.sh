@@ -56,6 +56,7 @@ dbtune_rules_analyze() {
     local databases_file=${5:-}
     local min_samples=${6:-288}
     local p95_threads p50_qcache p05_available diagnostics rejected excluded_status excluded_restart
+    local too_few_samples_format
     local normalized_audit result
 
     [[ -r $audit_file && -r $samples_file ]] || return 66
@@ -64,9 +65,10 @@ dbtune_rules_analyze() {
     excluded_status=$(awk -F '\t' '$1 == "excluded_status_rows" { print $2 }' <<<"$diagnostics")
     excluded_restart=$(awk -F '\t' '$1 == "excluded_restart_rows" { print $2 }' <<<"$diagnostics")
     if ((rejected > 0)); then
-        printf 'dbtune: odmietnute vzorky: %s; %s\n' "$rejected" \
-            "$(awk -F '\t' '$1 == "rejected_reasons" { print $2 }' <<<"$diagnostics")" >&2
+        printf '%s\n' "$(dbtune_printf rules_rejected_samples "$rejected" \
+            "$(awk -F '\t' '$1 == "rejected_reasons" { print $2 }' <<<"$diagnostics")")" >&2
     fi
+    too_few_samples_format=$(dbtune_msg rules_too_few_samples) || return
     p95_threads=$(dbtune_tsv_percentile "$samples_file" threads_running 8 95) || return 65
     p05_available=$(dbtune_tsv_percentile "$samples_file" mem_available_kb 14 5) || return 65
     p50_qcache=$(dbtune_tsv_percentile "$samples_file" qcache_hit_pct 10 50 qcache-active 2>/dev/null || printf '0')
@@ -80,7 +82,8 @@ dbtune_rules_analyze() {
         -v databases_file="$databases_file" -v min_samples="$min_samples" \
         -v shared_p95_threads="$p95_threads" -v shared_p50_qcache="$p50_qcache" \
         -v shared_p05_available="$p05_available" -v shared_rejected_count="$rejected" \
-        -v shared_excluded_count="$((excluded_status + excluded_restart))" '
+        -v shared_excluded_count="$((excluded_status + excluded_restart))" \
+        -v too_few_samples_format="$too_few_samples_format" '
     BEGIN {
         FS = OFS = "\t"
         gib = 1073741824
@@ -88,7 +91,7 @@ dbtune_rules_analyze() {
         load_audit(audit_file)
         load_samples(samples_file)
         if (sample_count < min_samples) {
-            printf "dbtune: malo vzoriek: %d, minimum: %d\n", sample_count, min_samples > "/dev/stderr"
+            printf "%s\n", sprintf(too_few_samples_format, sample_count, min_samples) > "/dev/stderr"
             exit 65
         }
         load_dbsize(dbsize_file)
@@ -831,20 +834,20 @@ cmd_analyze() {
         case $1 in
             --min-samples)
                 [[ $# -ge 2 ]] || {
-                    dbtune_log error "Pouzitie: dbtune analyze [--min-samples N]"
+                    dbtune_log error "$(dbtune_msg analyze_usage)"
                     return 64
                 }
                 min_samples=$2
                 shift 2
                 ;;
             *)
-                dbtune_log error "Neznama analyze volba: $1"
+                dbtune_log error "$(dbtune_printf analyze_unknown_option "$1")"
                 return 64
                 ;;
         esac
     done
     [[ $min_samples =~ ^[1-9][0-9]*$ ]] || {
-        dbtune_log error "--min-samples musi byt kladne cele cislo"
+        dbtune_log error "$(dbtune_msg analyze_min_samples_positive)"
         return 64
     }
 
@@ -857,7 +860,7 @@ cmd_analyze() {
     manifest=$(dbtune_analysis_manifest_file) || return
     dbtune_provenance_validate_audit || return
     dbsize_hash_before=$(dbtune_sha256_file "$dbsize_file") || {
-        dbtune_log error "Chyba povinny dbsize vstup: $dbsize_file"
+        dbtune_log error "$(dbtune_printf analyze_dbsize_input_missing "$dbsize_file")"
         return 66
     }
     temporary=$(mktemp "$DBTUNE_STATE_DIR/.analysis.tmp.XXXXXX") || return 1
@@ -868,7 +871,7 @@ cmd_analyze() {
 
     if ! dbtune_rules_analyze "$audit_file" "$samples_file" "$dbsize_file" "$apps_file" "$databases_file" "$min_samples" >"$temporary"; then
         rm -f "$temporary" "$temporary_manifest"
-        dbtune_log error "Analyza zlyhala; analysis.tsv nebol zmeneny"
+        dbtune_log error "$(dbtune_msg analyze_failed)"
         return 65
     fi
     dbsize_hash=$(dbtune_sha256_file "$dbsize_file") || {
@@ -877,7 +880,7 @@ cmd_analyze() {
     }
     if [[ $dbsize_hash != "$dbsize_hash_before" ]]; then
         rm -f "$temporary" "$temporary_manifest"
-        dbtune_log error "dbsize.tsv sa pocas analyzy zmenil; analysis.tsv nebol zmeneny"
+        dbtune_log error "$(dbtune_msg analyze_dbsize_changed)"
         return 65
     fi
     if ! dbtune_provenance_write_analysis_manifest "$temporary_manifest" "$temporary" "$samples_file" "$dbsize_file" ||

@@ -14,7 +14,7 @@ dbtune_report_no_arguments() {
     local command_name=${1:-report}
     shift || true
     if (($#)); then
-        dbtune_log error "Prikaz '$command_name' neocakava argumenty"
+        dbtune_log error "$(dbtune_printf report_arguments_unsupported "$command_name")"
         return 64
     fi
 }
@@ -1096,7 +1096,7 @@ dbtune_proposals_load() {
         for line in "${DBTUNE_ANALYSIS_LINES[@]}"; do
             dbtune_analysis_parse "$line" || return 65
             if [[ -n $DBTUNE_ANALYSIS_PROPOSED_KEY || -n $DBTUNE_ANALYSIS_PROPOSED_VALUE ]]; then
-                dbtune_log error "Nepodporovana MariaDB analyza obsahuje serverovy proposal"
+                dbtune_log error "$(dbtune_msg proposal_unsupported_analysis)"
                 return 65
             fi
         done
@@ -1109,22 +1109,22 @@ dbtune_proposals_load() {
             continue
         fi
         if [[ $DBTUNE_ANALYSIS_SCOPE != server || -z $DBTUNE_ANALYSIS_PROPOSED_KEY || -z $DBTUNE_ANALYSIS_PROPOSED_VALUE ]]; then
-            dbtune_log error "Neplatny proposal record v pravidle $DBTUNE_ANALYSIS_RULE_ID"
+            dbtune_log error "$(dbtune_printf proposal_invalid_record "$DBTUNE_ANALYSIS_RULE_ID")"
             return 65
         fi
         if ! dbtune_proposal_key_is_safe "$DBTUNE_ANALYSIS_PROPOSED_KEY" ||
             ! dbtune_proposal_value_is_safe "$DBTUNE_ANALYSIS_PROPOSED_VALUE"; then
-            dbtune_log error "Nebezpecny proposal record v pravidle $DBTUNE_ANALYSIS_RULE_ID"
+            dbtune_log error "$(dbtune_printf proposal_unsafe_record "$DBTUNE_ANALYSIS_RULE_ID")"
             return 65
         fi
         canonical=$(dbtune_key_normalize "$DBTUNE_ANALYSIS_PROPOSED_KEY")
         if [[ -n ${seen[$canonical]+x} ]]; then
-            dbtune_log error "Kanonicky duplicitny proposal kluc: $DBTUNE_ANALYSIS_PROPOSED_KEY"
+            dbtune_log error "$(dbtune_printf proposal_duplicate_key "$DBTUNE_ANALYSIS_PROPOSED_KEY")"
             return 65
         fi
         current=$(dbtune_audit_current_value "$audit_file" "$canonical" 2>/dev/null || true)
         if [[ -z $current || ${current,,} == unknown || ${current,,} == unresolved ]]; then
-            dbtune_log error "Proposal $canonical nema znamu efektivnu current hodnotu"
+            dbtune_log error "$(dbtune_printf proposal_current_unknown "$canonical")"
             return 65
         fi
         seen["$canonical"]=1
@@ -1242,7 +1242,7 @@ cmd_report() {
     DBTUNE_ANALYSIS_FINGERPRINT=$(dbtune_manifest_value "$analysis_manifest" analysis_fingerprint) || return 65
     for report_file in "$DBTUNE_AUDIT_FILE" "$DBTUNE_SAMPLES_FILE" "$DBTUNE_ANALYSIS_FILE"; do
         if [[ ! -r $report_file ]]; then
-            dbtune_log error "Chyba povinny vstup: $report_file"
+            dbtune_log error "$(dbtune_printf report_required_input_missing "$report_file")"
             return 66
         fi
     done
@@ -1272,7 +1272,7 @@ cmd_propose() {
     dbtune_report_no_arguments propose "$@" || return
     state=$(dbtune_state_read) || return
     if [[ $state != analyzed && $state != proposed ]]; then
-        dbtune_log error "Prikaz 'propose' nie je povoleny v stave '$state'"
+        dbtune_log error "$(dbtune_printf core_command_state_disallowed propose "$state")"
         return 65
     fi
     dbtune_init_state_dir || return
@@ -1282,13 +1282,13 @@ cmd_propose() {
     DBTUNE_AUDIT_FILE=$(dbtune_path audit.tsv) || return
     dbtune_audit_validate "$DBTUNE_AUDIT_FILE" || return 65
     if [[ ! -r $analysis_file ]]; then
-        dbtune_log error "Chyba povinny vstup: $analysis_file"
+        dbtune_log error "$(dbtune_printf report_required_input_missing "$analysis_file")"
         return 66
     fi
     dbtune_analysis_load "$analysis_file" || return
     DBTUNE_SERVER_SUPPORT=$(dbtune_analysis_server_support) || return
     if [[ $DBTUNE_SERVER_SUPPORT == unsupported ]]; then
-        dbtune_log error "MariaDB rodina nie je podporovana; proposal sa nevytvori"
+        dbtune_log error "$(dbtune_msg proposal_unsupported_family)"
         return 65
     fi
     dbtune_proposals_load "$DBTUNE_AUDIT_FILE" || return

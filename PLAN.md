@@ -1,129 +1,140 @@
-# Plán: `dbtune` — audit & tuning nástroj pre MariaDB na RunCloud flotile
+# Plan: `dbtune` - MariaDB audit and tuning tool for a RunCloud fleet
 
-## Kontext
+## Context
 
-Máme ~40 dedikovaných serverov (Hetzner, Ubuntu 22.04/24.04) spravovaných cez RunCloud, všetky hostujú WordPress + WooCommerce eshopy (DB typicky 3–15 GB, MariaDB 10.6–11.x, niekedy 2–3 eshopy na jednom serveri so zdieľanou MariaDB inštanciou). MariaDB všade beží na RunCloud defaultoch (buffer pool 128M, max_connections 4096, trxcommit=2…), čo je pre ecommerce záťaž nevhodné.
+We operate approximately 40 dedicated servers (Hetzner, Ubuntu 22.04/24.04) managed through RunCloud. All host WordPress and WooCommerce stores (databases typically 3-15 GB, MariaDB 10.6-11.x, sometimes 2-3 stores on one server sharing a MariaDB instance). MariaDB runs everywhere on RunCloud defaults (128M buffer pool, `max_connections` 4096, `trxcommit=2`, and so on), which are unsuitable for an ecommerce workload.
 
-Cieľ: nástroj, ktorý na každom serveri **zaudituje** prostredie, **pozbiera** metriky z ostrej prevádzky (default 7 dní), **vyhodnotí** ich podľa metodiky z [mariadb-runcloud-preset.md](mariadb-runcloud-preset.md) a **navrhne** personalizovaný config + per-app odporúčania, s bezpečným apply/rollback.
+Goal: a tool that **audits** each server, **collects** metrics from production traffic (7 days by default), **evaluates** them according to [mariadb-runcloud-preset.md](mariadb-runcloud-preset.md), and **proposes** a personalized configuration plus per-app recommendations, with safe apply/rollback.
 
-**Odsúhlasené rozhodnutia:**
-- v1 = standalone per-server; report aj ako JSON (flat keys) → budúca fleet agregácia v v2 bez prerábania
-- reštart MariaDB vždy manuálne cez RunCloud panel (tool len inštruuje; `--restart` flag len pre pilotné skriptovanie)
+**Approved decisions:**
+- v1 is standalone per server; the report is also available as flat-key JSON, allowing future fleet aggregation in v2 without rework.
+- MariaDB restart is always manual through the RunCloud panel (the tool only provides instructions; the `--restart` flag is for pilot scripting only).
 
-## Forma toolu
+## Tool form
 
-**Jeden samostatný bash skript `dbtune`** so subcommands, vyvíjaný modulárne (`lib/*.sh`) a build krokom spájaný do jedného artefaktu `dist/dbtune`.
+**One standalone Bash script, `dbtune`,** with subcommands, developed as modules (`lib/*.sh`) and joined by the build step into one `dist/dbtune` artifact.
 
-Prečo bash (potvrdené aj architektonickou analýzou): ~90 % práce je volanie `mariadb -Nse`, `systemctl`, `lsblk`, `free` + formátovanie textu; podkladový MD je už bash-native (1:1 kodifikácia = menej translačných chýb); jeden greppateľný súbor je na flotile s root SSH debugovateľný priamo na mieste; žiadny runtime skew medzi Ubuntu 22/24.
+Why Bash (also confirmed by architectural analysis): approximately 90% of the work invokes `mariadb -Nse`, `systemctl`, `lsblk`, and `free`, then formats text; the source Markdown is already Bash-native (1:1 codification means fewer transcription errors); one greppable file can be debugged in place over root SSH across the fleet; there is no runtime skew between Ubuntu 22 and 24.
 
-Disciplína, ktorá robí bash bezpečným: všetka aritmetika cez awk (žiadne delenie v bashi), JSON len cez jeden testovaný emitter, `set -u` globálne, `shellcheck` + `bats` povinné, lib moduly obsahujú len funkcie (žiadna top-level exekúcia) — vďaka čomu je build obyčajná konkatenácia a unit testy per-modul.
+The discipline that makes Bash safe: all arithmetic through awk (no division in Bash), JSON through one tested emitter only, global `set -u`, mandatory `shellcheck` and `bats`, and library modules containing functions only (no top-level execution). The build is therefore simple concatenation and unit tests can target each module.
 
-- **Nasadenie:** `scp dist/dbtune server:/usr/local/bin/dbtune` — jeden súbor.
-- **Stav a dáta:** `/var/lib/dbtune/` (mode 700; audit, vzorky, analýzy, reporty, apply história, events.log).
-- **Výstupy:** Markdown report v slovenčine + terminálový súhrn + strojový JSON.
+- **Deployment:** `scp dist/dbtune server:/usr/local/bin/dbtune` - one file.
+- **State and data:** `/var/lib/dbtune/` (mode 700; audit, samples, analyses, reports, apply history, and `events.log`).
+- **Output:** English Markdown report and terminal summary by default, explicit Slovak executable output with `DBTUNE_UI_LANG=sk`, plus machine-readable JSON.
 
-## CLI a state machine
+## CLI and state machine
 
-```
-dbtune audit [--json]                 # read-only audit, spustiteľný kedykoľvek
-dbtune collect start [--days N]       # default 7; --long-query-time pre deep režim
+```text
+dbtune audit [--json]                 # read-only audit, may run at any time
+dbtune collect start [--days N]       # default 7; --long-query-time for deep mode
 dbtune collect status | stop
-dbtune analyze [--min-samples N]      # vyžaduje ≥ ~1 deň vzoriek
+dbtune analyze [--min-samples N]      # requires at least approximately 1 day of samples
 dbtune report | propose
 dbtune apply [--restart] [--force]
 dbtune verify --post | --24h
 dbtune rollback
 dbtune status | version
-dbtune _tick                          # interné, volá systemd timer
+dbtune _tick                          # internal, invoked by the systemd timer
 ```
 
-Stavy: `idle → audited → collecting → collected → analyzed → proposed → applied → verified` (+ `rolled_back`, `recovery_required`, `rollback_failed`). Neplatný príkaz v danom stave = zrozumiteľné odmietnutie. **`apply` bez merania je zablokovaný** („preset bez merania je hádanie") — `--force` vyžaduje napísanie potvrdzovacej frázy a report dostane pečiatku „BEZ MERANIA". Apply aj force navyše vyžadujú samostatný autoritatívny backup evidence alebo druhé explicitné TTY potvrdenie.
+States: `idle -> audited -> collecting -> collected -> analyzed -> proposed -> applied -> verified` (plus `rolled_back`, `recovery_required`, and `rollback_failed`). An invalid command for the current state receives a clear rejection. **Apply without measurement is blocked** ("a preset without measurement is guesswork"). `--force` requires the exact active-language confirmation phrase and marks the report as `WITHOUT MEASUREMENTS`/`BEZ MERANIA`. Apply and force additionally require separate authoritative backup evidence or a second explicit TTY confirmation.
 
-## Fáza AUDIT (read-only)
+## Language, schema, and release contract
 
-- **HW:** CPU, RAM, swap, disky (ROTA + NVMe detekcia, vrátane md RAID cez slave devices), voľné miesto.
-- **MariaDB:** verzia → verzálne brány; efektívne premenné; **landmine scan** existujúcich configov na premenné odstránené v novších verziách (`innodb_change_buffering` na 11.x = kritický nález — server by po najbližšom reštarte nenaštartoval; ďalej `innodb_buffer_pool_instances`, `innodb_log_files_in_group`…).
-- **RunCloud vrstva:** runcloud.cnf hodnoty, `skip-log-bin`, query cache hit rate, `open_files_limit` vs systemd `LimitNOFILE`, unattended-upgrades origin „MariaDB:", backup (mydumper) frekvencia, wp-cron setup, performance_schema, Galera detekcia (→ apply sa odmietne).
-- **Aplikácie:** `/home/*/webapps/*` → WP detekcia, tolerantný wp-config parser (define/const/env varianty, custom prefix, multisite; fallback cez wp-cli ak existuje, inak SHOW TABLES); WooCommerce, Redis + `object-cache.php` drop-in, page cache. Non-WP appky sa označia, ich DB sa započíta do sizingu.
-- **Per-DB:** dataset, top tabuľky, `kb_per_row` log-detektor, autoload, HPOS, sessions, Action Scheduler (vrátane failed), transienty, cudzie indexy na postmeta.
-- **PHP-FPM:** suma `pm.max_children` cez všetky verzie a pooly (OLS stack → warning, formula input chýba).
-- **Bezpečnostná mini-kontrola:** bind-address, wildcard granty, root.cnf poznámka. Reporty nikdy neobsahujú heslá.
-- **Root auth probe:** unix_socket → root.cnf defaults-extra-file; metóda sa zapamätá, heslo nikdy na command line ani v logoch.
+- `DBTUNE_UI_LANG=en|sk` is the public interface selector. Unset or empty means English. Any unsupported non-empty value exits with status 64 before command dispatch. Operating-system locale variables do not select the interface language.
+- `collect start` persists the validated language as `ui_lang` in `collect.tsv`; `_tick` restores it before diagnostics and automatic analyze/report execution.
+- English force phrase: `APPLY WITHOUT MEASUREMENTS`. Slovak force phrase: `APLIKUJ BEZ MERANIA`.
+- English backup phrase: `I CONFIRM A RESTORABLE BACKUP`. Slovak backup phrase: `POTVRDZUJEM OBNOVITELNU ZALOHU`.
+- `analysis.tsv` uses the stable eight-column `reason_id` schema. `fleet-v3` JSON contains stable reason/warning IDs, selected language, and localized display text while retaining stable machine keys and enums.
+- v0.4.0 never translates or rehashes an old `reason_sk` analysis. Report, propose, and apply fail closed and require a new v0.4.0 audit and measurement cycle; apply history and rollback recovery remain available.
+- The current published release is `v0.3.0`, and the immutable source artifact version remains `0.3.0` until the separate v0.4.0 release-preparation step.
 
-## Fáza COLLECT
+## AUDIT phase (read-only)
 
-- **systemd oneshot service + timer** (`OnCalendar=*:0/5`, `Persistent=false`, enabled → prežije reboot = automatické pokračovanie po prerušení). Tick: `flock`, **vždy exit 0** (zdravie sa sleduje v health súbore, nie vo failed unite).
-- Každý tick = **60 s dvojbodová delta** (2× jeden SQL round-trip GLOBAL STATUS + /proc CPU mariadbd + free + loadavg) → riadok do `samples.tsv`: BP hit ratio v krátkom okne, missy/s, data_read/s, `Handler_read_rnd_next`/s, tmp disk %, Threads_running/connected, qcache aj jeho denominator, log_waits, wait_free, CPU %, RAM/swap, restart_flag, skutocny monotónny interval a sample status. Rates a CPU pouzivaju realny interval vratane SQL/scheduler delay; neplatne alebo prilis dlhe intervaly su degraded a rules ich nepouziju. 7 dní ≈ 500 KB.
-- **Slow log** runtime (`long_query_time=2` do `/var/log/mysql/slow.log` kvôli logrotate pokrytiu). **Self-healing:** tick deteguje reset uptime (unattended-upgrades reštart) → znovu zapne slow log + event `db_restart_detected`; restart_flag umožní analyze správne segmentovať lifetime countery.
-- **Denne:** per-DB snapshot veľkostí → `dbsize.tsv` (growth rate pre rezervu na expanziu); disk guardy (voľné miesto, veľkosť samples, slow log > 2 GB watchdog).
-- **Auto-stop** po `--days` + automatický `analyze` + `report` — po týždni na serveri čaká hotový report.
+- **Hardware:** CPU, RAM, swap, storage (ROTA plus NVMe detection, including md RAID through slave devices), and free space.
+- **MariaDB:** version and version gates; effective variables; a **landmine scan** of existing configuration for variables removed by newer versions (`innodb_change_buffering` on 11.x is a critical finding because the server would fail on its next restart; also `innodb_buffer_pool_instances`, `innodb_log_files_in_group`, and others).
+- **RunCloud layer:** `runcloud.cnf` values, `skip-log-bin`, query-cache hit rate, `open_files_limit` versus systemd `LimitNOFILE`, unattended-upgrades `MariaDB:` origin, backup (mydumper) frequency, wp-cron setup, `performance_schema`, and Galera detection (which rejects apply).
+- **Applications:** `/home/*/webapps/*` WordPress detection, tolerant wp-config parser (define/const/env variants, custom prefix, multisite; fallback through wp-cli if available, otherwise SHOW TABLES), WooCommerce, Redis plus the `object-cache.php` drop-in, and page cache. Non-WordPress applications are marked and their databases are included in sizing.
+- **Per database:** dataset, largest tables, `kb_per_row` log detector, autoload, HPOS, sessions, Action Scheduler (including failed actions), transients, and foreign indexes on postmeta.
+- **PHP-FPM:** sum of `pm.max_children` across every version and pool (OLS stack produces a warning because formula input is missing).
+- **Security mini-check:** bind address, wildcard grants, and a `root.cnf` note. Reports never contain passwords.
+- **Root authentication probe:** unix_socket, then `root.cnf` defaults-extra-file; the method is remembered and the password never appears on the command line or in logs.
 
-## Fáza ANALYZE — rules engine
+## COLLECT phase
 
-Jednotný kontrakt: každé pravidlo emituje záznam `rule_id | scope (server/app:X) | severity | verdikt | proposed_key/value | evidencia | odôvodnenie po slovensky`. REPORT renderuje všetky záznamy, PROPOSE konzumuje len server-scope záznamy s proposed_key — report a cnf sa nikdy nerozídu.
+- **systemd oneshot service and timer** (`OnCalendar=*:0/5`, `Persistent=false`, enabled so collection resumes automatically after reboot). Tick uses `flock` and **always exits 0**; health is tracked in a health file, not a failed unit.
+- Every tick is a **60-second two-point delta** (two single SQL round trips for GLOBAL STATUS plus `/proc` mariadbd CPU, `free`, and load average), appended to `samples.tsv`: short-window buffer-pool hit ratio, misses/s, data-read/s, `Handler_read_rnd_next`/s, temporary-disk percentage, Threads_running/connected, query cache and its denominator, log waits, wait free, CPU percentage, RAM/swap, `restart_flag`, actual monotonic interval, and sample status. Rates and CPU use the real interval including SQL/scheduler delay; invalid or excessively long intervals are degraded and excluded by rules. Seven days is approximately 500 KB.
+- **Slow log** runtime (`long_query_time=2` in `/var/log/mysql/slow.log` for logrotate coverage). **Self-healing:** tick detects an uptime reset (an unattended-upgrades restart), re-enables the slow log, and records `db_restart_detected`; `restart_flag` lets analyze segment lifetime counters correctly.
+- **Daily:** per-database size snapshot in `dbsize.tsv` (growth rate for expansion reserve); disk guards for free space, sample-file size, and a slow log above 2 GB.
+- **Automatic stop** after `--days`, followed by automatic `analyze` and `report`, leaving a completed report on the server after one week. The persisted collector language controls unattended diagnostics and the final report.
 
-**Server pravidlá** (priama kodifikácia MD): `R-BP-SIZE` (`min((dataset + 6-mes. rast)×1,3 ; RAM×0,5)`, zaokrúhlené, growth vyžaduje ≥5 denných bodov, **nikdy nenavrhne zmenšenie** existujúceho poolu, guard na MemAvailable), `R-MAXCONN` (`max(Σpm.max_children×1,25+20 ; 100)` + cross-check nameraného peaku), `R-IO-CAP` (NVMe/SSD/HDD triedy + flush_neighbors gate), `R-LOG-FILE`/`R-LOG-BUF` (512M/1G; 64M log buffer len ak namerané log_waits>0), `R-QCACHE` (presná matica z MD: hit rate × Threads_running p95, nikdy plošne), `R-TRXCOMMIT` (=1 povinný kvôli skip-log-bin), `R-PINNED` (O_DIRECT, dirty pct/lwm, lock_wait_timeout=30, skip_name_resolve, tmp 64M s LONGTEXT poznámkou…), `R-MYISAM`, `R-SLOWLOG`, `R-UNATT` (blacklist odporúčanie), `R-OPENFILES`, `R-SEC`, `R-BACKUP`.
+## ANALYZE phase - rules engine
 
-**Verzálne brány — dve vrstvy:** (1) statická gate tabuľka (rodiny 10.6 / 10.11 / 11.x — napr. change_buffering odstránené v 11.0, log_file_size dynamický od 10.9, io_threads dynamické od 10.11, query cache existuje v celom rozsahu, flush_method deprecated v 11.x; mariadb/mysql binárne názvy fallback), (2) **živá autoritatívna kontrola** — pred apply každý názov premennej overený proti `information_schema.GLOBAL_VARIABLES`.
+Uniform contract: every rule emits `rule_id | scope (server/app:X) | severity | verdict | proposed_key/value | evidence | reason_id`. REPORT renders every record through the selected trusted catalog. PROPOSE consumes only server-scope records with `proposed_key`, so report and CNF cannot diverge. The schema is language-neutral and the same analysis hash is used in English and Slovak.
 
-**Per-app nálezy so severitou** (len odporúčania, tool nikdy nezapisuje do WP databáz):
-- *critical:* chýbajúci object cache (rozlíšené: Redis nebeží vs drop-in chýba); wp-cron úplne vypnutý
-- *high:* autoload > 3 MB (+top 20), HPOS vypnutý pri objednávkach v postmeta, log tabuľky kb_per_row > 20
-- *medium:* autoload 1–3 MB, HPOS sync duplikátne zápisy, failed AS akcie, rogue meta_value index, Redis eviction policy
-- *low:* AS retention 30d → 7d (explicitne nie 1d)
+**Server rules** (direct codification of the Markdown): `R-BP-SIZE` (`min((dataset + 6-month growth) x 1.3; RAM x 0.5)`, rounded, growth requires at least 5 daily points, **never proposes reducing** the existing pool, MemAvailable guard), `R-MAXCONN` (`max(sum(pm.max_children) x 1.25 + 20; 100)` plus a measured-peak cross-check), `R-IO-CAP` (NVMe/SSD/HDD classes plus flush_neighbors gate), `R-LOG-FILE`/`R-LOG-BUF` (512M/1G; 64M log buffer only if measured log_waits > 0), `R-QCACHE` (the exact matrix from the Markdown: hit rate x Threads_running p95, never blanket-disable), `R-TRXCOMMIT` (=1 required because of skip-log-bin), `R-PINNED` (O_DIRECT, dirty pct/lwm, lock_wait_timeout=30, skip_name_resolve, tmp 64M with a LONGTEXT note, and so on), `R-MYISAM`, `R-SLOWLOG`, `R-UNATT` (blacklist recommendation), `R-OPENFILES`, `R-SEC`, and `R-BACKUP`.
 
-Report drží filozofiu MD: sekcia „aplikačná vrstva — rieš PRVÚ" ide pred DB config návrhom.
+**Version gates have two layers:** (1) a static gate table for families 10.6, 10.11, and 11.x (for example, change_buffering removed in 11.0, dynamic log_file_size since 10.9, dynamic io_threads since 10.11, query cache throughout the supported range, and flush_method deprecated in 11.x; mariadb/mysql binary-name fallback), and (2) **live authoritative validation** of every variable name against `information_schema.GLOBAL_VARIABLES` before apply.
 
-## REPORT + PROPOSE
+**Per-app findings with severity** (recommendations only; the tool never writes to WordPress databases):
+- *critical:* missing object cache (distinguishing Redis down from missing drop-in); wp-cron completely disabled
+- *high:* autoload above 3 MB (plus top 20), HPOS disabled with orders in postmeta, log tables above 20 `kb_per_row`
+- *medium:* autoload 1-3 MB, HPOS compatibility sync causing duplicate writes, failed Action Scheduler actions, rogue meta_value index, Redis eviction policy
+- *low:* Action Scheduler retention 30d to 7d (explicitly not 1d)
 
-- **Executive summary** (top akcie podľa dopadu) → **server sekcia** (HW, profil záťaže: percentily, najhoršie okná, korelácia s backupmi; navrhnutý config ako **diff proti aktuálnym efektívnym hodnotám** s per-hodnota odôvodnením) → **per-app sekcie** (nálezy + copy-paste SQL/wp-cli kroky).
-- `proposed-99-zz-tuning.cnf` renderovaný z template (Krok 2 z MD) + `report.json`.
+The report retains the source document's philosophy: the "application layer - solve first" section appears before the database configuration proposal.
 
-## APPLY / VERIFY / ROLLBACK — obrana do hĺbky
+## REPORT and PROPOSE
 
-1. Pre-write kontrola názvov premenných proti živej information_schema.
-2. Zápis **len** `/etc/mysql/mariadb.conf.d/99-zz-tuning.cnf` (runcloud.cnf sa nikdy nedotkne) + `mariadbd --validate-config` s parserom z MD (ignoruje lock chyby bežiaceho servera, capability-probed).
-3. Guard proti unattended-upgrades oknu (apply sa odmietne 05:30–07:30 bez --force) + kontrola bežiaceho mydumper backupu v processliste pred pokynom na reštart.
-4. Reštart decoupled: apply vypíše presné inštrukcie pre RunCloud panel + očakávania (dlhší prvý štart pri zmene redo logu) + **`ROLLBACK.txt` s doslovnými príkazmi** — recovery nevyžaduje ani samotný tool.
-5. `rollback` = čisto filesystem operácia (mv + systemctl start), žiadne SQL — funguje aj s ležiacou DB.
-6. `verify --post` (bez rastu wait_free, log_waits a aborted oproti reset-aware baseline, swap stabilný, ulozenie post-restart baseline) a `verify --24h` (porovnanie proti uspesnej post-restart baseline).
+- **Executive summary** (top actions by impact), then **server section** (hardware, workload profile with percentiles, worst windows, and backup correlation; proposed configuration as a **diff against current effective values** with per-value reasons), then **per-app sections** (findings plus copy-paste SQL/wp-cli steps).
+- `proposed-99-zz-tuning.cnf` is rendered from the template (Step 2 of the Markdown), alongside `report.json` using schema `fleet-v3`.
+- Machine consumers use stable IDs, keys, enums, and canonical proposal records. Localized CNF comments can make `proposal_hash` language-specific, but `proposal_records_hash`, proposal keys, and proposal values stay language-neutral.
 
-## Repo štruktúra a testy
+## APPLY / VERIFY / ROLLBACK - defense in depth
 
-```
-lib/00-header … 90-main.sh   # číslované moduly, len funkcie
-templates/tuning.cnf.tmpl    # Krok 2 z MD s placeholdermi
-build.sh + Makefile          # konkatenácia + embed templates/units, bash -n, shellcheck, sha256
-test/stubs/                  # fake mariadb, systemctl, lsblk, free…
-test/fixtures/               # zachytené GLOBAL STATUS/VARIABLES pre 10.6 aj 11.4, wp-config varianty,
-                             # runcloud confy, fpm pooly, lsblk profily, 7-dňové syntetické samples
-test/unit/*.bats             # formuly, qcache matica, version gates, delta math, parser, state machine
-test/integration/            # docker-compose: mariadb 10.6 + 11.4 + ubuntu SUT, seedovaná WP/Woo schéma,
-                             # fake-timer tick loop (systemd-in-docker skip na macOS), plný lifecycle
+1. Before writing, validate variable names against live `information_schema`.
+2. Write **only** `/etc/mysql/mariadb.conf.d/99-zz-tuning.cnf` (`runcloud.cnf` is never touched), then run capability-probed `mariadbd --validate-config` with the parser from the Markdown (it ignores lock errors from the running server).
+3. Guard the unattended-upgrades window (reject apply from 05:30 to 07:30 without `--force`) and check the process list for a running mydumper backup before restart instructions.
+4. Restart is decoupled: apply prints exact RunCloud panel instructions and expectations (a longer first start after a redo-log change), plus **`ROLLBACK.txt` with literal commands** so recovery does not require the tool itself.
+5. `rollback` is a filesystem-only operation (mv plus systemctl start), without SQL, and works while the database is down.
+6. `verify --post` checks no growth in wait_free, log_waits, or aborted relative to a reset-aware baseline, stable swap, and stores the post-restart baseline. `verify --24h` compares against the successful post-restart baseline.
+
+## Repository structure and tests
+
+```text
+lib/00-header ... 90-main.sh   # numbered modules, functions only
+templates/tuning.cnf.tmpl      # Step 2 from the Markdown with placeholders
+build.sh + Makefile            # concatenation, embedded templates/units, bash -n, shellcheck, sha256
+test/stubs/                    # fake mariadb, systemctl, lsblk, free, and others
+test/fixtures/                 # captured GLOBAL STATUS/VARIABLES for 10.6 and 11.4, wp-config variants,
+                               # RunCloud configurations, FPM pools, lsblk profiles, synthetic 7-day samples
+test/unit/*.bats               # formulas, query-cache matrix, version gates, delta math, parser, state machine
+test/integration/              # docker-compose with MariaDB 10.6 and 11.4 plus Ubuntu SUT, seeded WP/Woo schema,
+                               # fake-timer tick loop (systemd-in-docker skipped on macOS), complete lifecycle
 docs/RUNBOOK.md
 ```
 
-## Postup implementácie
+## Implementation sequence
 
-1. Repo skeleton + build pipeline + state machine + util/log/sql vrstva
-2. Audit modul (detect + apps + per-DB)
-3. Collector (systemd, tick, self-healing, guardy)
-4. Rules engine + verzálne brány (srdce toolu)
-5. Report + propose
-6. Apply / verify / rollback
-7. Testy (fixtures, bats, docker harness) — priebežne popri moduloch
-8. RUNBOOK: pilot na 1–2 serveroch (jeden per MariaDB rodina, s overenými backupmi) → stage 5 serverov → zvyšok flotily v dávkach ~10, apply vždy manuálne per server
+1. Repository skeleton, build pipeline, state machine, and utility/log/SQL layer
+2. Audit module (detection, applications, and per-database data)
+3. Collector (systemd, tick, self-healing, and guards)
+4. Rules engine and version gates (the core of the tool)
+5. Report and proposal
+6. Apply, verify, and rollback
+7. Tests (fixtures, Bats, and Docker harness), continuously alongside modules
+8. RUNBOOK: pilot on 1-2 servers (one per MariaDB family, with verified backups), stage 5 servers, then process the rest of the fleet in batches of approximately 10, always applying manually per server
 
-Moduly 2–5 viem po skelete vyvíjať paralelne cez sub-agentov s finálnou integráciou a review.
+After the skeleton, modules 2-5 can be developed in parallel with final integration and review.
 
-## Verifikácia
+## Verification
 
-- `shellcheck` čistý, `bats` zelené na fixtures oboch MariaDB rodín, emitovaný JSON validovaný.
-- Docker harness: plný lifecycle audit → ticky → analyze → report → propose → validate cnf v DB kontajneri → apply + reštart + verify --post.
-- Reálny pilot: 1 server z flotily, porovnanie auditu s ručnými meraniami z referenčného shopu v MD.
+- Clean `shellcheck`, green `bats` against fixtures for both MariaDB families, and validated emitted JSON.
+- Docker harness: full lifecycle from audit through ticks, analyze, report, propose, CNF validation in the database container, apply, restart, and `verify --post`, in English and Slovak with equivalent proposal keys and values.
+- Real pilot: one fleet server, comparing the audit with manual measurements from the reference store in the Markdown.
 
-## Mimo rozsah v1
+## Out of scope for v1
 
-- Centrálna fleet agregácia (v2 — JSON reporty pripravené)
-- Automatické app-layer fixy (Redis inštalácia, autoload čistenie, HPOS migrácia) — len odporúčania s návodom
-- Galera setupy (apply sa na nich odmietne)
+- Central fleet aggregation (v2; JSON reports are ready)
+- Automatic application-layer fixes (Redis installation, autoload cleanup, HPOS migration); only recommendations with instructions
+- Galera setups (apply rejects them)

@@ -87,7 +87,7 @@ write_analysis_manifest() {
 write_analysis() {
     cat >"$DBTUNE_STATE_DIR/analysis.tsv" <<'EOF'
 rule_id	scope	severity	verdict	proposed_key	proposed_value	evidence	reason_id
-R-OC	app:shop-a	critical	REDIS-DOWN			Redis inactive | drop-in chýba	reason_redis_down
+R-OC	app:shop-a	critical	REDIS-DOWN			Redis inactive | drop-in missing	reason_redis_down
 R-APP-AUTOLOAD	app:shop-a	high	TOO-LARGE			autoload=4M	reason_autoload_too_large
 R-BP-SIZE	server	high	CHANGE	innodb_buffer_pool_size	4G	dataset 4 GB; burst 80 %	reason_buffer_pool_change
 R-MAXCONN	server	medium	CHANGE	max_connections	200	FPM 120; peak 80	reason_max_connections_change
@@ -104,6 +104,24 @@ R-APP-OBJECT-CACHE	app:shop-a	critical	REDIS-DOWN			redis=0; dropin=1	reason_red
 R-BP-SIZE	server	high	CHANGE	innodb_buffer_pool_size	4G	dataset=4G; current=128M	reason_buffer_pool_change
 EOF
     write_analysis_manifest
+}
+
+@test "report and proposal command diagnostics follow the selected interface language" {
+    DBTUNE_LOG_LEVEL=error
+    dbtune_i18n_set en
+
+    run dbtune_report_no_arguments report unexpected
+    [ "$status" -eq 64 ]
+    [[ "$output" == *"Command 'report' does not accept arguments"* ]]
+
+    run cmd_propose
+    [ "$status" -eq 65 ]
+    [[ "$output" == *"Command 'propose' is not allowed in state 'idle'"* ]]
+
+    dbtune_i18n_set sk
+    run dbtune_report_no_arguments report unexpected
+    [ "$status" -eq 64 ]
+    [[ "$output" == *"Prikaz 'report' neocakava argumenty"* ]]
 }
 
 @test "analysis loader accepts every rules verdict and rejects localized prose" {
@@ -123,7 +141,8 @@ EOF
     run dbtune_analysis_load "$analysis"
     [ "$status" -eq 0 ]
 
-    printf 'R-LOCALIZED\tserver\thigh\tChýba object cache\t\t\ttest\treason_redis_down\n' >>"$analysis"
+    printf 'R-LOCALIZED\tserver\thigh\t%s\t\t\ttest\treason_redis_down\n' \
+        "$(dbtune_msg reason_redis_down)" >>"$analysis"
     run dbtune_analysis_load "$analysis"
     [ "$status" -eq 65 ]
 }
@@ -466,8 +485,11 @@ EOF
     [ "$status" -ne 0 ]
 
     dbtune_state_write analyzed
+    DBTUNE_LOG_LEVEL=error
+    dbtune_i18n_set en
     run cmd_propose
     [ "$status" -eq 65 ]
+    [[ "$output" == *'MariaDB family is unsupported; proposal was not created'* ]]
     [ ! -e "$DBTUNE_STATE_DIR/proposed-99-zz-tuning.cnf" ]
 }
 
@@ -661,6 +683,10 @@ EOF
     run cmd_report
     [ "$status" -eq 65 ]
     [[ "$output" == *"Kanonicky duplicitny"* ]]
+    dbtune_i18n_set en
+    run cmd_report
+    [ "$status" -eq 65 ]
+    [[ "$output" == *"Duplicate canonical proposal key"* ]]
     run cmd_propose
     [ "$status" -eq 65 ]
     [ ! -e "$DBTUNE_STATE_DIR/proposed-99-zz-tuning.cnf" ]
@@ -668,9 +694,14 @@ EOF
     write_analysis
     printf 'R-BAD\tserver\thigh\tCHANGE\tunsafe;key\t1\tx\treason_buffer_pool_change\n' >>"$DBTUNE_STATE_DIR/analysis.tsv"
     write_analysis_manifest
+    dbtune_i18n_set sk
     run cmd_report
     [ "$status" -eq 65 ]
     [[ "$output" == *"Nebezpecny proposal"* ]]
+    dbtune_i18n_set en
+    run cmd_report
+    [ "$status" -eq 65 ]
+    [[ "$output" == *"Unsafe proposal record"* ]]
 }
 
 @test "repeated proposal preserves proposed state and deterministic keys" {

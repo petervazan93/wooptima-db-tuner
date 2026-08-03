@@ -641,6 +641,102 @@ dbtune_i18n_lookup() {
         sk:analysis_empty)
             DBTUNE_I18N_MESSAGE='analysis.tsv je prázdny'
             ;;
+        en:rules_rejected_samples)
+            DBTUNE_I18N_MESSAGE='dbtune: rejected samples: %s; %s'
+            ;;
+        sk:rules_rejected_samples)
+            DBTUNE_I18N_MESSAGE='dbtune: odmietnute vzorky: %s; %s'
+            ;;
+        en:rules_too_few_samples)
+            DBTUNE_I18N_MESSAGE='dbtune: too few samples: %s, minimum: %s'
+            ;;
+        sk:rules_too_few_samples)
+            DBTUNE_I18N_MESSAGE='dbtune: malo vzoriek: %s, minimum: %s'
+            ;;
+        en:analyze_usage)
+            DBTUNE_I18N_MESSAGE='Usage: dbtune analyze [--min-samples N]'
+            ;;
+        sk:analyze_usage)
+            DBTUNE_I18N_MESSAGE='Pouzitie: dbtune analyze [--min-samples N]'
+            ;;
+        en:analyze_unknown_option)
+            DBTUNE_I18N_MESSAGE='Unknown analyze option: %s'
+            ;;
+        sk:analyze_unknown_option)
+            DBTUNE_I18N_MESSAGE='Neznama analyze volba: %s'
+            ;;
+        en:analyze_min_samples_positive)
+            DBTUNE_I18N_MESSAGE='--min-samples must be a positive integer'
+            ;;
+        sk:analyze_min_samples_positive)
+            DBTUNE_I18N_MESSAGE='--min-samples musi byt kladne cele cislo'
+            ;;
+        en:analyze_dbsize_input_missing)
+            DBTUNE_I18N_MESSAGE='Required dbsize input is missing: %s'
+            ;;
+        sk:analyze_dbsize_input_missing)
+            DBTUNE_I18N_MESSAGE='Chyba povinny dbsize vstup: %s'
+            ;;
+        en:analyze_failed)
+            DBTUNE_I18N_MESSAGE='Analysis failed; analysis.tsv was not changed'
+            ;;
+        sk:analyze_failed)
+            DBTUNE_I18N_MESSAGE='Analyza zlyhala; analysis.tsv nebol zmeneny'
+            ;;
+        en:analyze_dbsize_changed)
+            DBTUNE_I18N_MESSAGE='dbsize.tsv changed during analysis; analysis.tsv was not changed'
+            ;;
+        sk:analyze_dbsize_changed)
+            DBTUNE_I18N_MESSAGE='dbsize.tsv sa pocas analyzy zmenil; analysis.tsv nebol zmeneny'
+            ;;
+        en:report_arguments_unsupported)
+            DBTUNE_I18N_MESSAGE="Command '%s' does not accept arguments"
+            ;;
+        sk:report_arguments_unsupported)
+            DBTUNE_I18N_MESSAGE="Prikaz '%s' neocakava argumenty"
+            ;;
+        en:proposal_unsupported_analysis)
+            DBTUNE_I18N_MESSAGE='Unsupported MariaDB analysis contains a server proposal'
+            ;;
+        sk:proposal_unsupported_analysis)
+            DBTUNE_I18N_MESSAGE='Nepodporovana MariaDB analyza obsahuje serverovy proposal'
+            ;;
+        en:proposal_invalid_record)
+            DBTUNE_I18N_MESSAGE='Invalid proposal record in rule %s'
+            ;;
+        sk:proposal_invalid_record)
+            DBTUNE_I18N_MESSAGE='Neplatny proposal record v pravidle %s'
+            ;;
+        en:proposal_unsafe_record)
+            DBTUNE_I18N_MESSAGE='Unsafe proposal record in rule %s'
+            ;;
+        sk:proposal_unsafe_record)
+            DBTUNE_I18N_MESSAGE='Nebezpecny proposal record v pravidle %s'
+            ;;
+        en:proposal_duplicate_key)
+            DBTUNE_I18N_MESSAGE='Duplicate canonical proposal key: %s'
+            ;;
+        sk:proposal_duplicate_key)
+            DBTUNE_I18N_MESSAGE='Kanonicky duplicitny proposal kluc: %s'
+            ;;
+        en:proposal_current_unknown)
+            DBTUNE_I18N_MESSAGE='Proposal %s has no known effective current value'
+            ;;
+        sk:proposal_current_unknown)
+            DBTUNE_I18N_MESSAGE='Proposal %s nema znamu efektivnu current hodnotu'
+            ;;
+        en:report_required_input_missing)
+            DBTUNE_I18N_MESSAGE='Required input is missing: %s'
+            ;;
+        sk:report_required_input_missing)
+            DBTUNE_I18N_MESSAGE='Chyba povinny vstup: %s'
+            ;;
+        en:proposal_unsupported_family)
+            DBTUNE_I18N_MESSAGE='MariaDB family is unsupported; proposal was not created'
+            ;;
+        sk:proposal_unsupported_family)
+            DBTUNE_I18N_MESSAGE='MariaDB rodina nie je podporovana; proposal sa nevytvori'
+            ;;
         en:reason_buffer_pool_current_missing)
             DBTUNE_I18N_MESSAGE='The effective buffer pool value is missing; a change must not be proposed blindly.'
             ;;
