@@ -1,30 +1,4 @@
-# proposed-99-zz-tuning.cnf
-# Vygeneroval dbtune @DBTUNE_VERSION@ dňa @GENERATED_AT@.
-# Načíta sa po /etc/mysql/conf.d/runcloud.cnf.
-# Rollback: odstráňte nasadený 99-zz-tuning.cnf a reštartujte MariaDB cez RunCloud.
-#
-# Bezpečný prenosný baseline z mariadb-runcloud-preset.md je uvedený iba ako
-# neaktívny katalóg. Generovaný súbor aktivuje výlučne kľúče, ktoré podporilo a
-# verzálne alebo meraním povolilo serverové pravidlo v analysis.tsv:
-# innodb_flush_log_at_trx_commit = 1
-# innodb_doublewrite = 1
-# innodb_flush_method = O_DIRECT
-# innodb_buffer_pool_dump_at_shutdown = 1
-# innodb_buffer_pool_load_at_startup = 1
-# innodb_flush_neighbors = 0
-# innodb_max_dirty_pages_pct = 60
-# innodb_max_dirty_pages_pct_lwm = 10
-# innodb_lock_wait_timeout = 30
-# skip_name_resolve = 1
-# thread_cache_size = 64
-# tmp_table_size = 64M
-# max_heap_table_size = 64M
-# key_buffer_size = 32M
-# table_definition_cache = 2000
-# slow_query_log = 1
-# slow_query_log_file = /var/log/mysql/slow.log
-# long_query_time = 2
-# log_slow_verbosity = query_plan
+@HEADER@
 
 [mysqld]
 

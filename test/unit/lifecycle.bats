@@ -60,9 +60,9 @@ EOF
     : >"$DBTUNE_STATE_DIR/apps.tsv"
     : >"$DBTUNE_STATE_DIR/databases.tsv"
     cat >"$DBTUNE_STATE_DIR/analysis.tsv" <<'EOF'
-rule_id	scope	severity	verdict	proposed_key	proposed_value	evidence	reason_sk
-R-MAXCONN	server	high	CHANGE	max_connections	300	current=200	Test max connections.
-R-PINNED	server	medium	CHANGE	skip_name_resolve	1	current=OFF	Test name resolve.
+rule_id	scope	severity	verdict	proposed_key	proposed_value	evidence	reason_id
+R-MAXCONN	server	high	CHANGE	max_connections	300	current=200	reason_max_connections_change
+R-PINNED	server	medium	CHANGE	skip_name_resolve	1	current=OFF	reason_skip_name_resolve
 EOF
     printf 'timestamp\tuptime\tbp_hit_pct\tbp_misses_s\tdata_read_s\trnd_next_s\ttmp_disk_pct\tthreads_running\tthreads_connected\tqcache_hit_pct\tlog_waits_delta\twait_free_delta\tcpu_pct\tmem_available_kb\tswap_used_kb\tload1\trestart_flag\tqcache_queries_delta\tinterval_seconds\tsample_status\n' >"$DBTUNE_STATE_DIR/samples.tsv"
     printf '2026-07-31T12:00:00Z\t100\t99\t0\t0\t0\t0\t1\t1\t30\t0\t0\t1\t1000\t0\t1\t0\t1\t60\tok\n' >>"$DBTUNE_STATE_DIR/samples.tsv"
@@ -229,9 +229,9 @@ prepare_apply_a_b() {
     cp "$DBTUNE_CONFIG_TARGET" "$BATS_TEST_TMPDIR/applied-a.cnf"
 
     printf '%s\n' \
-        $'rule_id\tscope\tseverity\tverdict\tproposed_key\tproposed_value\tevidence\treason_sk' \
-        $'R-MAXCONN\tserver\thigh\tCHANGE\tmax_connections\t400\tcurrent=300\tTest max connections B.' \
-        $'R-PINNED\tserver\tmedium\tCHANGE\tskip_name_resolve\t1\tcurrent=OFF\tTest name resolve.' \
+        $'rule_id\tscope\tseverity\tverdict\tproposed_key\tproposed_value\tevidence\treason_id' \
+        $'R-MAXCONN\tserver\thigh\tCHANGE\tmax_connections\t400\tcurrent=300\treason_max_connections_change' \
+        $'R-PINNED\tserver\tmedium\tCHANGE\tskip_name_resolve\t1\tcurrent=OFF\treason_skip_name_resolve' \
         >"$DBTUNE_STATE_DIR/analysis.tsv"
     cat >"$DBTUNE_STATE_DIR/proposed-99-zz-tuning.cnf" <<'CNF'
 [mysqld]
@@ -607,8 +607,8 @@ STUB
 }
 
 @test "apply rejects critical version and missing-backup findings" {
-    printf 'R-VERSION\tserver\tcritical\tREMOVED\t\t\tinnodb_change_buffering\tOdstranena premenna\n' >>"$DBTUNE_STATE_DIR/analysis.tsv"
-    printf 'R-BACKUP\tserver\tcritical\tMISSING\t\t\tbackup unknown\tZaloha nie je potvrdena\n' >>"$DBTUNE_STATE_DIR/analysis.tsv"
+    printf 'R-VERSION\tserver\tcritical\tREMOVED\t\t\tinnodb_change_buffering\treason_variable_removed_startup\n' >>"$DBTUNE_STATE_DIR/analysis.tsv"
+    printf 'R-BACKUP\tserver\tcritical\tMISSING\t\t\tbackup unknown\treason_backup_missing\n' >>"$DBTUNE_STATE_DIR/analysis.tsv"
     write_manifest
     run cmd_apply
     [ "$status" -eq 65 ]
@@ -1233,4 +1233,24 @@ STUB
     [ "$propose_status" -ne 0 ]
     cmp "$BATS_TEST_TMPDIR/expected.cnf" "$DBTUNE_CONFIG_TARGET"
     [ "$(dbtune_state_read)" = applied ]
+}
+
+@test "apply rejects reason_sk analysis without mutating lifecycle artifacts" {
+    local analysis_hash proposal_hash state_before
+
+    awk -F '\t' 'BEGIN {OFS="\t"} NR==1 {$8="reason_sk"} {print}' "$DBTUNE_STATE_DIR/analysis.tsv" >"$BATS_TEST_TMPDIR/old-analysis.tsv"
+    mv "$BATS_TEST_TMPDIR/old-analysis.tsv" "$DBTUNE_STATE_DIR/analysis.tsv"
+    analysis_hash=$(dbtune_sha256_file "$DBTUNE_STATE_DIR/analysis.tsv")
+    proposal_hash=$(dbtune_sha256_file "$DBTUNE_STATE_DIR/proposed-99-zz-tuning.cnf")
+    state_before=$(dbtune_state_read)
+    dbtune_i18n_set en
+
+    run cmd_apply
+
+    [ "$status" -eq 65 ]
+    [[ "$output" == *'start a new v0.4.0 audit and measurement cycle'* ]]
+    [ "$(dbtune_sha256_file "$DBTUNE_STATE_DIR/analysis.tsv")" = "$analysis_hash" ]
+    [ "$(dbtune_sha256_file "$DBTUNE_STATE_DIR/proposed-99-zz-tuning.cnf")" = "$proposal_hash" ]
+    [ "$(dbtune_state_read)" = "$state_before" ]
+    [ ! -e "$DBTUNE_CONFIG_TARGET" ]
 }

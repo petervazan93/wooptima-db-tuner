@@ -50,6 +50,27 @@ dbtune_analysis_line_is_valid() {
     ((${#line} - ${#without_tabs} == 7))
 }
 
+dbtune_analysis_validate_schema() {
+    local file=${1:-}
+    local header
+
+    [[ -r $file ]] || return 66
+    IFS= read -r header <"$file" || header=''
+    case $header in
+        $'rule_id\tscope\tseverity\tverdict\tproposed_key\tproposed_value\tevidence\treason_id')
+            return 0
+            ;;
+        $'rule_id\tscope\tseverity\tverdict\tproposed_key\tproposed_value\tevidence\treason_sk')
+            dbtune_log error "$(dbtune_msg analysis_old_schema)"
+            return 65
+            ;;
+        *)
+            dbtune_log error "$(dbtune_msg analysis_invalid_header)"
+            return 65
+            ;;
+    esac
+}
+
 dbtune_analysis_parse() {
     local line=${1-}
     local encoded
@@ -64,9 +85,9 @@ dbtune_analysis_parse() {
         DBTUNE_ANALYSIS_PROPOSED_KEY \
         DBTUNE_ANALYSIS_PROPOSED_VALUE \
         DBTUNE_ANALYSIS_EVIDENCE \
-        DBTUNE_ANALYSIS_REASON \
+        DBTUNE_ANALYSIS_REASON_ID \
         _dbtune_analysis_end <<<"${encoded}"$'\034_'
-    DBTUNE_ANALYSIS_REASON=${DBTUNE_ANALYSIS_REASON%$'\r'}
+    DBTUNE_ANALYSIS_REASON_ID=${DBTUNE_ANALYSIS_REASON_ID%$'\r'}
 }
 
 dbtune_analysis_load() {
@@ -74,24 +95,27 @@ dbtune_analysis_load() {
     local line header=1
 
     DBTUNE_ANALYSIS_LINES=()
+    dbtune_analysis_validate_schema "$file" || return
     while IFS= read -r line || [[ -n $line ]]; do
         if ((header)); then
             header=0
-            if [[ $line != $'rule_id\tscope\tseverity\tverdict\tproposed_key\tproposed_value\tevidence\treason_sk' ]]; then
-                dbtune_log error "analysis.tsv nema ocakavanu 8-stlpcovu hlavicku"
-                return 65
-            fi
             continue
         fi
         [[ -n $line ]] || continue
         if ! dbtune_analysis_line_is_valid "$line"; then
-            dbtune_log error "Neplatny analysis.tsv zaznam; ocakava sa presne 8 poli"
+            dbtune_log error "$(dbtune_msg analysis_invalid_record)"
+            return 65
+        fi
+        dbtune_analysis_parse "$line" || return 65
+        if [[ ! $DBTUNE_ANALYSIS_REASON_ID =~ ^reason_[a-z0-9_]+$ ]] ||
+            ! dbtune_i18n_lookup "$DBTUNE_ANALYSIS_REASON_ID"; then
+            dbtune_log error "$(dbtune_msg analysis_invalid_record)"
             return 65
         fi
         DBTUNE_ANALYSIS_LINES+=("$line")
     done <"$file"
     ((header == 0)) || {
-        dbtune_log error "analysis.tsv je prazdny"
+        dbtune_log error "$(dbtune_msg analysis_empty)"
         return 65
     }
 }
@@ -211,14 +235,14 @@ dbtune_tsv_has_header() {
 }
 
 dbtune_render_tsv_inventory() {
-    local title=${1:-Inventár}
+    local title=${1:-Inventory}
     local file=${2:-}
     local line first=1 header=0 row=0 i key value detail
     local -a headers
 
     printf '### %s\n\n' "$title"
     if [[ ! -s $file ]]; then
-        printf '_Údaje nie sú dostupné._\n\n'
+        printf '%s\n\n' "$(dbtune_msg report_inventory_unavailable)"
         return 0
     fi
 
@@ -251,8 +275,8 @@ dbtune_render_tsv_inventory() {
             [[ -z $detail ]] || detail+='; '
             detail+="\`$(dbtune_markdown_escape "$key")\`=$(dbtune_markdown_escape "$value")"
         done
-        [[ -n $detail ]] || detail='_bez bezpečne zobraziteľných hodnôt_'
-        printf -- '- Záznam %s: %s\n' "$row" "$detail"
+        [[ -n $detail ]] || detail=$(dbtune_msg report_inventory_no_safe_values)
+        dbtune_printf report_inventory_record "$row" "$detail"
     done <"$file"
     printf '\n'
 }
@@ -516,12 +540,12 @@ dbtune_action_parse() {
     encoded=${line//$'\t'/$'\034'}
     IFS=$'\034' read -r DBTUNE_ACTION_RULE_ID DBTUNE_ACTION_SCOPE DBTUNE_ACTION_KIND \
         DBTUNE_ACTION_SAFETY DBTUNE_ACTION_TARGET DBTUNE_ACTION_COMMAND DBTUNE_ACTION_DESTRUCTIVE \
-        DBTUNE_ACTION_WARNING DBTUNE_ACTION_CONNECT_TIMEOUT_SECONDS DBTUNE_ACTION_STATEMENT_TIMEOUT_SECONDS \
+        DBTUNE_ACTION_WARNING_ID DBTUNE_ACTION_CONNECT_TIMEOUT_SECONDS DBTUNE_ACTION_STATEMENT_TIMEOUT_SECONDS \
         DBTUNE_ACTION_TIMEOUT_CAPABILITY _dbtune_action_end <<<"${encoded}"$'\034_'
 }
 
 dbtune_actions_load() {
-    local line id path webroot owner database prefix command target action safety warning
+    local line id path webroot owner database prefix command target action safety warning_id
     local sql_action sql_capability action_capability action_connect_timeout action_statement_timeout
     local connect_timeout=5 statement_timeout=30
 
@@ -543,11 +567,11 @@ dbtune_actions_load() {
         action_connect_timeout=not-applicable
         action_statement_timeout=not-applicable
         action_capability=not-applicable
-        warning='Nevykonavajte DELETE, DROP, UPDATE ani automaticky cleanup; vysledok najprv rucne skontrolujte.'
+        warning_id=action_warning_read_only
         if [[ $DBTUNE_ANALYSIS_VERDICT == UNKNOWN && $DBTUNE_ANALYSIS_EVIDENCE == *source_error=* ]]; then
             safety=not-executable
-            warning="Neexekvovatelna diagnostika: auditny zdroj zlyhal ($DBTUNE_ANALYSIS_EVIDENCE); prikaz nebol vygenerovany."
-            DBTUNE_ACTION_LINES+=("$DBTUNE_ANALYSIS_RULE_ID"$'\t'"$DBTUNE_ANALYSIS_SCOPE"$'\t'diagnostic$'\t'"$safety"$'\t'"$(dbtune_report_safe "$target")"$'\t\t'false$'\t'"$(dbtune_report_safe "$warning")"$'\t'"$action_connect_timeout"$'\t'"$action_statement_timeout"$'\t'"$action_capability")
+            warning_id=action_warning_source_error
+            DBTUNE_ACTION_LINES+=("$DBTUNE_ANALYSIS_RULE_ID"$'\t'"$DBTUNE_ANALYSIS_SCOPE"$'\t'diagnostic$'\t'"$safety"$'\t'"$(dbtune_report_safe "$target")"$'\t\t'false$'\t'"$warning_id"$'\t'"$action_connect_timeout"$'\t'"$action_statement_timeout"$'\t'"$action_capability")
             continue
         fi
         case $DBTUNE_ANALYSIS_RULE_ID in
@@ -568,13 +592,13 @@ dbtune_actions_load() {
         esac
         if ((sql_action)) && [[ -z $command ]]; then
             safety=not-executable
-            warning="Neexekvovatelna SQL diagnostika: serverovy statement timeout capability je $sql_capability alebo databazove mapovanie nie je bezpecne; prikaz nebol vygenerovany."
+            warning_id=action_warning_sql_unavailable
         elif [[ -z $command ]] && ! command=$(dbtune_action_wp_command "$webroot" "$owner" "$action" 2>/dev/null); then
             command=''
             safety=not-executable
-            warning='Neexekvovatelna diagnostika: overeny WordPress webroot alebo vlastnik nie je dostupny; prikaz nebol vygenerovany.'
+            warning_id=action_warning_wp_unavailable
         fi
-        DBTUNE_ACTION_LINES+=("$DBTUNE_ANALYSIS_RULE_ID"$'\t'"$DBTUNE_ANALYSIS_SCOPE"$'\t'diagnostic$'\t'"$safety"$'\t'"$(dbtune_report_safe "$target")"$'\t'"$(dbtune_report_safe "$command")"$'\t'false$'\t'"$warning"$'\t'"$action_connect_timeout"$'\t'"$action_statement_timeout"$'\t'"$action_capability")
+        DBTUNE_ACTION_LINES+=("$DBTUNE_ANALYSIS_RULE_ID"$'\t'"$DBTUNE_ANALYSIS_SCOPE"$'\t'diagnostic$'\t'"$safety"$'\t'"$(dbtune_report_safe "$target")"$'\t'"$(dbtune_report_safe "$command")"$'\t'false$'\t'"$warning_id"$'\t'"$action_connect_timeout"$'\t'"$action_statement_timeout"$'\t'"$action_capability")
     done
 }
 
@@ -635,21 +659,21 @@ dbtune_render_executive_actions() {
                     "$(dbtune_markdown_escape "$DBTUNE_ANALYSIS_SEVERITY")" \
                     "$(dbtune_markdown_escape "$DBTUNE_ANALYSIS_SCOPE")" \
                     "$(dbtune_markdown_escape "$DBTUNE_ANALYSIS_VERDICT")" \
-                    "$(dbtune_markdown_escape "$DBTUNE_ANALYSIS_REASON")"
+                    "$(dbtune_markdown_escape "$(dbtune_msg "$DBTUNE_ANALYSIS_REASON_ID")")"
                 shown=$((shown + 1))
                 ((shown >= 5)) && return 0
             done
         done
     done
-    ((shown)) || printf -- '- Analýza neobsahuje žiadne nálezy.\n'
+    ((shown)) || dbtune_printf report_no_findings
 }
 
 dbtune_render_application_overview() {
     local line found=0
 
-    printf '## Aplikačná vrstva — RIEŠ PRVÚ\n\n'
-    printf 'Object cache dotazy odstráni; databázový tuning ich iba zlacní. Najprv vyriešte aplikačné nálezy, až potom aplikujte serverový návrh.\n\n'
-    printf '| Závažnosť | Aplikácia | Verdikt | Dôvod |\n|---|---|---|---|\n'
+    dbtune_printf report_application_heading
+    dbtune_printf report_application_intro
+    dbtune_printf report_application_table
     for line in "${DBTUNE_ANALYSIS_LINES[@]}"; do
         dbtune_analysis_parse "$line" || continue
         [[ $DBTUNE_ANALYSIS_SCOPE == app:* ]] || continue
@@ -658,41 +682,41 @@ dbtune_render_application_overview() {
             "$(dbtune_markdown_escape "$DBTUNE_ANALYSIS_SEVERITY")" \
             "$(dbtune_markdown_escape "${DBTUNE_ANALYSIS_SCOPE#app:}")" \
             "$(dbtune_markdown_escape "$DBTUNE_ANALYSIS_VERDICT")" \
-            "$(dbtune_markdown_escape "$DBTUNE_ANALYSIS_REASON")"
+            "$(dbtune_markdown_escape "$(dbtune_msg "$DBTUNE_ANALYSIS_REASON_ID")")"
     done
-    ((found)) || printf '| info | — | Bez aplikačných nálezov | — |\n'
+    ((found)) || dbtune_printf report_application_none
     printf '\n'
 }
 
 dbtune_render_server_profile() {
     local line _score timestamp cpu bp miss readbps threads correlation rejected reasons
 
-    printf '## Server, hardvér a profil záťaže\n\n'
-    dbtune_render_audit_fact 'Host' audit.hostname hostname host.name server.hostname
-    dbtune_render_audit_fact 'MariaDB' mariadb_version mariadb.version server.mariadb_version
-    dbtune_render_audit_fact 'Operačný systém' os os_version server.os
-    dbtune_render_audit_fact 'CPU jadrá' hw.cpu_count cpu_count cpu_cores cpu.cores
-    dbtune_render_audit_fact 'RAM (bajty)' hw.ram_bytes ram_total ram_mb memory_total_mb memory.total_mb
-    dbtune_render_audit_fact 'Disk' hw.storage_class disk_type storage_type storage.class
-    dbtune_render_audit_fact 'Dataset (bajty)' mariadb.dataset_bytes dataset_size dataset_bytes dataset_mb dataset.total_mb
-    printf -- '- **Počet validných vzoriek:** %s\n\n' "$(dbtune_samples_count "$DBTUNE_SAMPLES_FILE")"
+    dbtune_printf report_server_heading
+    dbtune_render_audit_fact "$(dbtune_msg report_label_host)" audit.hostname hostname host.name server.hostname
+    dbtune_render_audit_fact "$(dbtune_msg report_label_mariadb)" mariadb_version mariadb.version server.mariadb_version
+    dbtune_render_audit_fact "$(dbtune_msg report_label_os)" os os_version server.os
+    dbtune_render_audit_fact "$(dbtune_msg report_label_cpu_cores)" hw.cpu_count cpu_count cpu_cores cpu.cores
+    dbtune_render_audit_fact "$(dbtune_msg report_label_ram_bytes)" hw.ram_bytes ram_total ram_mb memory_total_mb memory.total_mb
+    dbtune_render_audit_fact "$(dbtune_msg report_label_disk)" hw.storage_class disk_type storage_type storage.class
+    dbtune_render_audit_fact "$(dbtune_msg report_label_dataset_bytes)" mariadb.dataset_bytes dataset_size dataset_bytes dataset_mb dataset.total_mb
+    dbtune_printf report_valid_samples "$(dbtune_samples_count "$DBTUNE_SAMPLES_FILE")"
     rejected=$(dbtune_samples_diagnostic_value "$DBTUNE_SAMPLES_FILE" rejected_rows)
     reasons=$(dbtune_samples_diagnostic_value "$DBTUNE_SAMPLES_FILE" rejected_reasons)
-    printf -- '- **Odmietnuté vzorky:** %s (%s)\n\n' "$rejected" "$reasons"
+    dbtune_printf report_rejected_samples "$rejected" "$reasons"
 
-    printf '### Percentily krátkych okien\n\n'
-    printf '| Metrika | p50 | p95 | p99 | Maximum |\n|---|---:|---:|---:|---:|\n'
-    dbtune_render_metric 'MariaDB CPU' 'cpu_pct,mariadbd_cpu_pct,db_cpu_pct' 13 ' %'
-    dbtune_render_metric 'Buffer pool hit ratio' 'bp_hit_pct,bp_hit_ratio,buffer_pool_hit_pct' 3 ' %'
-    dbtune_render_metric 'Buffer pool missy/s' 'bp_misses_s,bp_miss_s,bp_misses_per_s' 4 ''
-    dbtune_render_metric 'Čítanie dát/s' 'data_read_s,data_read_bps,innodb_data_read_bps,data_read_per_s' 5 ' B/s'
-    dbtune_render_metric 'Handler_read_rnd_next/s' 'rnd_next_s,handler_rnd_next_s,handler_read_rnd_next_s,handler_read_rnd_next_per_s' 6 ''
-    dbtune_render_metric 'Threads_running' 'threads_running,running_threads' 8 ''
-    dbtune_render_metric 'Diskové temp tabuľky' 'tmp_disk_pct,tmp_disk_tables_pct' 7 ' %'
-    dbtune_render_metric 'Dostupná RAM' 'mem_available_kb,memory_available_kb' 14 ' KB'
-    dbtune_render_metric 'Použitý swap' 'swap_used_kb,swap_kb' 15 ' KB'
-    printf '\n### Najhoršie okná\n\n'
-    printf '| Čas | CPU %% | BP hit %% | Missy/s | Čítanie B/s | Threads running | Backup korelácia |\n|---|---:|---:|---:|---:|---:|---|\n'
+    dbtune_printf report_percentiles_heading
+    dbtune_printf report_metrics_table
+    dbtune_render_metric "$(dbtune_msg report_metric_mariadb_cpu)" 'cpu_pct,mariadbd_cpu_pct,db_cpu_pct' 13 ' %'
+    dbtune_render_metric "$(dbtune_msg report_metric_bp_hit)" 'bp_hit_pct,bp_hit_ratio,buffer_pool_hit_pct' 3 ' %'
+    dbtune_render_metric "$(dbtune_msg report_metric_bp_misses)" 'bp_misses_s,bp_miss_s,bp_misses_per_s' 4 ''
+    dbtune_render_metric "$(dbtune_msg report_metric_data_read)" 'data_read_s,data_read_bps,innodb_data_read_bps,data_read_per_s' 5 ' B/s'
+    dbtune_render_metric "$(dbtune_msg report_metric_rnd_next)" 'rnd_next_s,handler_rnd_next_s,handler_read_rnd_next_s,handler_read_rnd_next_per_s' 6 ''
+    dbtune_render_metric "$(dbtune_msg report_metric_threads_running)" 'threads_running,running_threads' 8 ''
+    dbtune_render_metric "$(dbtune_msg report_metric_disk_temp)" 'tmp_disk_pct,tmp_disk_tables_pct' 7 ' %'
+    dbtune_render_metric "$(dbtune_msg report_metric_available_ram)" 'mem_available_kb,memory_available_kb' 14 ' KB'
+    dbtune_render_metric "$(dbtune_msg report_metric_swap)" 'swap_used_kb,swap_kb' 15 ' KB'
+    dbtune_printf report_worst_heading
+    dbtune_printf report_worst_table
     for line in "${DBTUNE_WORST_LINES[@]}"; do
         IFS=$'\t' read -r _score timestamp cpu bp miss readbps threads correlation <<<"$line"
         printf '| %s | %s | %s | %s | %s | %s | %s |\n' \
@@ -710,8 +734,8 @@ dbtune_render_server_profile() {
 dbtune_render_proposed_diff() {
     local line found=0
 
-    printf '## Návrh konfigurácie: aktuálna → navrhnutá hodnota\n\n'
-    printf '| Kľúč | Aktuálna hodnota | Navrhnutá hodnota | Evidencia | Odôvodnenie |\n|---|---|---|---|---|\n'
+    dbtune_printf report_proposal_heading
+    dbtune_printf report_proposal_table
     for line in "${DBTUNE_PROPOSAL_LINES[@]}"; do
         dbtune_proposal_parse "$line"
         found=1
@@ -720,16 +744,16 @@ dbtune_render_proposed_diff() {
             "$(dbtune_markdown_escape "$DBTUNE_PROPOSAL_CURRENT")" \
             "$(dbtune_markdown_escape "$DBTUNE_PROPOSAL_VALUE")" \
             "$(dbtune_markdown_escape "$DBTUNE_PROPOSAL_EVIDENCE")" \
-            "$(dbtune_markdown_escape "$DBTUNE_PROPOSAL_REASON")"
+            "$(dbtune_markdown_escape "$(dbtune_msg "$DBTUNE_PROPOSAL_REASON_ID")")"
     done
-    ((found)) || printf '| — | — | — | Analýza nenavrhla žiadnu serverovú zmenu. | — |\n'
+    ((found)) || dbtune_printf report_proposal_none
     printf '\n'
 }
 
 dbtune_render_per_app() {
     local outer_line inner_line action_line autoload_line scope rendered_scopes=$'\n' found=0 action_text autoload_found
 
-    printf '## Per-app sekcie\n\n'
+    dbtune_printf report_per_app_heading
     for outer_line in "${DBTUNE_ANALYSIS_LINES[@]}"; do
         dbtune_analysis_parse "$outer_line" || continue
         [[ $DBTUNE_ANALYSIS_SCOPE == app:* ]] || continue
@@ -738,7 +762,7 @@ dbtune_render_per_app() {
         rendered_scopes+="$scope"$'\n'
         found=1
         printf '### %s\n\n' "$(dbtune_markdown_escape "${scope#app:}")"
-        printf '| Závažnosť | Verdikt | Evidencia | Odporúčanie | Bezpečný action krok |\n|---|---|---|---|---|\n'
+        dbtune_printf report_per_app_table
         for inner_line in "${DBTUNE_ANALYSIS_LINES[@]}"; do
             dbtune_analysis_parse "$inner_line" || continue
             [[ $DBTUNE_ANALYSIS_SCOPE == "$scope" ]] || continue
@@ -746,18 +770,18 @@ dbtune_render_per_app() {
             for action_line in "${DBTUNE_ACTION_LINES[@]}"; do
                 dbtune_action_parse "$action_line"
                 [[ $DBTUNE_ACTION_RULE_ID == "$DBTUNE_ANALYSIS_RULE_ID" && $DBTUNE_ACTION_SCOPE == "$scope" ]] || continue
-                action_text="type=$DBTUNE_ACTION_KIND; safety=$DBTUNE_ACTION_SAFETY; destructive=$DBTUNE_ACTION_DESTRUCTIVE; target=$DBTUNE_ACTION_TARGET; connect_timeout_seconds=$DBTUNE_ACTION_CONNECT_TIMEOUT_SECONDS; statement_timeout_seconds=$DBTUNE_ACTION_STATEMENT_TIMEOUT_SECONDS; timeout_capability=$DBTUNE_ACTION_TIMEOUT_CAPABILITY; command=\`$DBTUNE_ACTION_COMMAND\`; warning=$DBTUNE_ACTION_WARNING"
+                action_text="type=$DBTUNE_ACTION_KIND; safety=$DBTUNE_ACTION_SAFETY; destructive=$DBTUNE_ACTION_DESTRUCTIVE; target=$DBTUNE_ACTION_TARGET; connect_timeout_seconds=$DBTUNE_ACTION_CONNECT_TIMEOUT_SECONDS; statement_timeout_seconds=$DBTUNE_ACTION_STATEMENT_TIMEOUT_SECONDS; timeout_capability=$DBTUNE_ACTION_TIMEOUT_CAPABILITY; command=\`$DBTUNE_ACTION_COMMAND\`; warning_id=$DBTUNE_ACTION_WARNING_ID; warning=$(dbtune_msg "$DBTUNE_ACTION_WARNING_ID")"
                 break
             done
             printf '| %s | %s | %s | %s | %s |\n' \
                 "$(dbtune_markdown_escape "$DBTUNE_ANALYSIS_SEVERITY")" \
                 "$(dbtune_markdown_escape "$DBTUNE_ANALYSIS_VERDICT")" \
                 "$(dbtune_markdown_escape "$DBTUNE_ANALYSIS_EVIDENCE")" \
-                "$(dbtune_markdown_escape "$DBTUNE_ANALYSIS_REASON")" \
+                "$(dbtune_markdown_escape "$(dbtune_msg "$DBTUNE_ANALYSIS_REASON_ID")")" \
                 "$(dbtune_markdown_escape "$action_text")"
         done
-        printf '\n#### Top autoload položky (iba názov a veľkosť)\n\n'
-        printf '| Option | Bajty |\n|---|---:|\n'
+        dbtune_printf report_autoload_heading
+        dbtune_printf report_autoload_table
         autoload_found=0
         for autoload_line in "${DBTUNE_AUTOLOAD_LINES[@]}"; do
             IFS=$'\t' read -r DBTUNE_AUTOLOAD_SCOPE DBTUNE_AUTOLOAD_NAME DBTUNE_AUTOLOAD_SIZE <<<"$autoload_line"
@@ -765,18 +789,18 @@ dbtune_render_per_app() {
             autoload_found=1
             printf '| %s | %s |\n' "$(dbtune_markdown_escape "$DBTUNE_AUTOLOAD_NAME")" "$(dbtune_markdown_escape "$DBTUNE_AUTOLOAD_SIZE")"
         done
-        ((autoload_found)) || printf '| — | Údaje nie sú dostupné. |\n'
+        ((autoload_found)) || dbtune_printf report_autoload_unavailable
         printf '\n'
     done
-    ((found)) || printf '_Bez per-app nálezov._\n\n'
-    dbtune_render_tsv_inventory 'Inventár aplikácií' "$DBTUNE_APPS_FILE"
-    dbtune_render_tsv_inventory 'Databázy' "$DBTUNE_DATABASES_FILE"
+    ((found)) || dbtune_printf report_per_app_none
+    dbtune_render_tsv_inventory "$(dbtune_msg report_inventory_apps)" "$DBTUNE_APPS_FILE"
+    dbtune_render_tsv_inventory "$(dbtune_msg report_inventory_databases)" "$DBTUNE_DATABASES_FILE"
 }
 
 dbtune_render_security() {
     local line found=0
 
-    printf '## Bezpečnostné nálezy\n\n'
+    dbtune_printf report_security_heading
     for line in "${DBTUNE_ANALYSIS_LINES[@]}"; do
         dbtune_analysis_parse "$line" || continue
         dbtune_security_rule || continue
@@ -784,9 +808,9 @@ dbtune_render_security() {
         printf -- '- **%s:** %s. %s\n' \
             "$(dbtune_markdown_escape "$DBTUNE_ANALYSIS_SEVERITY")" \
             "$(dbtune_markdown_escape "$DBTUNE_ANALYSIS_VERDICT")" \
-            "$(dbtune_markdown_escape "$DBTUNE_ANALYSIS_REASON")"
+            "$(dbtune_markdown_escape "$(dbtune_msg "$DBTUNE_ANALYSIS_REASON_ID")")"
     done
-    ((found)) || printf -- '- Bez samostatných bezpečnostných nálezov v analýze.\n'
+    ((found)) || dbtune_printf report_security_none
     printf '\n'
 }
 
@@ -811,43 +835,43 @@ dbtune_render_markdown() {
     mariadb_optional=$(dbtune_audit_value "$DBTUNE_AUDIT_FILE" audit.section.mariadb.optional_evidence 2>/dev/null || printf unknown)
 
     printf '# dbtune report\n\n'
-    printf '_Vygenerované: %s | dbtune %s_\n\n' "$(dbtune_markdown_escape "$generated_at")" "$(dbtune_markdown_escape "$DBTUNE_ARTIFACT_VERSION")"
-    printf "_Run: \`%s\` | fingerprint: \`%s\` | audit SHA-256: \`%s\` | samples SHA-256: \`%s\` | dbsize SHA-256: \`%s\`_\n\n" \
+    dbtune_printf report_generated "$(dbtune_markdown_escape "$generated_at")" "$(dbtune_markdown_escape "$DBTUNE_ARTIFACT_VERSION")"
+    dbtune_printf report_provenance \
         "$(dbtune_markdown_escape "$DBTUNE_RUN_ID")" \
         "$(dbtune_markdown_escape "$DBTUNE_ANALYSIS_FINGERPRINT")" \
         "$(dbtune_markdown_escape "$DBTUNE_AUDIT_HASH")" \
         "$(dbtune_markdown_escape "$DBTUNE_SAMPLES_HASH")" \
         "$(dbtune_markdown_escape "$DBTUNE_DBSIZE_HASH")"
     if [[ $DBTUNE_SERVER_SUPPORT == unsupported ]]; then
-        printf '> **Nepodporovaná MariaDB:** serverová rodina nebola explicitne schválená. Serverové tuning odporúčania a návrh konfigurácie sú potlačené.\n\n'
+        dbtune_printf report_unsupported
     fi
-    printf '## Executive summary\n\n'
-    printf '**Celkový stav auditu:** %s.\n\n' "$(dbtune_markdown_escape "$audit_status")"
-    printf -- '- **Povinné sekcie:** %s\n' "$(dbtune_markdown_escape "$required_sections")"
-    printf -- '- **Zlyhané sekcie:** %s\n' "$(dbtune_markdown_escape "$failed_sections")"
-    printf -- '- **Čiastočné sekcie:** %s\n' "$(dbtune_markdown_escape "$partial_sections")"
-    printf -- '- **Ovplyvnené domény odporúčaní:** %s\n\n' "$(dbtune_markdown_escape "$affected_domains")"
-    printf -- '- **MariaDB chýbajúce dôkazy:** %s\n' "$(dbtune_markdown_escape "$mariadb_missing")"
-    printf -- '- **MariaDB neplatné dôkazy:** %s\n' "$(dbtune_markdown_escape "$mariadb_invalid")"
-    printf -- '- **MariaDB konfliktné dôkazy:** %s\n' "$(dbtune_markdown_escape "$mariadb_conflicting")"
-    printf -- '- **MariaDB voliteľné dôkazy:** %s\n\n' "$(dbtune_markdown_escape "$mariadb_optional")"
-    printf '**Nálezy:** critical %s, high %s, medium %s, low %s.\n\n' "$critical" "$high" "$medium" "$low"
+    dbtune_printf report_summary_heading
+    dbtune_printf report_audit_status "$(dbtune_markdown_escape "$audit_status")"
+    dbtune_printf report_required_sections "$(dbtune_markdown_escape "$required_sections")"
+    dbtune_printf report_failed_sections "$(dbtune_markdown_escape "$failed_sections")"
+    dbtune_printf report_partial_sections "$(dbtune_markdown_escape "$partial_sections")"
+    dbtune_printf report_affected_domains "$(dbtune_markdown_escape "$affected_domains")"
+    dbtune_printf report_mariadb_missing "$(dbtune_markdown_escape "$mariadb_missing")"
+    dbtune_printf report_mariadb_invalid "$(dbtune_markdown_escape "$mariadb_invalid")"
+    dbtune_printf report_mariadb_conflicting "$(dbtune_markdown_escape "$mariadb_conflicting")"
+    dbtune_printf report_mariadb_optional "$(dbtune_markdown_escape "$mariadb_optional")"
+    dbtune_printf report_findings "$critical" "$high" "$medium" "$low"
     dbtune_render_executive_actions
     printf '\n'
     dbtune_render_application_overview
     dbtune_render_server_profile
     dbtune_render_proposed_diff
-    printf '> **Bezpečnostné upozornenie:** action kroky sú iba read-only diagnostika. dbtune automaticky nespúšťa aplikačné SQL ani cleanup; deštruktívne DELETE, DROP a UPDATE vykonajte iba po samostatnom review a overenej zálohe.\n\n'
+    dbtune_printf report_safety_warning
     dbtune_render_per_app
     dbtune_render_security
-    printf '## Ďalší postup\n\n'
-    printf '1. Vyriešte aplikačné nálezy, najmä object cache, autoload, HPOS a wp-cron.\n'
+    dbtune_printf report_next_steps_heading
+    dbtune_printf report_next_step_apps
     if [[ $DBTUNE_SERVER_SUPPORT == unsupported ]]; then
-        printf '2. Nepoužívajte serverové tuning odporúčania, kým táto MariaDB rodina neprejde compatibility review.\n'
+        dbtune_printf report_next_step_unsupported
     else
-        printf "2. Skontrolujte diff a vytvorte gated serverový súbor príkazom \`dbtune propose\`.\n"
-        printf '3. Pred reštartom validujte názvy premenných a konfiguráciu; reštart vykonajte cez RunCloud panel.\n'
-        printf "4. Po reštarte spustite \`dbtune verify --post\` a po 24 hodinách \`dbtune verify --24h\`.\n"
+        dbtune_printf report_next_step_propose
+        dbtune_printf report_next_step_restart
+        dbtune_printf report_next_step_verify
     fi
 }
 
@@ -877,7 +901,8 @@ dbtune_render_json() {
     local score timestamp cpu bp miss readbps threads correlation field_index
 
     DBTUNE_JSON_FIELDS=(
-        schema_version fleet-v2
+        schema_version fleet-v3
+        report.language "$DBTUNE_I18N_LANGUAGE"
         generated_at "$generated_at"
         dbtune_version "$DBTUNE_ARTIFACT_VERSION"
         run_id "$DBTUNE_RUN_ID"
@@ -938,7 +963,8 @@ dbtune_render_json() {
             "$rule_prefix.proposed_key" "$(dbtune_report_safe "$DBTUNE_ANALYSIS_PROPOSED_KEY")"
             "$rule_prefix.proposed_value" "$(dbtune_report_safe "$DBTUNE_ANALYSIS_PROPOSED_VALUE")"
             "$rule_prefix.evidence" "$(dbtune_report_safe "$DBTUNE_ANALYSIS_EVIDENCE")"
-            "$rule_prefix.reason_sk" "$(dbtune_report_safe "$DBTUNE_ANALYSIS_REASON")"
+            "$rule_prefix.reason_id" "$(dbtune_report_safe "$DBTUNE_ANALYSIS_REASON_ID")"
+            "$rule_prefix.reason" "$(dbtune_report_safe "$(dbtune_msg "$DBTUNE_ANALYSIS_REASON_ID")")"
         )
         [[ $DBTUNE_ANALYSIS_SCOPE == app:* ]] && app_rule_count=$((app_rule_count + 1))
         dbtune_security_rule && security_count=$((security_count + 1))
@@ -955,7 +981,8 @@ dbtune_render_json() {
             "$proposal_prefix.current" "$(dbtune_report_safe "$DBTUNE_PROPOSAL_CURRENT")"
             "$proposal_prefix.value" "$(dbtune_report_safe "$DBTUNE_PROPOSAL_VALUE")"
             "$proposal_prefix.evidence" "$(dbtune_report_safe "$DBTUNE_PROPOSAL_EVIDENCE")"
-            "$proposal_prefix.reason_sk" "$(dbtune_report_safe "$DBTUNE_PROPOSAL_REASON")"
+            "$proposal_prefix.reason_id" "$(dbtune_report_safe "$DBTUNE_PROPOSAL_REASON_ID")"
+            "$proposal_prefix.reason" "$(dbtune_report_safe "$(dbtune_msg "$DBTUNE_PROPOSAL_REASON_ID")")"
         )
         index=$((index + 1))
     done
@@ -972,7 +999,8 @@ dbtune_render_json() {
             "$action_prefix.target" "$DBTUNE_ACTION_TARGET"
             "$action_prefix.command" "$DBTUNE_ACTION_COMMAND"
             "$action_prefix.destructive" "$DBTUNE_ACTION_DESTRUCTIVE"
-            "$action_prefix.warning" "$DBTUNE_ACTION_WARNING"
+            "$action_prefix.warning_id" "$DBTUNE_ACTION_WARNING_ID"
+            "$action_prefix.warning" "$(dbtune_msg "$DBTUNE_ACTION_WARNING_ID")"
             "$action_prefix.connect_timeout_seconds" "$DBTUNE_ACTION_CONNECT_TIMEOUT_SECONDS"
             "$action_prefix.statement_timeout_seconds" "$DBTUNE_ACTION_STATEMENT_TIMEOUT_SECONDS"
             "$action_prefix.timeout_capability" "$DBTUNE_ACTION_TIMEOUT_CAPABILITY"
@@ -1007,7 +1035,7 @@ dbtune_render_json() {
         )
         index=$((index + 1))
     done
-    DBTUNE_JSON_FIELDS+=(autoload.count "$index" actions.warning "Nevykonavajte destruktivne SQL automaticky; action kroky su read-only diagnostika.")
+    DBTUNE_JSON_FIELDS+=(autoload.count "$index" actions.warning_id actions_warning_summary actions.warning "$(dbtune_msg actions_warning_summary)")
     for ((field_index = 1; field_index < ${#DBTUNE_JSON_FIELDS[@]}; field_index += 2)); do
         DBTUNE_JSON_FIELDS[field_index]=$(dbtune_report_safe "${DBTUNE_JSON_FIELDS[$field_index]}")
     done
@@ -1040,7 +1068,7 @@ dbtune_proposal_parse() {
         DBTUNE_PROPOSAL_KEY \
         DBTUNE_PROPOSAL_VALUE \
         DBTUNE_PROPOSAL_EVIDENCE \
-        DBTUNE_PROPOSAL_REASON \
+        DBTUNE_PROPOSAL_REASON_ID \
         DBTUNE_PROPOSAL_CURRENT \
         _dbtune_proposal_end <<<"${encoded}"$'\034_'
 }
@@ -1091,7 +1119,7 @@ dbtune_proposals_load() {
         line=$(printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s' \
             "$DBTUNE_ANALYSIS_RULE_ID" "$DBTUNE_ANALYSIS_SCOPE" "$DBTUNE_ANALYSIS_SEVERITY" \
             "$DBTUNE_ANALYSIS_VERDICT" "$canonical" "$DBTUNE_ANALYSIS_PROPOSED_VALUE" \
-            "$DBTUNE_ANALYSIS_EVIDENCE" "$DBTUNE_ANALYSIS_REASON")
+            "$DBTUNE_ANALYSIS_EVIDENCE" "$DBTUNE_ANALYSIS_REASON_ID")
         DBTUNE_ANALYSIS_LINES[index]=$line
         DBTUNE_PROPOSAL_LINES+=("$line"$'\t'"$current")
     done
@@ -1113,8 +1141,40 @@ dbtune_proposal_template() {
     if declare -F dbtune_embedded_get >/dev/null 2>&1; then
         dbtune_embedded_get templates/tuning.cnf.tmpl
     else
-        printf '%s\n' '# dbtune @DBTUNE_VERSION@, vygenerovane @GENERATED_AT@' '[mysqld]' '@RULES@'
+        printf '%s\n' '@HEADER@' '[mysqld]' '@RULES@'
     fi
+}
+
+dbtune_render_proposal_header() {
+    local generated_at=${1:-}
+
+    printf '%s\n' '# proposed-99-zz-tuning.cnf'
+    dbtune_printf cnf_generated "$DBTUNE_ARTIFACT_VERSION" "$generated_at"
+    dbtune_printf cnf_load_order
+    dbtune_printf cnf_rollback
+    printf '%s\n' '#'
+    dbtune_printf cnf_baseline_intro
+    printf '%s\n' \
+        '# innodb_flush_log_at_trx_commit = 1' \
+        '# innodb_doublewrite = 1' \
+        '# innodb_flush_method = O_DIRECT' \
+        '# innodb_buffer_pool_dump_at_shutdown = 1' \
+        '# innodb_buffer_pool_load_at_startup = 1' \
+        '# innodb_flush_neighbors = 0' \
+        '# innodb_max_dirty_pages_pct = 60' \
+        '# innodb_max_dirty_pages_pct_lwm = 10' \
+        '# innodb_lock_wait_timeout = 30' \
+        '# skip_name_resolve = 1' \
+        '# thread_cache_size = 64' \
+        '# tmp_table_size = 64M' \
+        '# max_heap_table_size = 64M' \
+        '# key_buffer_size = 32M' \
+        '# table_definition_cache = 2000' \
+        '# slow_query_log = 1' \
+        '# slow_query_log_file = /var/log/mysql/slow.log' \
+        '# long_query_time = 2' \
+        '# log_slow_verbosity = query_plan' \
+        ''
 }
 
 dbtune_render_proposal_rules() {
@@ -1125,8 +1185,8 @@ dbtune_render_proposal_rules() {
         printf '# %s [%s]: %s\n' \
             "$(dbtune_cnf_comment "$DBTUNE_PROPOSAL_RULE_ID")" \
             "$(dbtune_cnf_comment "$DBTUNE_PROPOSAL_SEVERITY")" \
-            "$(dbtune_cnf_comment "$DBTUNE_PROPOSAL_REASON")"
-        [[ -z $DBTUNE_PROPOSAL_EVIDENCE ]] || printf '# Evidencia: %s\n' "$(dbtune_cnf_comment "$DBTUNE_PROPOSAL_EVIDENCE")"
+            "$(dbtune_cnf_comment "$(dbtune_msg "$DBTUNE_PROPOSAL_REASON_ID")")"
+        [[ -z $DBTUNE_PROPOSAL_EVIDENCE ]] || printf '# %s: %s\n' "$(dbtune_msg cnf_evidence)" "$(dbtune_cnf_comment "$DBTUNE_PROPOSAL_EVIDENCE")"
         printf '%s = %s\n\n' "$DBTUNE_PROPOSAL_KEY" "$DBTUNE_PROPOSAL_VALUE"
     done
 }
@@ -1136,17 +1196,15 @@ dbtune_render_proposal() {
     local line
 
     while IFS= read -r line || [[ -n $line ]]; do
-        line=${line//@DBTUNE_VERSION@/$DBTUNE_ARTIFACT_VERSION}
-        line=${line//@GENERATED_AT@/$generated_at}
-        if [[ $line == '@RULES@' ]]; then
-            dbtune_render_proposal_rules
-        else
-            printf '%s\n' "$line"
-        fi
+        case $line in
+            '@HEADER@') dbtune_render_proposal_header "$generated_at" ;;
+            '@RULES@') dbtune_render_proposal_rules ;;
+            *) printf '%s\n' "$line" ;;
+        esac
     done < <(dbtune_proposal_template)
 }
 
-# Funkciu vola CLI dispatcher aj collector bez argumentov.
+# Called without arguments by both the CLI dispatcher and collector.
 # shellcheck disable=SC2120
 cmd_report() {
     local generated_at markdown json report_file json_file analysis_manifest
@@ -1191,8 +1249,7 @@ cmd_report() {
     printf '%s\n' "$json" | dbtune_atomic_write "$json_file" 600 || return
 
     command cat "$report_file"
-    printf '\nReport uložený: %s\nJSON uložený: %s\n' \
-        "$(dbtune_report_safe "$report_file")" "$(dbtune_report_safe "$json_file")"
+    dbtune_printf report_saved "$(dbtune_report_safe "$report_file")" "$(dbtune_report_safe "$json_file")"
 }
 
 cmd_propose() {
@@ -1268,5 +1325,5 @@ cmd_propose() {
     fi
     dbtune_event proposal_completed run_id "$run_id" audit_hash "$audit_hash" \
         samples_hash "$samples_hash" analysis_hash "$analysis_hash" proposal_hash "$proposal_hash" || true
-    printf 'Návrh uložený: %s\n' "$(dbtune_report_safe "$proposal_file")"
+    dbtune_printf proposal_saved "$(dbtune_report_safe "$proposal_file")"
 }

@@ -289,7 +289,7 @@ dbtune_lifecycle_has_measurement() {
     dbtune_provenance_validate_analysis >/dev/null 2>&1 || return 1
     count=$(dbtune_samples_inspect "$samples" count) || return 1
     ((count >= ${DBTUNE_MIN_APPLY_SAMPLES:-288})) || return 1
-    awk -F '\t' 'NR==1 {exit !(NF==8 && $1=="rule_id" && $2=="scope" && $5=="proposed_key" && $8=="reason_sk")}' "$analysis"
+    awk -F '\t' 'NR==1 {exit !(NF==8 && $1=="rule_id" && $2=="scope" && $5=="proposed_key" && $8=="reason_id")}' "$analysis"
 }
 
 dbtune_lifecycle_manifest_value_from() {
@@ -384,7 +384,7 @@ dbtune_lifecycle_validate_proposal_records() {
 dbtune_lifecycle_check_apply_inputs() {
     local force=${1:-0}
     local proposal=${2:-}
-    local state
+    local analysis state
 
     [[ -n $proposal ]] || proposal=$(dbtune_lifecycle_proposal)
     state=$(dbtune_state_read) || return
@@ -399,6 +399,10 @@ dbtune_lifecycle_check_apply_inputs() {
     if [[ ! -s $proposal ]]; then
         dbtune_log error "Chyba navrh konfiguracie: $proposal"
         return 66
+    fi
+    analysis=$(dbtune_path analysis.tsv) || return
+    if [[ -s $analysis ]]; then
+        dbtune_analysis_validate_schema "$analysis" || return
     fi
     if ! dbtune_lifecycle_has_measurement && ((force == 0)); then
         dbtune_log error "Apply je zablokovany: chyba samples.tsv alebo analysis.tsv; preset bez merania je hadanie"

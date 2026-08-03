@@ -188,6 +188,31 @@ write_current_audit_manifest() {
     [ "$(analysis_value "$BATS_TEST_TMPDIR/analysis.tsv" R-LOG-BUF innodb_log_buffer_size)" = 64M ]
 }
 
+@test "analysis schema hashes and reason identifiers are language-neutral" {
+    local en_hash sk_hash
+
+    make_audit "$BATS_TEST_TMPDIR/audit.tsv"
+    make_samples "$BATS_TEST_TMPDIR/samples.tsv" 30 2 10
+
+    dbtune_i18n_set en
+    dbtune_rules_analyze "$BATS_TEST_TMPDIR/audit.tsv" "$BATS_TEST_TMPDIR/samples.tsv" "" "" "" 10 >"$BATS_TEST_TMPDIR/en.tsv"
+    en_hash=$(dbtune_sha256_file "$BATS_TEST_TMPDIR/en.tsv")
+    dbtune_i18n_set sk
+    dbtune_rules_analyze "$BATS_TEST_TMPDIR/audit.tsv" "$BATS_TEST_TMPDIR/samples.tsv" "" "" "" 10 >"$BATS_TEST_TMPDIR/sk.tsv"
+    sk_hash=$(dbtune_sha256_file "$BATS_TEST_TMPDIR/sk.tsv")
+
+    run cmp "$BATS_TEST_TMPDIR/en.tsv" "$BATS_TEST_TMPDIR/sk.tsv"
+    [ "$status" -eq 0 ]
+    [ "$en_hash" = "$sk_hash" ]
+    [ "$(awk 'NR==1 {print}' "$BATS_TEST_TMPDIR/en.tsv")" = $'rule_id\tscope\tseverity\tverdict\tproposed_key\tproposed_value\tevidence\treason_id' ]
+    run awk -F '\t' 'NR > 1 && $8 !~ /^reason_[a-z0-9_]+$/ {bad=1} END {print bad+0}' "$BATS_TEST_TMPDIR/en.tsv"
+    [ "$status" -eq 0 ]
+    [ "$output" = 0 ]
+    run awk -F '\t' '$1=="R-BP-SIZE" && $4=="CHANGE" {print $7 "\t" $8; exit}' "$BATS_TEST_TMPDIR/en.tsv"
+    [[ "$output" == *'dataset='* ]]
+    [[ "$output" == *$'\treason_buffer_pool_change' ]]
+}
+
 @test "max connections requires an authoritative non-OLS worker limit" {
     make_audit "$BATS_TEST_TMPDIR/audit.tsv"
     make_samples "$BATS_TEST_TMPDIR/samples.tsv" 30 1 10 0 12582912 2
@@ -500,7 +525,7 @@ EOF
     cp "$BATS_TEST_DIRNAME/../fixtures/samples-7d.tsv" "$DBTUNE_STATE_DIR/samples.tsv"
     printf 'timestamp\tdatabase\tsize_bytes\n2026-07-01T00:00:00Z\tshop\t5368709120\n' >"$DBTUNE_STATE_DIR/dbsize.tsv"
     write_current_audit_manifest
-    printf 'rule_id\tscope\tseverity\tverdict\tproposed_key\tproposed_value\tevidence\treason_sk\n' >"$DBTUNE_STATE_DIR/analysis.tsv"
+    printf 'rule_id\tscope\tseverity\tverdict\tproposed_key\tproposed_value\tevidence\treason_id\n' >"$DBTUNE_STATE_DIR/analysis.tsv"
 
     dbtune_provenance_write_analysis_manifest "$DBTUNE_STATE_DIR/first-manifest.tsv" \
         "$DBTUNE_STATE_DIR/analysis.tsv" "$DBTUNE_STATE_DIR/samples.tsv" "$DBTUNE_STATE_DIR/dbsize.tsv"

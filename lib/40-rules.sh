@@ -95,7 +95,7 @@ dbtune_rules_analyze() {
         load_table(apps_file, "app")
         load_table(databases_file, "database")
 
-        print "rule_id", "scope", "severity", "verdict", "proposed_key", "proposed_value", "evidence", "reason_sk"
+        print "rule_id", "scope", "severity", "verdict", "proposed_key", "proposed_value", "evidence", "reason_id"
         server_rules()
         app_rules()
     }
@@ -527,11 +527,11 @@ dbtune_rules_analyze() {
         if (ram <= 0) ram = numeric(ag("ram_total_kb", "0")) * 1024
         current = bytes(ag("innodb_buffer_pool_size", "0"))
         if (!("innodb_buffer_pool_size" in present) || current <= 0) {
-            emit("R-BP-SIZE", "server", "high", "UNKNOWN", "", "", "current=missing; proposal_blocked=missing-current", "Chyba efektivna hodnota buffer poolu; zmena sa nesmie navrhnut naslepo.")
+            emit("R-BP-SIZE", "server", "high", "UNKNOWN", "", "", "current=missing; proposal_blocked=missing-current", "reason_buffer_pool_current_missing")
             return
         }
         if (dataset <= 0 || ram <= 0) {
-            emit("R-BP-SIZE", "server", "high", "UNKNOWN", "", "", "dataset_bytes=" dataset "; ram_bytes=" ram, "Chybaju data pre bezpecny vypocet buffer poolu.")
+            emit("R-BP-SIZE", "server", "high", "UNKNOWN", "", "", "dataset_bytes=" dataset "; ram_bytes=" ram, "reason_buffer_pool_inputs_missing")
             return
         }
         raw = (dataset + growth_180) * 1.3
@@ -551,17 +551,17 @@ dbtune_rules_analyze() {
         }
         evidence = sprintf("dataset=%.2fG; growth_points=%d; growth_elapsed_days=%d; growth_valid_days=%d; growth_180d=%.2fG; discontinuities=%d; ram=%.2fG; mem_available_p05=%.2fG", dataset / gib, day_count, growth_elapsed_days, growth_valid_days, growth_180 / gib, discontinuity_count, ram / gib, available / gib)
         if (target <= current && current > 0) {
-            emit("R-BP-SIZE", "server", "info", "NO-SHRINK", "", "", evidence "; current=" format_size(current), "Existujuci pool sa automaticky nezmensuje; zmensovanie je rusiva operacia.")
+            emit("R-BP-SIZE", "server", "info", "NO-SHRINK", "", "", evidence "; current=" format_size(current), "reason_buffer_pool_no_shrink")
         } else if (target < step) {
-            emit("R-BP-SIZE", "server", "high", "MEMORY-GUARD", "", "", evidence, "MemAvailable guard nedovoluje bezpecne zvysenie poolu.")
+            emit("R-BP-SIZE", "server", "high", "MEMORY-GUARD", "", "", evidence, "reason_buffer_pool_memory_guard")
         } else {
-            emit("R-BP-SIZE", "server", "high", "CHANGE", "innodb_buffer_pool_size", format_size(target), evidence, "Pool je min((dataset plus kladny sestmesacny rast) krat 1,3; RAM krat 0,5), s MemAvailable guardom a zaokruhlenim na 256M.")
+            emit("R-BP-SIZE", "server", "high", "CHANGE", "innodb_buffer_pool_size", format_size(target), evidence, "reason_buffer_pool_change")
         }
     }
 
     function growth_evidence_rule() {
         if (discontinuity_count > 0)
-            emit("R-BP-GROWTH", "server", "medium", "REVIEW", "", "", sprintf("discontinuities=%d; largest_jump=%.2fG; date=%s; excluded_from_growth=true", discontinuity_count, discontinuity_largest / gib, discontinuity_date), "Skok nad adaptivny prah 25 percent, minimalne 1 GiB, vyzera ako import alebo diskontinuita; z projekcie rastu je vyluceny.")
+            emit("R-BP-GROWTH", "server", "medium", "REVIEW", "", "", sprintf("discontinuities=%d; largest_jump=%.2fG; date=%s; excluded_from_growth=true", discontinuity_count, discontinuity_largest / gib, discontinuity_date), "reason_buffer_pool_growth_discontinuity")
     }
 
     function max_connections_rule(workers, peak, formula, peak_floor, target, current, current_text, evidence, ols, worker_status) {
@@ -571,7 +571,7 @@ dbtune_rules_analyze() {
         if (ols || !("pm_max_children_sum" in present) || workers <= 0) {
             worker_status = ols ? "ols-unavailable" : (("pm_max_children_sum" in present) ? "invalid" : "missing")
             evidence = sprintf("pm.max_children_sum=%d; worker_limit=%s; ols_stack=%s; measured_peak=%d", workers, worker_status, ag("php_fpm_ols_stack", "unknown"), peak)
-            emit("R-MAXCONN", "server", "high", "UNKNOWN", "", "", evidence, "Bez autoritativneho limitu PHP-FPM alebo OLS workerov sa max_connections nesmie odhadovat ani pri nizkom peaku.")
+            emit("R-MAXCONN", "server", "high", "UNKNOWN", "", "", evidence, "reason_max_connections_worker_limit_missing")
             return
         }
         formula = max(100, ceil(workers * 1.25 + 20))
@@ -580,12 +580,12 @@ dbtune_rules_analyze() {
         evidence = sprintf("pm.max_children_sum=%d; measured_peak=%d; formula=%d; peak_floor=%d", workers, peak, formula, peak_floor)
         current_text = ag("max_connections", "")
         if (current_text !~ /^[0-9]+$/) {
-            emit("R-MAXCONN", "server", "high", "UNKNOWN", "", "", evidence "; current=missing; proposal_blocked=missing-current", "Chyba efektivna hodnota max_connections; zmena sa nesmie navrhnut naslepo.")
+            emit("R-MAXCONN", "server", "high", "UNKNOWN", "", "", evidence "; current=missing; proposal_blocked=missing-current", "reason_max_connections_current_missing")
             return
         }
         current = numeric(current_text)
-        if (current == target) emit("R-MAXCONN", "server", "info", "OK", "", "", evidence, "Limit pokryva PHP-FPM aj 25-percentnu rezervu nad nameranym peakom.")
-        else emit("R-MAXCONN", "server", "high", "CHANGE", "max_connections", target, evidence, "Pouziva sa vacsia hodnota zo vzorca PHP-FPM a 25-percentnej rezervy nad realnym peakom.")
+        if (current == target) emit("R-MAXCONN", "server", "info", "OK", "", "", evidence, "reason_max_connections_ok")
+        else emit("R-MAXCONN", "server", "high", "CHANGE", "max_connections", target, evidence, "reason_max_connections_change")
     }
 
     function io_rule(storage, capacity, capacity_max, threads, neighbors, dynamic) {
@@ -597,15 +597,15 @@ dbtune_rules_analyze() {
         else if (storage ~ /ssd|sata/) { capacity = 1000; capacity_max = 2000; threads = 4; neighbors = 0 }
         else if (storage ~ /hdd|rot/) { capacity = 200; capacity_max = 400; threads = 4; neighbors = 1 }
         else {
-            emit("R-IO-CAP", "server", "high", "UNKNOWN", "", "", "storage_class=unknown", "Bez triedy uloziska sa IO kapacity nesmu hadat.")
+            emit("R-IO-CAP", "server", "high", "UNKNOWN", "", "", "storage_class=unknown", "reason_storage_class_unknown")
             return
         }
         dynamic = (version_major > 10 || (version_major == 10 && version_minor >= 11)) ? "dynamic" : "restart"
-        setting("R-IO-CAP", "innodb_io_capacity", capacity, "medium", "storage=" storage, "Kapacita zodpoveda triede uloziska.")
-        setting("R-IO-CAP", "innodb_io_capacity_max", capacity_max, "medium", "storage=" storage, "Spickova IO kapacita zodpoveda triede uloziska.")
-        setting("R-IO-CAP", "innodb_read_io_threads", threads, "medium", "storage=" storage "; gate=" dynamic, "NVMe pouziva osem IO vlakien, ostatne uloziska styri.")
-        setting("R-IO-CAP", "innodb_write_io_threads", threads, "medium", "storage=" storage "; gate=" dynamic, "NVMe pouziva osem IO vlakien, ostatne uloziska styri.")
-        setting("R-IO-CAP", "innodb_flush_neighbors", neighbors, "medium", "storage=" storage, "Susedne stranky sa oplati flushovat iba na rotacnom disku.")
+        setting("R-IO-CAP", "innodb_io_capacity", capacity, "medium", "storage=" storage, "reason_io_capacity")
+        setting("R-IO-CAP", "innodb_io_capacity_max", capacity_max, "medium", "storage=" storage, "reason_io_capacity_max")
+        setting("R-IO-CAP", "innodb_read_io_threads", threads, "medium", "storage=" storage "; gate=" dynamic, "reason_io_threads")
+        setting("R-IO-CAP", "innodb_write_io_threads", threads, "medium", "storage=" storage "; gate=" dynamic, "reason_io_threads")
+        setting("R-IO-CAP", "innodb_flush_neighbors", neighbors, "medium", "storage=" storage, "reason_flush_neighbors")
     }
 
     function qcache_rule(hit, threads, evidence) {
@@ -613,73 +613,73 @@ dbtune_rules_analyze() {
         threads = p95_threads
         evidence = sprintf("qcache_hit_p50=%.2f%%; active_windows=%d; required=%d; idle_windows=%d; unavailable_windows=%d; degraded_windows=%d; rejected_windows=%d; threads_running_p95=%.2f", hit, qcache_active_count, min_samples, qcache_idle_count, qcache_unavailable_count, degraded_sample_count, rejected_sample_count, threads)
         if (qcache_active_count < min_samples) {
-            emit("R-QCACHE", "server", "medium", "UNKNOWN", "", "", evidence, "Query cache nema dost aktivnych okien s nenulovym poctom query; idle okna sa do hit-rate percentilu nerataju.")
+            emit("R-QCACHE", "server", "medium", "UNKNOWN", "", "", evidence, "reason_query_cache_insufficient_active_windows")
             return
         }
         if (hit < 20 || threads > 8) {
-            setting("R-QCACHE", "query_cache_type", "0", "high", evidence, "Query cache sa vypina pri hit rate pod 20 percent alebo p95 Threads_running nad 8.")
-            size_setting("R-QCACHE", "query_cache_size", "0", "high", evidence, "Pri vypnutom query cache sa uvolni aj jeho pamat.")
+            setting("R-QCACHE", "query_cache_type", "0", "high", evidence, "reason_query_cache_disable")
+            size_setting("R-QCACHE", "query_cache_size", "0", "high", evidence, "reason_query_cache_memory_release")
         } else {
-            emit("R-QCACHE", "server", "info", "KEEP", "", "", evidence, "Hit rate aspon 20 percent a p95 Threads_running najviac 8 hovoria query cache ponechat.")
+            emit("R-QCACHE", "server", "info", "KEEP", "", "", evidence, "reason_query_cache_keep")
         }
     }
 
     function gate_rules() {
         if (version_family == "unsupported") {
-            emit("R-VERSION", "server", "critical", "UNSUPPORTED", "", "", "version=" ag("mariadb_version", "unknown"), "Podporovane su MariaDB 10.6, 10.11 a 11.x.")
+            emit("R-VERSION", "server", "critical", "UNSUPPORTED", "", "", "version=" ag("mariadb_version", "unknown"), "reason_version_unsupported")
             return
         }
         if (version_major >= 11 && (present["config_innodb_change_buffering"] || present["landmine_innodb_change_buffering_severity"] || truth(ag("landmine_innodb_change_buffering", ""))))
-            emit("R-VERSION", "server", "critical", "REMOVED", "", "", "innodb_change_buffering; family=" version_family, "Premenna je od MariaDB 11 odstranena a moze zablokovat dalsi start.")
+            emit("R-VERSION", "server", "critical", "REMOVED", "", "", "innodb_change_buffering; family=" version_family, "reason_variable_removed_startup")
         if (present["config_innodb_buffer_pool_instances"] || present["landmine_innodb_buffer_pool_instances_severity"] || truth(ag("landmine_innodb_buffer_pool_instances", "")))
-            emit("R-VERSION", "server", "critical", "REMOVED", "", "", "innodb_buffer_pool_instances; family=" version_family, "Odstranena premenna patri prec z konfiguracie pred restartom.")
+            emit("R-VERSION", "server", "critical", "REMOVED", "", "", "innodb_buffer_pool_instances; family=" version_family, "reason_variable_removed_config")
         if (present["config_innodb_log_files_in_group"] || present["landmine_innodb_log_files_in_group_severity"] || truth(ag("landmine_innodb_log_files_in_group", "")))
-            emit("R-VERSION", "server", "critical", "REMOVED", "", "", "innodb_log_files_in_group; family=" version_family, "Odstranena premenna patri prec z konfiguracie pred restartom.")
+            emit("R-VERSION", "server", "critical", "REMOVED", "", "", "innodb_log_files_in_group; family=" version_family, "reason_variable_removed_config")
         if (version_major >= 11)
-            emit("R-VERSION", "server", "medium", "DEPRECATED", "", "", "innodb_flush_method; family=" version_family, "V MariaDB 11.x je flush_method deprecated; existujucu hodnotu over a nepridavaj novu naslepo.")
+            emit("R-VERSION", "server", "medium", "DEPRECATED", "", "", "innodb_flush_method; family=" version_family, "reason_flush_method_deprecated")
     }
 
     function pinned_rules() {
-        durability_setting("R-PINNED", "innodb_doublewrite", "1", "high", "durability", "Doublewrite chrani stranky pri torn write.")
-        if (version_major < 11) setting("R-PINNED", "innodb_flush_method", "O_DIRECT", "medium", "family=" version_family, "O_DIRECT obmedzi dvojite cachovanie dat.")
-        setting("R-PINNED", "innodb_buffer_pool_dump_at_shutdown", "1", "medium", "warmup", "Dump a load poolu skracuje warm-up po restarte.")
-        setting("R-PINNED", "innodb_buffer_pool_load_at_startup", "1", "medium", "warmup", "Dump a load poolu skracuje warm-up po restarte.")
-        setting("R-PINNED", "innodb_max_dirty_pages_pct", "60", "medium", "flush", "Limit spinych stranok obmedzuje narazovy flush.")
-        setting("R-PINNED", "innodb_max_dirty_pages_pct_lwm", "10", "medium", "flush", "Low-water mark spusti priebezny flush skor.")
-        setting("R-PINNED", "innodb_lock_wait_timeout", "30", "medium", "connections", "Kratsi timeout neblokuje PHP-FPM workery 200 sekund.")
-        setting("R-PINNED", "skip_name_resolve", "1", "medium", "local clients", "Lokalne aplikacie nepotrebuju reverzne DNS.")
-        setting("R-PINNED", "thread_cache_size", "64", "low", "connections", "Cache obmedzi cenu vytvarania vlakien.")
-        size_setting("R-PINNED", "tmp_table_size", "64M", "medium", "LONGTEXT remains disk-backed", "64M pomoze tabulkam bez BLOB/TEXT, ale LONGTEXT zostane na disku.")
-        size_setting("R-PINNED", "max_heap_table_size", "64M", "medium", "must match tmp_table_size", "Limit musi sediet s tmp_table_size.")
-        setting("R-PINNED", "table_definition_cache", "2000", "low", "wordpress tables", "Viac WP databaz potrebuje rezervu definicii tabuliek.")
+        durability_setting("R-PINNED", "innodb_doublewrite", "1", "high", "durability", "reason_doublewrite")
+        if (version_major < 11) setting("R-PINNED", "innodb_flush_method", "O_DIRECT", "medium", "family=" version_family, "reason_o_direct")
+        setting("R-PINNED", "innodb_buffer_pool_dump_at_shutdown", "1", "medium", "warmup", "reason_buffer_pool_warmup")
+        setting("R-PINNED", "innodb_buffer_pool_load_at_startup", "1", "medium", "warmup", "reason_buffer_pool_warmup")
+        setting("R-PINNED", "innodb_max_dirty_pages_pct", "60", "medium", "flush", "reason_dirty_pages_limit")
+        setting("R-PINNED", "innodb_max_dirty_pages_pct_lwm", "10", "medium", "flush", "reason_dirty_pages_lwm")
+        setting("R-PINNED", "innodb_lock_wait_timeout", "30", "medium", "connections", "reason_lock_wait_timeout")
+        setting("R-PINNED", "skip_name_resolve", "1", "medium", "local clients", "reason_skip_name_resolve")
+        setting("R-PINNED", "thread_cache_size", "64", "low", "connections", "reason_thread_cache")
+        size_setting("R-PINNED", "tmp_table_size", "64M", "medium", "LONGTEXT remains disk-backed", "reason_tmp_table_size")
+        size_setting("R-PINNED", "max_heap_table_size", "64M", "medium", "must match tmp_table_size", "reason_max_heap_table_size")
+        setting("R-PINNED", "table_definition_cache", "2000", "low", "wordpress tables", "reason_table_definition_cache")
     }
 
     function operational_rules(key_reads, backup_interval, bind, wildcard, configured, effective, backup_status, backup_source, backup_success, backup_evidence) {
         key_reads = numeric(ag("key_read_requests", "0"))
-        if (key_reads > 0) emit("R-MYISAM", "server", "info", "KEEP", "", "", "Key_read_requests=" key_reads, "MyISAM sa pouziva, key buffer sa nesmie plosne zmensit.")
-        else size_setting("R-MYISAM", "key_buffer_size", "32M", "low", "Key_read_requests=0", "Moderny WordPress MyISAM bezne nepouziva.")
+        if (key_reads > 0) emit("R-MYISAM", "server", "info", "KEEP", "", "", "Key_read_requests=" key_reads, "reason_myisam_keep")
+        else size_setting("R-MYISAM", "key_buffer_size", "32M", "low", "Key_read_requests=0", "reason_myisam_key_buffer")
 
-        setting("R-SLOWLOG", "slow_query_log", "1", "medium", "persistent early warning", "Trvaly slow log je vcasny diagnosticky signal.")
-        setting("R-SLOWLOG", "slow_query_log_file", "/var/log/mysql/slow.log", "medium", "covered by logrotate", "Cesta /var/log/mysql je pokryta MariaDB logrotate.")
-        setting("R-SLOWLOG", "long_query_time", "2", "medium", "production threshold", "Dve sekundy su bezpecny trvaly produkcny prah.")
-        setting("R-SLOWLOG", "log_slow_verbosity", "query_plan", "low", "mariadb-dumpslow compatible", "query_plan zachova uzitocny detail bez EXPLAIN vystupu.")
+        setting("R-SLOWLOG", "slow_query_log", "1", "medium", "persistent early warning", "reason_slow_query_log")
+        setting("R-SLOWLOG", "slow_query_log_file", "/var/log/mysql/slow.log", "medium", "covered by logrotate", "reason_slow_query_log_file")
+        setting("R-SLOWLOG", "long_query_time", "2", "medium", "production threshold", "reason_long_query_time")
+        setting("R-SLOWLOG", "log_slow_verbosity", "query_plan", "low", "mariadb-dumpslow compatible", "reason_log_slow_verbosity")
 
         if (truth(ag("unattended_mariadb_origin", "")) && !truth(ag("unattended_mariadb_blacklisted", "")))
-            emit("R-UNATT", "server", "high", "ACTION", "", "", "MariaDB origin allowed; package blacklist missing", "Zakaz automaticky restart MariaDB a bezpecnostne aktualizacie planuj rucne.")
-        else emit("R-UNATT", "server", "info", "OK", "", "", "unattended-upgrades audited", "Nenasiel sa nekontrolovany automaticky MariaDB upgrade.")
+            emit("R-UNATT", "server", "high", "ACTION", "", "", "MariaDB origin allowed; package blacklist missing", "reason_unattended_upgrade_action")
+        else emit("R-UNATT", "server", "info", "OK", "", "", "unattended-upgrades audited", "reason_unattended_upgrade_ok")
 
         configured = numeric(ag("configured_open_files_limit", ag("runcloud_open_files_limit", "0")))
         effective = numeric(ag("open_files_limit", "0"))
         if (numeric(ag("systemd_limit_nofile", "0")) > 0 && (effective < configured || effective < numeric(ag("systemd_limit_nofile", "0"))))
-            emit("R-OPENFILES", "server", "medium", "SYSTEMD-LIMIT", "", "", "configured=" configured "; effective=" effective "; LimitNOFILE=" ag("systemd_limit_nofile", "unknown"), "open_files_limit sa riesi systemd drop-inom, nie MariaDB cnf.")
-        else emit("R-OPENFILES", "server", "info", "OK", "", "", "effective=" effective, "Efektivny open files limit nie je zjavne zrezany.")
+            emit("R-OPENFILES", "server", "medium", "SYSTEMD-LIMIT", "", "", "configured=" configured "; effective=" effective "; LimitNOFILE=" ag("systemd_limit_nofile", "unknown"), "reason_open_files_systemd_limit")
+        else emit("R-OPENFILES", "server", "info", "OK", "", "", "effective=" effective, "reason_open_files_ok")
 
         bind = tolower(ag("bind_address", "")); wildcard = numeric(ag("remote_grant_count", ag("wildcard_grants", "0")))
         if (bind == "0.0.0.0" || bind == "*" || tolower(ag("port_3306", "")) == "public" || wildcard > 0)
-            emit("R-SEC", "server", "high", "EXPOSED", "", "", "bind_address=" bind "; remote_grants=" wildcard "; listener=" ag("port_3306", "unknown"), "Ak nie je externy DB klient, obmedz listener a granty na localhost.")
-        else emit("R-SEC", "server", "info", "OK", "", "", "bind_address=" bind "; remote_grants=" wildcard, "Audit nenasiel verejny listener ani vzdialeny grant.")
+            emit("R-SEC", "server", "high", "EXPOSED", "", "", "bind_address=" bind "; remote_grants=" wildcard "; listener=" ag("port_3306", "unknown"), "reason_security_exposed")
+        else emit("R-SEC", "server", "info", "OK", "", "", "bind_address=" bind "; remote_grants=" wildcard, "reason_security_ok")
         if (truth(ag("root_cnf_present", "")) || truth(ag("root_cnf_has_password", ag("root_cnf_plaintext_password", ""))))
-            emit("R-SEC", "server", "low", "CREDENTIAL-NOTE", "", "", "root.cnf contains a managed credential", "Heslo z root.cnf nikdy nevypisuj; pri rotacii ho zmen naraz v MariaDB aj v RunCloud subore.")
+            emit("R-SEC", "server", "low", "CREDENTIAL-NOTE", "", "", "root.cnf contains a managed credential", "reason_root_cnf_credential")
 
         backup_interval = numeric(ag("backup_interval_hours", "0"))
         backup_status = tolower(trim(ag("backup_status", "unknown")))
@@ -687,12 +687,12 @@ dbtune_rules_analyze() {
         backup_success = trim(ag("backup_last_success", "unknown"))
         backup_evidence = "status=" backup_status "; source=" backup_source "; checked_at=" ag("backup_checked_at", "unknown") "; last_success=" backup_success "; age_seconds=" ag("backup_age_seconds", "unknown") "; max_age_seconds=" ag("backup_max_age_seconds", "unknown") "; evidence_error=" ag("backup_evidence_error", "none") "; schedule_count=" ag("backup_schedule_count", "unknown") "; interval_hours=" backup_interval
         if (backup_status == "missing" && backup_source != "" && backup_source != "unknown")
-            emit("R-BACKUP", "server", "critical", "MISSING", "", "", backup_evidence, "Potvrdena absencia zalohy blokuje tuning.")
+            emit("R-BACKUP", "server", "critical", "MISSING", "", "", backup_evidence, "reason_backup_missing")
         else if (backup_status != "verified" || backup_source == "" || backup_source == "unknown" || backup_success == "" || backup_success == "unknown" || backup_success == "none")
-            emit("R-BACKUP", "server", "medium", "UNKNOWN", "", "", backup_evidence, "Stav zalohy nie je autoritativne overeny; pocet lokalnych planov sam o sebe zalohu nepotvrdzuje.")
+            emit("R-BACKUP", "server", "medium", "UNKNOWN", "", "", backup_evidence, "reason_backup_unknown")
         else if (backup_interval > 0 && backup_interval <= 3)
-            emit("R-BACKUP", "server", "medium", "FREQUENT", "", "", backup_evidence, "Casty mydumper full scan moze vytvarat IO spicky; over realnu potrebu.")
-        else emit("R-BACKUP", "server", "info", "OK", "", "", backup_evidence, "Zaloha je autoritativne overena.")
+            emit("R-BACKUP", "server", "medium", "FREQUENT", "", "", backup_evidence, "reason_backup_frequent")
+        else emit("R-BACKUP", "server", "info", "OK", "", "", backup_evidence, "reason_backup_verified")
     }
 
     function server_rules(dataset, log_size, log_gate) {
@@ -706,12 +706,12 @@ dbtune_rules_analyze() {
         dataset = bytes(ag("dataset_bytes", "0")); if (latest_dbsize > dataset) dataset = latest_dbsize
         log_size = dataset > 10 * gib ? "1G" : "512M"
         log_gate = (version_major > 10 || (version_major == 10 && version_minor >= 9)) ? "dynamic" : "restart"
-        size_setting("R-LOG-FILE", "innodb_log_file_size", log_size, "medium", sprintf("dataset=%.2fG; gate=%s", dataset / gib, log_gate), "Dataset nad 10G pouziva 1G redo subor, mensi dataset 512M.")
-        size_setting("R-LOG-BUF", "innodb_log_buffer_size", log_waits_total > 0 ? "64M" : "32M", log_waits_total > 0 ? "high" : "medium", "sum_log_waits_delta=" log_waits_total, "64M je odovodnene iba rastom Innodb_log_waits.")
+        size_setting("R-LOG-FILE", "innodb_log_file_size", log_size, "medium", sprintf("dataset=%.2fG; gate=%s", dataset / gib, log_gate), "reason_redo_file_size")
+        size_setting("R-LOG-BUF", "innodb_log_buffer_size", log_waits_total > 0 ? "64M" : "32M", log_waits_total > 0 ? "high" : "medium", "sum_log_waits_delta=" log_waits_total, "reason_log_buffer_size")
         qcache_rule()
         if (truth(ag("skip_log_bin", "")) || falsehood(ag("log_bin", "")))
-            durability_setting("R-TRXCOMMIT", "innodb_flush_log_at_trx_commit", "1", "critical", "skip-log-bin; no PITR", "Bez binlogu je redo jedina ochrana potvrdenych objednavok.")
-        else emit("R-TRXCOMMIT", "server", "info", "REVIEW", "", "", "binary log enabled", "Pri zapnutom binlogu posud durability spolu so sync_binlog a PITR politikou.")
+            durability_setting("R-TRXCOMMIT", "innodb_flush_log_at_trx_commit", "1", "critical", "skip-log-bin; no PITR", "reason_trx_commit_without_binlog")
+        else emit("R-TRXCOMMIT", "server", "info", "REVIEW", "", "", "binary log enabled", "reason_trx_commit_with_binlog")
         pinned_rules()
         operational_rules()
     }
@@ -721,7 +721,7 @@ dbtune_rules_analyze() {
     }
 
     function app_unknown(rule, id, source) {
-        app_emit(rule, id, "medium", "UNKNOWN", "audit_status=" tolower(av(id, "audit_status")) "; source_error=" source, "Zdrojove auditne data pre toto pravidlo nie su dostupne; nalez sa nesmie vyhodnotit ako zdravy ani prazdny.")
+        app_emit(rule, id, "medium", "UNKNOWN", "audit_status=" tolower(av(id, "audit_status")) "; source_error=" source, "reason_app_source_unavailable")
     }
 
     function app_rules(i, id, is_wp, is_woo, redis, cache, disabled_cron, system_cron, autoload, autoload_mb, hpos, orders, sync, kbrow, sessions, failed, retention, transient_count, transient_bytes, policy, meta_index, multisite, source, raw) {
@@ -736,7 +736,7 @@ dbtune_rules_analyze() {
             source = app_source_error(id, "multisite database table_prefix", 1)
             if (source != "") app_unknown("R-APP-MULTISITE", id, source)
             else if (tolower(multisite) == "unsupported" || tolower(multisite) == "unknown")
-                app_emit("R-APP-MULTISITE", id, "medium", "UNKNOWN", "multisite_metrics=" multisite, "Multisite site prefixy neboli enumerovane; aplikacne DB metriky sa nesmu hodnotit ako zdrave.")
+                app_emit("R-APP-MULTISITE", id, "medium", "UNKNOWN", "multisite_metrics=" multisite, "reason_multisite_unknown")
 
             redis = av(id, "redis_active", "redis_running", "redis")
             if (redis == "") redis = ag("app_redis_ping", ag("app_redis_service_active", ""))
@@ -744,13 +744,13 @@ dbtune_rules_analyze() {
             source = app_source_error(id, "wp_root", 1)
             if (source != "") app_unknown("R-APP-OBJECT-CACHE", id, source)
             else if (truth(cache) && truth(redis))
-                app_emit("R-APP-OBJECT-CACHE", id, "info", "OK", "redis=probe-success; dropin=present", "Persistent object cache ma drop-in aj uspesny Redis probe.")
+                app_emit("R-APP-OBJECT-CACHE", id, "info", "OK", "redis=probe-success; dropin=present", "reason_object_cache_ok")
             else if (falsehood(redis))
-                app_emit("R-APP-OBJECT-CACHE", id, "critical", "REDIS-DOWN", "redis=" redis "; dropin=" (cache == "" ? "unknown" : cache), "Redis probe zlyhal; aplikacnu vrstvu ries pred DB tuningom.")
+                app_emit("R-APP-OBJECT-CACHE", id, "critical", "REDIS-DOWN", "redis=" redis "; dropin=" (cache == "" ? "unknown" : cache), "reason_redis_down")
             else if (falsehood(cache) && truth(redis))
-                app_emit("R-APP-OBJECT-CACHE", id, "critical", "DROPIN-MISSING", "redis=" redis "; dropin=" cache, "Redis sam nestaci; WordPress potrebuje wp-content/object-cache.php drop-in.")
+                app_emit("R-APP-OBJECT-CACHE", id, "critical", "DROPIN-MISSING", "redis=" redis "; dropin=" cache, "reason_object_cache_dropin_missing")
             else
-                app_emit("R-APP-OBJECT-CACHE", id, "medium", "UNKNOWN", "redis=" (redis == "" ? "unknown" : redis) "; dropin=" (cache == "" ? "unknown" : cache), "Drop-in aj Redis probe musia byt potvrdene; neznamy stav nie je zdravy stav.")
+                app_emit("R-APP-OBJECT-CACHE", id, "medium", "UNKNOWN", "redis=" (redis == "" ? "unknown" : redis) "; dropin=" (cache == "" ? "unknown" : cache), "reason_object_cache_unknown")
 
             disabled_cron = av(id, "disable_wp_cron", "wp_cron_disabled")
             system_cron = av(id, "system_wp_cron", "wp_cron_system", "cron_present")
@@ -758,8 +758,8 @@ dbtune_rules_analyze() {
             source = app_source_error(id, "wp_config disable_wp_cron", 1)
             if (source == "" && truth(disabled_cron) && tolower(system_cron) == "unknown") source = app_source_error(id, "site_url", 0)
             if (source != "") app_unknown("R-APP-WPCRON", id, source)
-            else if (truth(disabled_cron) && falsehood(system_cron)) app_emit("R-APP-WPCRON", id, "critical", "DISABLED", "DISABLE_WP_CRON=true; system_cron=false", "WP cron nebezi vobec, co ohrozuje objednavky a Action Scheduler.")
-            else if (truth(disabled_cron) && tolower(system_cron) == "unknown") app_emit("R-APP-WPCRON", id, "medium", "UNKNOWN", "DISABLE_WP_CRON=true; app cron mapping=unknown", "Globalny cron nie je dokaz pre tuto aplikaciu; namapuj URL alebo webroot konkretneho wp-cron behu.")
+            else if (truth(disabled_cron) && falsehood(system_cron)) app_emit("R-APP-WPCRON", id, "critical", "DISABLED", "DISABLE_WP_CRON=true; system_cron=false", "reason_wp_cron_disabled")
+            else if (truth(disabled_cron) && tolower(system_cron) == "unknown") app_emit("R-APP-WPCRON", id, "medium", "UNKNOWN", "DISABLE_WP_CRON=true; app cron mapping=unknown", "reason_wp_cron_mapping_unknown")
 
             raw = av(id, "autoload_bytes", "autoload_size_bytes")
             autoload = bytes(raw)
@@ -768,50 +768,50 @@ dbtune_rules_analyze() {
             source = app_source_error(id, "wp_config database table_prefix options_table autoload metrics", 1)
             if (source == "" && tolower(raw) == "unknown") source = "autoload=unknown"
             if (source != "") app_unknown("R-APP-AUTOLOAD", id, source)
-            else if (autoload > 3 * mib) app_emit("R-APP-AUTOLOAD", id, "high", "TOO-LARGE", sprintf("autoload=%.2fM; inspect_top20", autoload / mib), "Autoload nad 3 MB ries prioritne a skontroluj top 20 options.")
-            else if (autoload >= mib) app_emit("R-APP-AUTOLOAD", id, "medium", "REVIEW", sprintf("autoload=%.2fM; inspect_top20", autoload / mib), "Autoload 1 az 3 MB vyzaduje kontrolu najvacsich options.")
-            else if (autoload > 0) app_emit("R-APP-AUTOLOAD", id, "info", "OK", sprintf("autoload=%.2fM", autoload / mib), "Autoload je pod 1 MB.")
+            else if (autoload > 3 * mib) app_emit("R-APP-AUTOLOAD", id, "high", "TOO-LARGE", sprintf("autoload=%.2fM; inspect_top20", autoload / mib), "reason_autoload_too_large")
+            else if (autoload >= mib) app_emit("R-APP-AUTOLOAD", id, "medium", "REVIEW", sprintf("autoload=%.2fM; inspect_top20", autoload / mib), "reason_autoload_review")
+            else if (autoload > 0) app_emit("R-APP-AUTOLOAD", id, "info", "OK", sprintf("autoload=%.2fM", autoload / mib), "reason_autoload_ok")
 
             hpos = av(id, "hpos_enabled", "woocommerce_hpos_enabled", "hpos_woocommerce_custom_orders_table_enabled", "hpos_woocommerce_feature_custom_order_tables_enabled")
             orders = numeric(av(id, "orders_in_posts", "shop_orders_in_posts", "postmeta_orders", "legacy_order_count"))
             sync = av(id, "hpos_sync_enabled", "hpos_data_sync", "data_sync_enabled", "hpos_woocommerce_custom_orders_table_data_sync_enabled")
             source = app_source_error(id, "wp_config database table_prefix options_table hpos legacy_orders metrics", 1)
             if (source != "") app_unknown("R-APP-HPOS", id, source)
-            else if (falsehood(hpos) && orders > 0) app_emit("R-APP-HPOS", id, "high", "MIGRATE", "HPOS=off; legacy_orders=" orders, "Objednavky v posts/postmeta su kandidat na samostatnu HPOS migraciu.")
-            else if (truth(hpos) && truth(sync)) app_emit("R-APP-HPOS", id, "medium", "DUPLICATE-WRITES", "HPOS=on; sync=on", "Po overeni migracie vypni kompatibilny sync, inak sa objednavky zapisuju dvakrat.")
+            else if (falsehood(hpos) && orders > 0) app_emit("R-APP-HPOS", id, "high", "MIGRATE", "HPOS=off; legacy_orders=" orders, "reason_hpos_migrate")
+            else if (truth(hpos) && truth(sync)) app_emit("R-APP-HPOS", id, "medium", "DUPLICATE-WRITES", "HPOS=on; sync=on", "reason_hpos_duplicate_writes")
 
             kbrow = numeric(av(id, "max_log_kb_per_row", "log_kb_per_row", "kb_per_row"))
             source = app_source_error(id, "wp_config database table_prefix log_tables metrics", 1)
             if (source != "") app_unknown("R-APP-LOG-TABLE", id, source)
-            else if (kbrow > 20) app_emit("R-APP-LOG-TABLE", id, "high", "PURGE-CANDIDATE", "max_kb_per_row=" kbrow, "Log tabulka nad 20 KB na riadok pravdepodobne drzi cele payloady.")
+            else if (kbrow > 20) app_emit("R-APP-LOG-TABLE", id, "high", "PURGE-CANDIDATE", "max_kb_per_row=" kbrow, "reason_log_table_payloads")
 
             sessions = numeric(av(id, "woocommerce_sessions", "session_rows", "sessions", "woocommerce_sessions_count"))
             source = app_source_error(id, "wp_config database table_prefix woocommerce_sessions_probe woocommerce_sessions_count metrics", 1)
             if (source != "") app_unknown("R-APP-SESSIONS", id, source)
-            else if (sessions >= 500000) app_emit("R-APP-SESSIONS", id, "medium", "CLEANUP", "session_rows=" sessions, "WooCommerce sessions su problem od priblizne 500 tisic riadkov.")
+            else if (sessions >= 500000) app_emit("R-APP-SESSIONS", id, "medium", "CLEANUP", "session_rows=" sessions, "reason_sessions_cleanup")
 
             failed = numeric(av(id, "action_scheduler_failed", "as_failed", "failed_actions"))
             source = app_source_error(id, "wp_config database table_prefix action_scheduler metrics", 1)
             if (source != "") app_unknown("R-APP-AS", id, source)
-            else if (failed > 0) app_emit("R-APP-AS", id, "medium", "FAILED", "failed_actions=" failed, "Zlyhane Action Scheduler akcie retention neodstrani; najdi chybny plugin alebo hook.")
+            else if (failed > 0) app_emit("R-APP-AS", id, "medium", "FAILED", "failed_actions=" failed, "reason_action_scheduler_failed")
             retention = numeric(av(id, "action_scheduler_retention_days", "as_retention_days"))
             if (source != "") app_unknown("R-APP-AS-RETENTION", id, source)
-            else if (retention > 7) app_emit("R-APP-AS-RETENTION", id, "low", "REDUCE", "retention_days=" retention, "Skrat retention dokoncenej historie na 7 dni, nie na 1 den.")
+            else if (retention > 7) app_emit("R-APP-AS-RETENTION", id, "low", "REDUCE", "retention_days=" retention, "reason_action_scheduler_retention")
 
             transient_count = numeric(av(id, "transient_count", "transients"))
             transient_bytes = bytes(av(id, "transient_bytes", "transients_bytes"))
             source = app_source_error(id, "wp_config database table_prefix options_table transients metrics", 1)
             if (source != "") app_unknown("R-APP-TRANSIENTS", id, source)
-            else if (transient_count >= 1000 || transient_bytes >= 10 * mib) app_emit("R-APP-TRANSIENTS", id, "medium", "CLEANUP", sprintf("count=%d; size=%.2fM", transient_count, transient_bytes / mib), "Velky objem DB transientov prever a odstran iba expirovane zaznamy.")
+            else if (transient_count >= 1000 || transient_bytes >= 10 * mib) app_emit("R-APP-TRANSIENTS", id, "medium", "CLEANUP", sprintf("count=%d; size=%.2fM", transient_count, transient_bytes / mib), "reason_transients_cleanup")
 
             meta_index = av(id, "rogue_meta_value_index", "meta_value_index")
             source = app_source_error(id, "wp_config database table_prefix postmeta_indexes metrics", 1)
             if (source != "") app_unknown("R-APP-META-INDEX", id, source)
-            else if (meta_index != "" && !falsehood(meta_index)) app_emit("R-APP-META-INDEX", id, "medium", "ROGUE-INDEX", "standalone meta_value index detected", "Samostatny index meta_value je velky a malo selektivny; pred odstraneni over pouzitie.")
+            else if (meta_index != "" && !falsehood(meta_index)) app_emit("R-APP-META-INDEX", id, "medium", "ROGUE-INDEX", "standalone meta_value index detected", "reason_meta_value_index")
 
             policy = tolower(av(id, "redis_maxmemory_policy", "redis_policy"))
             if (policy == "") policy = tolower(ag("redis_maxmemory_policy", ""))
-            if (policy != "" && policy != "volatile-lru") app_emit("R-APP-REDIS", id, "medium", "POLICY", "maxmemory-policy=" policy, "Pre eshop pouzi volatile-lru, aby tlak na pamat nevyhadzoval session data.")
+            if (policy != "" && policy != "volatile-lru") app_emit("R-APP-REDIS", id, "medium", "POLICY", "maxmemory-policy=" policy, "reason_redis_policy")
         }
     }
     ' </dev/null
@@ -820,7 +820,7 @@ dbtune_rules_analyze() {
     return "$result"
 }
 
-# Funkciu vola CLI dispatcher aj collector bez argumentov.
+# Called without arguments by both the CLI dispatcher and collector.
 # shellcheck disable=SC2120
 cmd_analyze() {
     local min_samples=288

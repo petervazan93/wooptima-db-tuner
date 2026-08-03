@@ -86,13 +86,22 @@ write_analysis_manifest() {
 
 write_analysis() {
     cat >"$DBTUNE_STATE_DIR/analysis.tsv" <<'EOF'
-rule_id	scope	severity	verdict	proposed_key	proposed_value	evidence	reason_sk
-R-OC	app:shop-a	critical	Chýba object cache			Redis inactive | drop-in chýba	Zapnite Redis object cache "hneď".
-R-APP-AUTOLOAD	app:shop-a	high	TOO-LARGE			autoload=4M	Skontrolujte top autoload options.
-R-BP-SIZE	server	high	Pool je malý	innodb_buffer_pool_size	4G	dataset 4 GB; burst 80 %	Pool musí absorbovať bursty.
-R-MAXCONN	server	medium	Limit je privysoký	max_connections	200	FPM 120; peak 80	Zníži OOM riziko.
-R-SEC	server	high	MariaDB počúva verejne			bind-address=0.0.0.0	Obmedzte bind-address.
-R-APP-SQL	app:shop-a	high	Diagnostika			app SQL	Iba aplikačné odporúčanie.
+rule_id	scope	severity	verdict	proposed_key	proposed_value	evidence	reason_id
+R-OC	app:shop-a	critical	Chýba object cache			Redis inactive | drop-in chýba	reason_redis_down
+R-APP-AUTOLOAD	app:shop-a	high	TOO-LARGE			autoload=4M	reason_autoload_too_large
+R-BP-SIZE	server	high	Pool je malý	innodb_buffer_pool_size	4G	dataset 4 GB; burst 80 %	reason_buffer_pool_change
+R-MAXCONN	server	medium	Limit je privysoký	max_connections	200	FPM 120; peak 80	reason_max_connections_change
+R-SEC	server	high	MariaDB počúva verejne			bind-address=0.0.0.0	reason_security_exposed
+R-APP-SQL	app:shop-a	high	Diagnostika			app SQL	reason_app_source_unavailable
+EOF
+    write_analysis_manifest
+}
+
+write_stable_analysis() {
+    cat >"$DBTUNE_STATE_DIR/analysis.tsv" <<'EOF'
+rule_id	scope	severity	verdict	proposed_key	proposed_value	evidence	reason_id
+R-APP-OBJECT-CACHE	app:shop-a	critical	REDIS-DOWN			redis=0; dropin=1	reason_redis_down
+R-BP-SIZE	server	high	CHANGE	innodb_buffer_pool_size	4G	dataset=4G; current=128M	reason_buffer_pool_change
 EOF
     write_analysis_manifest
 }
@@ -110,8 +119,9 @@ EOF
     server_line=$(grep -n '^## Server' "$DBTUNE_STATE_DIR/report.md" | cut -d: -f1)
     [ "$app_line" -lt "$server_line" ]
     grep -F 'dataset 4 GB; burst 80 %' "$DBTUNE_STATE_DIR/report.md"
-    grep -F 'Zapnite Redis object cache \"hneď\".' "$DBTUNE_STATE_DIR/report.json"
-    grep -F '"schema_version":"fleet-v2"' "$DBTUNE_STATE_DIR/report.json"
+    grep -F '"rule.000.reason_id":"reason_redis_down"' "$DBTUNE_STATE_DIR/report.json"
+    grep -F '"schema_version":"fleet-v3"' "$DBTUNE_STATE_DIR/report.json"
+    grep -F '"report.language":"sk"' "$DBTUNE_STATE_DIR/report.json"
     grep -F '"server.support_status":"supported"' "$DBTUNE_STATE_DIR/report.json"
     grep -F '"run_id":"report-run"' "$DBTUNE_STATE_DIR/report.json"
     grep -F '"dbsize_hash":"' "$DBTUNE_STATE_DIR/report.json"
@@ -144,6 +154,69 @@ EOF
     if command -v jq >/dev/null 2>&1; then
         jq -e 'type == "object" and ([paths | length] | max) == 1' "$DBTUNE_STATE_DIR/report.json"
     fi
+}
+
+@test "fleet-v3 localizes displays while analysis and canonical proposals stay invariant" {
+    local analysis_hash en_records_hash sk_records_hash en_proposal_hash sk_proposal_hash
+
+    write_stable_analysis
+    analysis_hash=$(dbtune_sha256_file "$DBTUNE_STATE_DIR/analysis.tsv")
+    dbtune_now() { printf '2026-08-03T12:00:00Z\n'; }
+
+    dbtune_i18n_set en
+    run cmd_report
+    [ "$status" -eq 0 ]
+    grep -F '## Application layer - FIX FIRST' "$DBTUNE_STATE_DIR/report.md"
+    grep -F 'Redis probe failed; fix the application layer before database tuning.' "$DBTUNE_STATE_DIR/report.md"
+    grep -F '"schema_version":"fleet-v3"' "$DBTUNE_STATE_DIR/report.json"
+    grep -F '"report.language":"en"' "$DBTUNE_STATE_DIR/report.json"
+    grep -F '"rule.000.reason_id":"reason_redis_down"' "$DBTUNE_STATE_DIR/report.json"
+    grep -F '"rule.000.reason":"Redis probe failed; fix the application layer before database tuning."' "$DBTUNE_STATE_DIR/report.json"
+    grep -F '"action.000.warning_id":"action_warning_read_only"' "$DBTUNE_STATE_DIR/report.json"
+    en_records_hash=$(grep -o '"proposals.hash":"[0-9a-f]*"' "$DBTUNE_STATE_DIR/report.json" | cut -d'"' -f4)
+    dbtune_state_write analyzed
+    cmd_propose >/dev/null
+    en_proposal_hash=$(dbtune_manifest_value "$DBTUNE_STATE_DIR/proposal-manifest.tsv" proposal_hash)
+    [ "$(dbtune_manifest_value "$DBTUNE_STATE_DIR/proposal-manifest.tsv" analysis_hash)" = "$analysis_hash" ]
+
+    dbtune_i18n_set sk
+    run cmd_report
+    [ "$status" -eq 0 ]
+    grep -F '## Aplikačná vrstva - RIEŠ PRVÚ' "$DBTUNE_STATE_DIR/report.md"
+    grep -F 'Redis probe zlyhal; aplikačnú vrstvu rieš pred DB tuningom.' "$DBTUNE_STATE_DIR/report.md"
+    grep -F '"report.language":"sk"' "$DBTUNE_STATE_DIR/report.json"
+    grep -F '"rule.000.reason_id":"reason_redis_down"' "$DBTUNE_STATE_DIR/report.json"
+    grep -F '"rule.000.reason":"Redis probe zlyhal; aplikačnú vrstvu rieš pred DB tuningom."' "$DBTUNE_STATE_DIR/report.json"
+    sk_records_hash=$(grep -o '"proposals.hash":"[0-9a-f]*"' "$DBTUNE_STATE_DIR/report.json" | cut -d'"' -f4)
+    cmd_propose >/dev/null
+    sk_proposal_hash=$(dbtune_manifest_value "$DBTUNE_STATE_DIR/proposal-manifest.tsv" proposal_hash)
+
+    [ "$(dbtune_sha256_file "$DBTUNE_STATE_DIR/analysis.tsv")" = "$analysis_hash" ]
+    [ "$en_records_hash" = "$sk_records_hash" ]
+    [ "$(dbtune_manifest_value "$DBTUNE_STATE_DIR/proposal-manifest.tsv" proposal_records_hash)" = "$sk_records_hash" ]
+    [ "$en_proposal_hash" != "$sk_proposal_hash" ]
+}
+
+@test "report and propose reject the exact reason_sk schema with localized cycle guidance" {
+    write_analysis
+    awk -F '\t' 'BEGIN {OFS="\t"} NR==1 {$8="reason_sk"} {print}' "$DBTUNE_STATE_DIR/analysis.tsv" >"$BATS_TEST_TMPDIR/old-analysis.tsv"
+    mv "$BATS_TEST_TMPDIR/old-analysis.tsv" "$DBTUNE_STATE_DIR/analysis.tsv"
+    write_analysis_manifest
+    DBTUNE_LOG_LEVEL=error
+    dbtune_state_write analyzed
+
+    dbtune_i18n_set en
+    run cmd_report
+    [ "$status" -eq 65 ]
+    [[ "$output" == *'start a new v0.4.0 audit and measurement cycle'* ]]
+    [ ! -e "$DBTUNE_STATE_DIR/report.md" ]
+    [ ! -e "$DBTUNE_STATE_DIR/report.json" ]
+
+    dbtune_i18n_set sk
+    run cmd_propose
+    [ "$status" -eq 65 ]
+    [[ "$output" == *'spustite nový auditný a merací cyklus v0.4.0'* ]]
+    [ ! -e "$DBTUNE_STATE_DIR/proposed-99-zz-tuning.cnf" ]
 }
 
 @test "report exposes failed and partial audit sections and affected domains" {
@@ -253,7 +326,7 @@ EOF
     DBTUNE_AUDIT_FILE="$BATS_TEST_TMPDIR/mysql-audit.tsv"
     DBTUNE_APPS_FILE="$DBTUNE_STATE_DIR/apps.tsv"
     DBTUNE_ANALYSIS_LINES=(
-        $'R-APP-AUTOLOAD\tapp:shop-a\thigh\tCHECK\t\t\tautoload\tcheck'
+        $'R-APP-AUTOLOAD\tapp:shop-a\thigh\tCHECK\t\t\tautoload\treason_autoload_review'
     )
 
     dbtune_actions_load
@@ -281,7 +354,7 @@ EOF
     DBTUNE_AUDIT_FILE="$BATS_TEST_TMPDIR/unknown-audit.tsv"
     DBTUNE_APPS_FILE="$DBTUNE_STATE_DIR/apps.tsv"
     DBTUNE_ANALYSIS_LINES=(
-        $'R-APP-AUTOLOAD\tapp:shop-a\thigh\tCHECK\t\t\tautoload\tcheck'
+        $'R-APP-AUTOLOAD\tapp:shop-a\thigh\tCHECK\t\t\tautoload\treason_autoload_review'
     )
 
     dbtune_actions_load
@@ -292,7 +365,7 @@ EOF
     [ "$DBTUNE_ACTION_CONNECT_TIMEOUT_SECONDS" = 5 ]
     [ "$DBTUNE_ACTION_STATEMENT_TIMEOUT_SECONDS" = 30 ]
     [ "$DBTUNE_ACTION_TIMEOUT_CAPABILITY" = unknown ]
-    [[ "$DBTUNE_ACTION_WARNING" == *'capability je unknown'* ]]
+    [ "$DBTUNE_ACTION_WARNING_ID" = action_warning_sql_unavailable ]
 
     DBTUNE_AUTOLOAD_LINES=()
     DBTUNE_DATABASES_FILE="$DBTUNE_STATE_DIR/databases.tsv"
@@ -300,7 +373,7 @@ EOF
     [ "$status" -eq 0 ]
     [[ "$output" == *'safety=not-executable'* ]]
     [[ "$output" == *'connect\_timeout\_seconds=5; statement\_timeout\_seconds=30; timeout\_capability=unknown'* ]]
-    [[ "$output" == *'Neexekvovatelna SQL diagnostika'* ]]
+    [[ "$output" == *'Neexekvovateľná SQL diagnostika'* ]]
 }
 
 @test "unsupported MariaDB report suppresses proposals and executable SQL actions" {
@@ -308,9 +381,9 @@ EOF
         "$DBTUNE_STATE_DIR/audit.tsv" >"$BATS_TEST_TMPDIR/audit.tsv"
     mv "$BATS_TEST_TMPDIR/audit.tsv" "$DBTUNE_STATE_DIR/audit.tsv"
     cat >"$DBTUNE_STATE_DIR/analysis.tsv" <<'EOF'
-rule_id	scope	severity	verdict	proposed_key	proposed_value	evidence	reason_sk
-R-VERSION	server	critical	UNSUPPORTED			version=12.0.0-MariaDB	Rodina nebola schvalena.
-R-APP-AUTOLOAD	app:shop-a	high	CHECK			autoload=4M	Skontrolujte autoload.
+rule_id	scope	severity	verdict	proposed_key	proposed_value	evidence	reason_id
+R-VERSION	server	critical	UNSUPPORTED			version=12.0.0-MariaDB	reason_version_unsupported
+R-APP-AUTOLOAD	app:shop-a	high	CHECK			autoload=4M	reason_autoload_review
 EOF
     dbtune_provenance_write_audit_manifest "$DBTUNE_STATE_DIR/audit-manifest.tsv" \
         report-run "$DBTUNE_STATE_DIR/audit.tsv" "$DBTUNE_STATE_DIR/apps.tsv" "$DBTUNE_STATE_DIR/databases.tsv"
@@ -352,11 +425,11 @@ shop-no-root	path	/home/no-root/webapps/shop
 shop-no-root	owner	owner-three
 EOF
     DBTUNE_ANALYSIS_LINES=(
-        $'R-APP-WPCRON\tapp:shop-one\thigh\tCHECK\t\t\tone\tone'
-        $'R-APP-REDIS\tapp:shop-two\thigh\tCHECK\t\t\ttwo\ttwo'
-        $'R-APP-WPCRON\tapp:shop-missing\thigh\tCHECK\t\t\tmissing\tmissing'
-        $'R-APP-REDIS\tapp:shop-invalid\thigh\tCHECK\t\t\tinvalid\tinvalid'
-        $'R-APP-WPCRON\tapp:shop-no-root\thigh\tCHECK\t\t\tno-root\tno-root'
+        $'R-APP-WPCRON\tapp:shop-one\thigh\tCHECK\t\t\tone\treason_wp_cron_mapping_unknown'
+        $'R-APP-REDIS\tapp:shop-two\thigh\tCHECK\t\t\ttwo\treason_redis_policy'
+        $'R-APP-WPCRON\tapp:shop-missing\thigh\tCHECK\t\t\tmissing\treason_wp_cron_mapping_unknown'
+        $'R-APP-REDIS\tapp:shop-invalid\thigh\tCHECK\t\t\tinvalid\treason_redis_policy'
+        $'R-APP-WPCRON\tapp:shop-no-root\thigh\tCHECK\t\t\tno-root\treason_wp_cron_mapping_unknown'
     )
 
     dbtune_actions_load
@@ -373,7 +446,7 @@ EOF
     dbtune_action_parse "${DBTUNE_ACTION_LINES[2]}"
     [ "$DBTUNE_ACTION_SAFETY" = not-executable ]
     [ -z "$DBTUNE_ACTION_COMMAND" ]
-    [[ "$DBTUNE_ACTION_WARNING" == Neexekvovatelna* ]]
+    [ "$DBTUNE_ACTION_WARNING_ID" = action_warning_wp_unavailable ]
     dbtune_action_parse "${DBTUNE_ACTION_LINES[3]}"
     [ "$DBTUNE_ACTION_SAFETY" = not-executable ]
     [ -z "$DBTUNE_ACTION_COMMAND" ]
@@ -392,8 +465,8 @@ shop-a	database	shop_db
 shop-a	table_prefix	wp_
 EOF
     cat >"$DBTUNE_STATE_DIR/analysis.tsv" <<'EOF'
-rule_id	scope	severity	verdict	proposed_key	proposed_value	evidence	reason_sk
-R-APP-WPCRON	app:shop-a	high	CHECK			owner missing	Overte vlastnika.
+rule_id	scope	severity	verdict	proposed_key	proposed_value	evidence	reason_id
+R-APP-WPCRON	app:shop-a	high	CHECK			owner missing	reason_wp_cron_mapping_unknown
 EOF
     dbtune_provenance_write_audit_manifest "$DBTUNE_STATE_DIR/audit-manifest.tsv" \
         report-run "$DBTUNE_STATE_DIR/audit.tsv" "$DBTUNE_STATE_DIR/apps.tsv" "$DBTUNE_STATE_DIR/databases.tsv"
@@ -404,7 +477,7 @@ EOF
     [ "$status" -eq 0 ]
     grep -F '"action.000.safety":"not-executable"' "$DBTUNE_STATE_DIR/report.json"
     grep -F '"action.000.command":""' "$DBTUNE_STATE_DIR/report.json"
-    grep -F 'Neexekvovatelna diagnostika' "$DBTUNE_STATE_DIR/report.md"
+    grep -F 'Neexekvovateľná diagnostika' "$DBTUNE_STATE_DIR/report.md"
     run grep -F -- '--allow-root' "$DBTUNE_STATE_DIR/report.md"
     [ "$status" -ne 0 ]
 }
@@ -415,8 +488,8 @@ shop-a	audit_status	partial
 shop-a	source_error	audit_error.autoload=query_failed
 EOF
     cat >"$DBTUNE_STATE_DIR/analysis.tsv" <<'EOF'
-rule_id	scope	severity	verdict	proposed_key	proposed_value	evidence	reason_sk
-R-APP-AUTOLOAD	app:shop-a	medium	UNKNOWN			audit_status=partial; source_error=audit_error.autoload=query_failed	Zdrojovy SQL audit zlyhal.
+rule_id	scope	severity	verdict	proposed_key	proposed_value	evidence	reason_id
+R-APP-AUTOLOAD	app:shop-a	medium	UNKNOWN			audit_status=partial; source_error=audit_error.autoload=query_failed	reason_app_source_unavailable
 EOF
     dbtune_provenance_write_audit_manifest "$DBTUNE_STATE_DIR/audit-manifest.tsv" \
         report-run "$DBTUNE_STATE_DIR/audit.tsv" "$DBTUNE_STATE_DIR/apps.tsv" "$DBTUNE_STATE_DIR/databases.tsv"
@@ -431,14 +504,14 @@ EOF
     grep -F '"rule.000.evidence":"audit_status=partial; source_error=audit_error.autoload=query_failed"' "$DBTUNE_STATE_DIR/report.json"
     grep -F '"action.000.safety":"not-executable"' "$DBTUNE_STATE_DIR/report.json"
     grep -F '"action.000.command":""' "$DBTUNE_STATE_DIR/report.json"
-    grep -F 'auditny zdroj zlyhal' "$DBTUNE_STATE_DIR/report.md"
+    grep -F 'auditný zdroj zlyhal' "$DBTUNE_STATE_DIR/report.md"
 }
 
 @test "report escapes hostile TSV text and does not expose sensitive audit values" {
     local expected
     write_analysis
     printf 'password\tdont-print-me\n' >>"$DBTUNE_STATE_DIR/audit.tsv"
-    printf 'R-ESC\tapp:shop-a\tmedium\tPipe | tick ` and slash \\\t\t\tevidence | cell\tpassword=secret\n' >>"$DBTUNE_STATE_DIR/analysis.tsv"
+    printf 'R-ESC\tapp:shop-a\tmedium\tPipe | tick ` and slash \\\t\t\tevidence | cell; password=secret\treason_app_source_unavailable\n' >>"$DBTUNE_STATE_DIR/analysis.tsv"
     dbtune_provenance_write_audit_manifest "$DBTUNE_STATE_DIR/audit-manifest.tsv" \
         report-run "$DBTUNE_STATE_DIR/audit.tsv" "$DBTUNE_STATE_DIR/apps.tsv" "$DBTUNE_STATE_DIR/databases.tsv"
     write_analysis_manifest
@@ -461,7 +534,7 @@ EOF
     write_analysis
     printf 'mariadb.variable.thread_cache_size\t16\n' >>"$DBTUNE_STATE_DIR/audit.tsv"
     hostile=$'ANSI \033[31mred\033[0m\rrewrite <b>html</b> [link](https://evil) | table *bold* _emphasis_ ~~strike~~ # heading; UTF-8 žluťoučký; "CLIENT.SECRET" = "never expose this"'
-    printf 'R-HOSTILE\tserver\tmedium\tCHANGE\tthread_cache_size\t32\t%s\t%s\n' "$hostile" "$hostile" >>"$DBTUNE_STATE_DIR/analysis.tsv"
+    printf 'R-HOSTILE\tserver\tmedium\tCHANGE\tthread_cache_size\t32\t%s\treason_thread_cache\n' "$hostile" >>"$DBTUNE_STATE_DIR/analysis.tsv"
     dbtune_provenance_write_audit_manifest "$DBTUNE_STATE_DIR/audit-manifest.tsv" \
         report-run "$DBTUNE_STATE_DIR/audit.tsv" "$DBTUNE_STATE_DIR/apps.tsv" "$DBTUNE_STATE_DIR/databases.tsv"
     write_analysis_manifest
@@ -517,7 +590,7 @@ EOF
 @test "report and propose fail closed on canonical duplicate or unsafe proposal" {
     DBTUNE_LOG_LEVEL=error
     write_analysis
-    printf 'R-DUP\tserver\tlow\tCHANGE\tmax-connections\t300\tduplicate\tDuplicate.\n' >>"$DBTUNE_STATE_DIR/analysis.tsv"
+    printf 'R-DUP\tserver\tlow\tCHANGE\tmax-connections\t300\tduplicate\treason_max_connections_change\n' >>"$DBTUNE_STATE_DIR/analysis.tsv"
     write_analysis_manifest
     dbtune_state_write analyzed
 
@@ -529,7 +602,7 @@ EOF
     [ ! -e "$DBTUNE_STATE_DIR/proposed-99-zz-tuning.cnf" ]
 
     write_analysis
-    printf 'R-BAD\tserver\thigh\tCHANGE\tunsafe;key\t1\tx\tx\n' >>"$DBTUNE_STATE_DIR/analysis.tsv"
+    printf 'R-BAD\tserver\thigh\tCHANGE\tunsafe;key\t1\tx\treason_buffer_pool_change\n' >>"$DBTUNE_STATE_DIR/analysis.tsv"
     write_analysis_manifest
     run cmd_report
     [ "$status" -eq 65 ]

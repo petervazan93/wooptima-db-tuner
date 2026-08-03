@@ -617,6 +617,942 @@ dbtune_i18n_lookup() {
         sk:collect_tick_arguments_ignored)
             DBTUNE_I18N_MESSAGE='_tick ignoruje argumenty'
             ;;
+        en:analysis_old_schema)
+            DBTUNE_I18N_MESSAGE='analysis.tsv uses the pre-v0.4.0 reason_sk schema; start a new v0.4.0 audit and measurement cycle'
+            ;;
+        sk:analysis_old_schema)
+            DBTUNE_I18N_MESSAGE='analysis.tsv používa starú schému reason_sk; spustite nový auditný a merací cyklus v0.4.0'
+            ;;
+        en:analysis_invalid_header)
+            DBTUNE_I18N_MESSAGE='analysis.tsv does not have the expected eight-column reason_id header'
+            ;;
+        sk:analysis_invalid_header)
+            DBTUNE_I18N_MESSAGE='analysis.tsv nemá očakávanú osemstĺpcovú hlavičku reason_id'
+            ;;
+        en:analysis_invalid_record)
+            DBTUNE_I18N_MESSAGE='Invalid analysis.tsv record; exactly eight fields and a catalog reason_id are required'
+            ;;
+        sk:analysis_invalid_record)
+            DBTUNE_I18N_MESSAGE='Neplatný analysis.tsv záznam; vyžaduje sa presne osem polí a katalógový reason_id'
+            ;;
+        en:analysis_empty)
+            DBTUNE_I18N_MESSAGE='analysis.tsv is empty'
+            ;;
+        sk:analysis_empty)
+            DBTUNE_I18N_MESSAGE='analysis.tsv je prázdny'
+            ;;
+        en:reason_buffer_pool_current_missing)
+            DBTUNE_I18N_MESSAGE='The effective buffer pool value is missing; a change must not be proposed blindly.'
+            ;;
+        sk:reason_buffer_pool_current_missing)
+            DBTUNE_I18N_MESSAGE='Chýba efektívna hodnota buffer poolu; zmena sa nesmie navrhnúť naslepo.'
+            ;;
+        en:reason_buffer_pool_inputs_missing)
+            DBTUNE_I18N_MESSAGE='Inputs required for a safe buffer pool calculation are missing.'
+            ;;
+        sk:reason_buffer_pool_inputs_missing)
+            DBTUNE_I18N_MESSAGE='Chýbajú dáta pre bezpečný výpočet buffer poolu.'
+            ;;
+        en:reason_buffer_pool_no_shrink)
+            DBTUNE_I18N_MESSAGE='The existing pool is not reduced automatically because shrinking is disruptive.'
+            ;;
+        sk:reason_buffer_pool_no_shrink)
+            DBTUNE_I18N_MESSAGE='Existujúci pool sa automaticky nezmenšuje; zmenšovanie je rušivá operácia.'
+            ;;
+        en:reason_buffer_pool_memory_guard)
+            DBTUNE_I18N_MESSAGE='The MemAvailable guard does not permit a safe pool increase.'
+            ;;
+        sk:reason_buffer_pool_memory_guard)
+            DBTUNE_I18N_MESSAGE='MemAvailable guard nedovoľuje bezpečne zvýšiť pool.'
+            ;;
+        en:reason_buffer_pool_change)
+            DBTUNE_I18N_MESSAGE='The pool is min((dataset plus positive six-month growth) times 1.3, RAM times 0.5), constrained by MemAvailable and rounded to 256M.'
+            ;;
+        sk:reason_buffer_pool_change)
+            DBTUNE_I18N_MESSAGE='Pool je min((dataset plus kladný šesťmesačný rast) krát 1,3; RAM krát 0,5), s MemAvailable guardom a zaokrúhlením na 256M.'
+            ;;
+        en:reason_buffer_pool_growth_discontinuity)
+            DBTUNE_I18N_MESSAGE='A jump above the adaptive 25 percent threshold, at least 1 GiB, resembles an import or discontinuity and is excluded from growth projection.'
+            ;;
+        sk:reason_buffer_pool_growth_discontinuity)
+            DBTUNE_I18N_MESSAGE='Skok nad adaptívny prah 25 percent, minimálne 1 GiB, vyzerá ako import alebo diskontinuita a je vylúčený z projekcie rastu.'
+            ;;
+        en:reason_max_connections_worker_limit_missing)
+            DBTUNE_I18N_MESSAGE='Without an authoritative PHP-FPM or OLS worker limit, max_connections must not be estimated even with a low peak.'
+            ;;
+        sk:reason_max_connections_worker_limit_missing)
+            DBTUNE_I18N_MESSAGE='Bez autoritatívneho limitu PHP-FPM alebo OLS workerov sa max_connections nesmie odhadovať ani pri nízkom peaku.'
+            ;;
+        en:reason_max_connections_current_missing)
+            DBTUNE_I18N_MESSAGE='The effective max_connections value is missing; a change must not be proposed blindly.'
+            ;;
+        sk:reason_max_connections_current_missing)
+            DBTUNE_I18N_MESSAGE='Chýba efektívna hodnota max_connections; zmena sa nesmie navrhnúť naslepo.'
+            ;;
+        en:reason_max_connections_ok)
+            DBTUNE_I18N_MESSAGE='The limit covers PHP-FPM and a 25 percent reserve above the measured peak.'
+            ;;
+        sk:reason_max_connections_ok)
+            DBTUNE_I18N_MESSAGE='Limit pokrýva PHP-FPM aj 25-percentnú rezervu nad nameraným peakom.'
+            ;;
+        en:reason_max_connections_change)
+            DBTUNE_I18N_MESSAGE='The larger of the PHP-FPM formula and a 25 percent reserve above the measured peak is used.'
+            ;;
+        sk:reason_max_connections_change)
+            DBTUNE_I18N_MESSAGE='Používa sa väčšia hodnota zo vzorca PHP-FPM a 25-percentnej rezervy nad reálnym peakom.'
+            ;;
+        en:reason_storage_class_unknown)
+            DBTUNE_I18N_MESSAGE='I/O capacities must not be guessed without a storage class.'
+            ;;
+        sk:reason_storage_class_unknown)
+            DBTUNE_I18N_MESSAGE='Bez triedy úložiska sa I/O kapacity nesmú hádať.'
+            ;;
+        en:reason_io_capacity)
+            DBTUNE_I18N_MESSAGE='I/O capacity matches the storage class.'
+            ;;
+        sk:reason_io_capacity)
+            DBTUNE_I18N_MESSAGE='I/O kapacita zodpovedá triede úložiska.'
+            ;;
+        en:reason_io_capacity_max)
+            DBTUNE_I18N_MESSAGE='Peak I/O capacity matches the storage class.'
+            ;;
+        sk:reason_io_capacity_max)
+            DBTUNE_I18N_MESSAGE='Špičková I/O kapacita zodpovedá triede úložiska.'
+            ;;
+        en:reason_io_threads)
+            DBTUNE_I18N_MESSAGE='NVMe uses eight I/O threads; other storage classes use four.'
+            ;;
+        sk:reason_io_threads)
+            DBTUNE_I18N_MESSAGE='NVMe používa osem I/O vlákien, ostatné úložiská štyri.'
+            ;;
+        en:reason_flush_neighbors)
+            DBTUNE_I18N_MESSAGE='Flushing neighboring pages is useful only on rotational storage.'
+            ;;
+        sk:reason_flush_neighbors)
+            DBTUNE_I18N_MESSAGE='Susedné stránky sa oplatí flushovať iba na rotačnom disku.'
+            ;;
+        en:reason_query_cache_insufficient_active_windows)
+            DBTUNE_I18N_MESSAGE='Query cache has too few active windows with nonzero queries; idle windows are excluded from the hit-rate percentile.'
+            ;;
+        sk:reason_query_cache_insufficient_active_windows)
+            DBTUNE_I18N_MESSAGE='Query cache nemá dosť aktívnych okien s nenulovým počtom query; idle okná sa do hit-rate percentilu nerátajú.'
+            ;;
+        en:reason_query_cache_disable)
+            DBTUNE_I18N_MESSAGE='Query cache is disabled when hit rate is below 20 percent or p95 Threads_running is above 8.'
+            ;;
+        sk:reason_query_cache_disable)
+            DBTUNE_I18N_MESSAGE='Query cache sa vypína pri hit rate pod 20 percent alebo p95 Threads_running nad 8.'
+            ;;
+        en:reason_query_cache_memory_release)
+            DBTUNE_I18N_MESSAGE='Disabling query cache also releases its memory.'
+            ;;
+        sk:reason_query_cache_memory_release)
+            DBTUNE_I18N_MESSAGE='Pri vypnutom query cache sa uvoľní aj jeho pamäť.'
+            ;;
+        en:reason_query_cache_keep)
+            DBTUNE_I18N_MESSAGE='A hit rate of at least 20 percent and p95 Threads_running no greater than 8 support keeping query cache.'
+            ;;
+        sk:reason_query_cache_keep)
+            DBTUNE_I18N_MESSAGE='Hit rate aspoň 20 percent a p95 Threads_running najviac 8 podporujú ponechanie query cache.'
+            ;;
+        en:reason_version_unsupported)
+            DBTUNE_I18N_MESSAGE='Supported MariaDB families are 10.6, 10.11, and 11.x.'
+            ;;
+        sk:reason_version_unsupported)
+            DBTUNE_I18N_MESSAGE='Podporované sú MariaDB 10.6, 10.11 a 11.x.'
+            ;;
+        en:reason_variable_removed_startup)
+            DBTUNE_I18N_MESSAGE='The variable was removed in MariaDB 11 and can prevent the next start.'
+            ;;
+        sk:reason_variable_removed_startup)
+            DBTUNE_I18N_MESSAGE='Premenná je od MariaDB 11 odstránená a môže zablokovať ďalší štart.'
+            ;;
+        en:reason_variable_removed_config)
+            DBTUNE_I18N_MESSAGE='The removed variable must be deleted from configuration before restart.'
+            ;;
+        sk:reason_variable_removed_config)
+            DBTUNE_I18N_MESSAGE='Odstránená premenná musí byť vymazaná z konfigurácie pred reštartom.'
+            ;;
+        en:reason_flush_method_deprecated)
+            DBTUNE_I18N_MESSAGE='flush_method is deprecated in MariaDB 11.x; review the existing value and do not add a new one blindly.'
+            ;;
+        sk:reason_flush_method_deprecated)
+            DBTUNE_I18N_MESSAGE='V MariaDB 11.x je flush_method deprecated; existujúcu hodnotu overte a nepridávajte novú naslepo.'
+            ;;
+        en:reason_doublewrite)
+            DBTUNE_I18N_MESSAGE='Doublewrite protects pages from torn writes.'
+            ;;
+        sk:reason_doublewrite)
+            DBTUNE_I18N_MESSAGE='Doublewrite chráni stránky pri torn write.'
+            ;;
+        en:reason_o_direct)
+            DBTUNE_I18N_MESSAGE='O_DIRECT limits double caching of data.'
+            ;;
+        sk:reason_o_direct)
+            DBTUNE_I18N_MESSAGE='O_DIRECT obmedzí dvojité cachovanie dát.'
+            ;;
+        en:reason_buffer_pool_warmup)
+            DBTUNE_I18N_MESSAGE='Dumping and loading the pool shortens warm-up after restart.'
+            ;;
+        sk:reason_buffer_pool_warmup)
+            DBTUNE_I18N_MESSAGE='Dump a load poolu skracuje warm-up po reštarte.'
+            ;;
+        en:reason_dirty_pages_limit)
+            DBTUNE_I18N_MESSAGE='The dirty-page limit reduces burst flushing.'
+            ;;
+        sk:reason_dirty_pages_limit)
+            DBTUNE_I18N_MESSAGE='Limit špinavých stránok obmedzuje nárazový flush.'
+            ;;
+        en:reason_dirty_pages_lwm)
+            DBTUNE_I18N_MESSAGE='The low-water mark starts continuous flushing earlier.'
+            ;;
+        sk:reason_dirty_pages_lwm)
+            DBTUNE_I18N_MESSAGE='Low-water mark spustí priebežný flush skôr.'
+            ;;
+        en:reason_lock_wait_timeout)
+            DBTUNE_I18N_MESSAGE='A shorter timeout avoids blocking PHP-FPM workers for 200 seconds.'
+            ;;
+        sk:reason_lock_wait_timeout)
+            DBTUNE_I18N_MESSAGE='Kratší timeout neblokuje PHP-FPM workery 200 sekúnd.'
+            ;;
+        en:reason_skip_name_resolve)
+            DBTUNE_I18N_MESSAGE='Local applications do not need reverse DNS.'
+            ;;
+        sk:reason_skip_name_resolve)
+            DBTUNE_I18N_MESSAGE='Lokálne aplikácie nepotrebujú reverzné DNS.'
+            ;;
+        en:reason_thread_cache)
+            DBTUNE_I18N_MESSAGE='The cache reduces thread creation cost.'
+            ;;
+        sk:reason_thread_cache)
+            DBTUNE_I18N_MESSAGE='Cache obmedzí cenu vytvárania vlákien.'
+            ;;
+        en:reason_tmp_table_size)
+            DBTUNE_I18N_MESSAGE='64M helps tables without BLOB/TEXT, while LONGTEXT remains disk-backed.'
+            ;;
+        sk:reason_tmp_table_size)
+            DBTUNE_I18N_MESSAGE='64M pomôže tabuľkám bez BLOB/TEXT, ale LONGTEXT zostane na disku.'
+            ;;
+        en:reason_max_heap_table_size)
+            DBTUNE_I18N_MESSAGE='The limit must match tmp_table_size.'
+            ;;
+        sk:reason_max_heap_table_size)
+            DBTUNE_I18N_MESSAGE='Limit musí zodpovedať tmp_table_size.'
+            ;;
+        en:reason_table_definition_cache)
+            DBTUNE_I18N_MESSAGE='Multiple WordPress databases need additional table-definition capacity.'
+            ;;
+        sk:reason_table_definition_cache)
+            DBTUNE_I18N_MESSAGE='Viac WordPress databáz potrebuje rezervu definícií tabuliek.'
+            ;;
+        en:reason_myisam_keep)
+            DBTUNE_I18N_MESSAGE='MyISAM is in use, so key buffer must not be reduced globally.'
+            ;;
+        sk:reason_myisam_keep)
+            DBTUNE_I18N_MESSAGE='MyISAM sa používa, key buffer sa nesmie plošne zmenšiť.'
+            ;;
+        en:reason_myisam_key_buffer)
+            DBTUNE_I18N_MESSAGE='Modern WordPress normally does not use MyISAM.'
+            ;;
+        sk:reason_myisam_key_buffer)
+            DBTUNE_I18N_MESSAGE='Moderný WordPress MyISAM bežne nepoužíva.'
+            ;;
+        en:reason_slow_query_log)
+            DBTUNE_I18N_MESSAGE='A persistent slow log is an early diagnostic signal.'
+            ;;
+        sk:reason_slow_query_log)
+            DBTUNE_I18N_MESSAGE='Trvalý slow log je včasný diagnostický signál.'
+            ;;
+        en:reason_slow_query_log_file)
+            DBTUNE_I18N_MESSAGE='The /var/log/mysql path is covered by MariaDB logrotate.'
+            ;;
+        sk:reason_slow_query_log_file)
+            DBTUNE_I18N_MESSAGE='Cesta /var/log/mysql je pokrytá MariaDB logrotate.'
+            ;;
+        en:reason_long_query_time)
+            DBTUNE_I18N_MESSAGE='Two seconds is a safe persistent production threshold.'
+            ;;
+        sk:reason_long_query_time)
+            DBTUNE_I18N_MESSAGE='Dve sekundy sú bezpečný trvalý produkčný prah.'
+            ;;
+        en:reason_log_slow_verbosity)
+            DBTUNE_I18N_MESSAGE='query_plan preserves useful detail without EXPLAIN output.'
+            ;;
+        sk:reason_log_slow_verbosity)
+            DBTUNE_I18N_MESSAGE='query_plan zachová užitočný detail bez EXPLAIN výstupu.'
+            ;;
+        en:reason_unattended_upgrade_action)
+            DBTUNE_I18N_MESSAGE='Disable automatic MariaDB restarts and schedule security updates manually.'
+            ;;
+        sk:reason_unattended_upgrade_action)
+            DBTUNE_I18N_MESSAGE='Zakážte automatický reštart MariaDB a bezpečnostné aktualizácie plánujte ručne.'
+            ;;
+        en:reason_unattended_upgrade_ok)
+            DBTUNE_I18N_MESSAGE='No uncontrolled automatic MariaDB upgrade was found.'
+            ;;
+        sk:reason_unattended_upgrade_ok)
+            DBTUNE_I18N_MESSAGE='Nenašiel sa nekontrolovaný automatický MariaDB upgrade.'
+            ;;
+        en:reason_open_files_systemd_limit)
+            DBTUNE_I18N_MESSAGE='open_files_limit is managed by a systemd drop-in, not MariaDB cnf.'
+            ;;
+        sk:reason_open_files_systemd_limit)
+            DBTUNE_I18N_MESSAGE='open_files_limit sa rieši systemd drop-inom, nie MariaDB cnf.'
+            ;;
+        en:reason_open_files_ok)
+            DBTUNE_I18N_MESSAGE='The effective open-files limit is not evidently capped.'
+            ;;
+        sk:reason_open_files_ok)
+            DBTUNE_I18N_MESSAGE='Efektívny open-files limit nie je zjavne zrezaný.'
+            ;;
+        en:reason_security_exposed)
+            DBTUNE_I18N_MESSAGE='If no external database client is required, restrict the listener and grants to localhost.'
+            ;;
+        sk:reason_security_exposed)
+            DBTUNE_I18N_MESSAGE='Ak nie je potrebný externý DB klient, obmedzte listener a granty na localhost.'
+            ;;
+        en:reason_security_ok)
+            DBTUNE_I18N_MESSAGE='The audit found no public listener or remote grant.'
+            ;;
+        sk:reason_security_ok)
+            DBTUNE_I18N_MESSAGE='Audit nenašiel verejný listener ani vzdialený grant.'
+            ;;
+        en:reason_root_cnf_credential)
+            DBTUNE_I18N_MESSAGE='Never print the root.cnf password; rotate it simultaneously in MariaDB and the RunCloud file.'
+            ;;
+        sk:reason_root_cnf_credential)
+            DBTUNE_I18N_MESSAGE='Heslo z root.cnf nikdy nevypisujte; pri rotácii ho zmeňte naraz v MariaDB aj v RunCloud súbore.'
+            ;;
+        en:reason_backup_missing)
+            DBTUNE_I18N_MESSAGE='Confirmed absence of a backup blocks tuning.'
+            ;;
+        sk:reason_backup_missing)
+            DBTUNE_I18N_MESSAGE='Potvrdená absencia zálohy blokuje tuning.'
+            ;;
+        en:reason_backup_unknown)
+            DBTUNE_I18N_MESSAGE='Backup status is not authoritatively verified; the number of local schedules alone does not confirm a backup.'
+            ;;
+        sk:reason_backup_unknown)
+            DBTUNE_I18N_MESSAGE='Stav zálohy nie je autoritatívne overený; počet lokálnych plánov sám osebe zálohu nepotvrdzuje.'
+            ;;
+        en:reason_backup_frequent)
+            DBTUNE_I18N_MESSAGE='Frequent full mydumper scans can create I/O spikes; verify the actual requirement.'
+            ;;
+        sk:reason_backup_frequent)
+            DBTUNE_I18N_MESSAGE='Častý mydumper full scan môže vytvárať I/O špičky; overte reálnu potrebu.'
+            ;;
+        en:reason_backup_verified)
+            DBTUNE_I18N_MESSAGE='The backup is authoritatively verified.'
+            ;;
+        sk:reason_backup_verified)
+            DBTUNE_I18N_MESSAGE='Záloha je autoritatívne overená.'
+            ;;
+        en:reason_redo_file_size)
+            DBTUNE_I18N_MESSAGE='Datasets above 10G use a 1G redo file; smaller datasets use 512M.'
+            ;;
+        sk:reason_redo_file_size)
+            DBTUNE_I18N_MESSAGE='Dataset nad 10G používa 1G redo súbor, menší dataset 512M.'
+            ;;
+        en:reason_log_buffer_size)
+            DBTUNE_I18N_MESSAGE='64M is justified only by growth in Innodb_log_waits.'
+            ;;
+        sk:reason_log_buffer_size)
+            DBTUNE_I18N_MESSAGE='64M je odôvodnené iba rastom Innodb_log_waits.'
+            ;;
+        en:reason_trx_commit_without_binlog)
+            DBTUNE_I18N_MESSAGE='Without binary logging, redo is the only protection for confirmed orders.'
+            ;;
+        sk:reason_trx_commit_without_binlog)
+            DBTUNE_I18N_MESSAGE='Bez binlogu je redo jediná ochrana potvrdených objednávok.'
+            ;;
+        en:reason_trx_commit_with_binlog)
+            DBTUNE_I18N_MESSAGE='With binary logging enabled, assess durability together with sync_binlog and the PITR policy.'
+            ;;
+        sk:reason_trx_commit_with_binlog)
+            DBTUNE_I18N_MESSAGE='Pri zapnutom binlogu posúďte durability spolu so sync_binlog a PITR politikou.'
+            ;;
+        en:reason_app_source_unavailable)
+            DBTUNE_I18N_MESSAGE='Source audit data for this rule is unavailable; the finding must not be treated as healthy or empty.'
+            ;;
+        sk:reason_app_source_unavailable)
+            DBTUNE_I18N_MESSAGE='Zdrojové auditné dáta pre toto pravidlo nie sú dostupné; nález sa nesmie vyhodnotiť ako zdravý ani prázdny.'
+            ;;
+        en:reason_multisite_unknown)
+            DBTUNE_I18N_MESSAGE='Multisite prefixes were not enumerated; application database metrics must not be treated as healthy.'
+            ;;
+        sk:reason_multisite_unknown)
+            DBTUNE_I18N_MESSAGE='Multisite prefixy neboli enumerované; aplikačné DB metriky sa nesmú hodnotiť ako zdravé.'
+            ;;
+        en:reason_object_cache_ok)
+            DBTUNE_I18N_MESSAGE='Persistent object cache has both a drop-in and a successful Redis probe.'
+            ;;
+        sk:reason_object_cache_ok)
+            DBTUNE_I18N_MESSAGE='Persistent object cache má drop-in aj úspešný Redis probe.'
+            ;;
+        en:reason_redis_down)
+            DBTUNE_I18N_MESSAGE='Redis probe failed; fix the application layer before database tuning.'
+            ;;
+        sk:reason_redis_down)
+            DBTUNE_I18N_MESSAGE='Redis probe zlyhal; aplikačnú vrstvu rieš pred DB tuningom.'
+            ;;
+        en:reason_object_cache_dropin_missing)
+            DBTUNE_I18N_MESSAGE='Redis alone is insufficient; WordPress needs the wp-content/object-cache.php drop-in.'
+            ;;
+        sk:reason_object_cache_dropin_missing)
+            DBTUNE_I18N_MESSAGE='Redis sám nestačí; WordPress potrebuje wp-content/object-cache.php drop-in.'
+            ;;
+        en:reason_object_cache_unknown)
+            DBTUNE_I18N_MESSAGE='Both the drop-in and Redis probe must be confirmed; an unknown state is not healthy.'
+            ;;
+        sk:reason_object_cache_unknown)
+            DBTUNE_I18N_MESSAGE='Drop-in aj Redis probe musia byť potvrdené; neznámy stav nie je zdravý stav.'
+            ;;
+        en:reason_wp_cron_disabled)
+            DBTUNE_I18N_MESSAGE='WP-Cron is not running, endangering orders and Action Scheduler.'
+            ;;
+        sk:reason_wp_cron_disabled)
+            DBTUNE_I18N_MESSAGE='WP-Cron nebeží, čo ohrozuje objednávky a Action Scheduler.'
+            ;;
+        en:reason_wp_cron_mapping_unknown)
+            DBTUNE_I18N_MESSAGE='A global cron is not evidence for this application; map the URL or webroot of its wp-cron run.'
+            ;;
+        sk:reason_wp_cron_mapping_unknown)
+            DBTUNE_I18N_MESSAGE='Globálny cron nie je dôkaz pre túto aplikáciu; namapujte URL alebo webroot konkrétneho wp-cron behu.'
+            ;;
+        en:reason_autoload_too_large)
+            DBTUNE_I18N_MESSAGE='Prioritize autoload above 3 MB and inspect the top 20 options.'
+            ;;
+        sk:reason_autoload_too_large)
+            DBTUNE_I18N_MESSAGE='Autoload nad 3 MB riešte prioritne a skontrolujte top 20 options.'
+            ;;
+        en:reason_autoload_review)
+            DBTUNE_I18N_MESSAGE='Autoload from 1 to 3 MB requires review of the largest options.'
+            ;;
+        sk:reason_autoload_review)
+            DBTUNE_I18N_MESSAGE='Autoload 1 až 3 MB vyžaduje kontrolu najväčších options.'
+            ;;
+        en:reason_autoload_ok)
+            DBTUNE_I18N_MESSAGE='Autoload is below 1 MB.'
+            ;;
+        sk:reason_autoload_ok)
+            DBTUNE_I18N_MESSAGE='Autoload je pod 1 MB.'
+            ;;
+        en:reason_hpos_migrate)
+            DBTUNE_I18N_MESSAGE='Orders in posts/postmeta are candidates for a separate HPOS migration.'
+            ;;
+        sk:reason_hpos_migrate)
+            DBTUNE_I18N_MESSAGE='Objednávky v posts/postmeta sú kandidátom na samostatnú HPOS migráciu.'
+            ;;
+        en:reason_hpos_duplicate_writes)
+            DBTUNE_I18N_MESSAGE='After verifying migration, disable compatibility sync to avoid writing orders twice.'
+            ;;
+        sk:reason_hpos_duplicate_writes)
+            DBTUNE_I18N_MESSAGE='Po overení migrácie vypnite kompatibilný sync, inak sa objednávky zapisujú dvakrát.'
+            ;;
+        en:reason_log_table_payloads)
+            DBTUNE_I18N_MESSAGE='A log table above 20 KB per row probably stores complete payloads.'
+            ;;
+        sk:reason_log_table_payloads)
+            DBTUNE_I18N_MESSAGE='Log tabuľka nad 20 KB na riadok pravdepodobne drží celé payloady.'
+            ;;
+        en:reason_sessions_cleanup)
+            DBTUNE_I18N_MESSAGE='WooCommerce sessions become a concern around 500 thousand rows.'
+            ;;
+        sk:reason_sessions_cleanup)
+            DBTUNE_I18N_MESSAGE='WooCommerce sessions sú problém približne od 500-tisíc riadkov.'
+            ;;
+        en:reason_action_scheduler_failed)
+            DBTUNE_I18N_MESSAGE='Retention does not remove failed Action Scheduler actions; find the faulty plugin or hook.'
+            ;;
+        sk:reason_action_scheduler_failed)
+            DBTUNE_I18N_MESSAGE='Zlyhané Action Scheduler akcie retention neodstráni; nájdite chybný plugin alebo hook.'
+            ;;
+        en:reason_action_scheduler_retention)
+            DBTUNE_I18N_MESSAGE='Reduce completed-history retention to 7 days, not 1 day.'
+            ;;
+        sk:reason_action_scheduler_retention)
+            DBTUNE_I18N_MESSAGE='Skráťte retention dokončenej histórie na 7 dní, nie na 1 deň.'
+            ;;
+        en:reason_transients_cleanup)
+            DBTUNE_I18N_MESSAGE='Review a large volume of database transients and remove only expired records.'
+            ;;
+        sk:reason_transients_cleanup)
+            DBTUNE_I18N_MESSAGE='Veľký objem DB transientov preverte a odstráňte iba expirované záznamy.'
+            ;;
+        en:reason_meta_value_index)
+            DBTUNE_I18N_MESSAGE='A standalone meta_value index is large and poorly selective; verify usage before removal.'
+            ;;
+        sk:reason_meta_value_index)
+            DBTUNE_I18N_MESSAGE='Samostatný index meta_value je veľký a málo selektívny; pred odstránením overte použitie.'
+            ;;
+        en:reason_redis_policy)
+            DBTUNE_I18N_MESSAGE='Use volatile-lru for a store so memory pressure does not evict session data.'
+            ;;
+        sk:reason_redis_policy)
+            DBTUNE_I18N_MESSAGE='Pre e-shop použite volatile-lru, aby tlak na pamäť nevyhadzoval session dáta.'
+            ;;
+        en:action_warning_read_only)
+            DBTUNE_I18N_MESSAGE='Do not run DELETE, DROP, UPDATE, or automatic cleanup; review the result manually first.'
+            ;;
+        sk:action_warning_read_only)
+            DBTUNE_I18N_MESSAGE='Nevykonávajte DELETE, DROP, UPDATE ani automatický cleanup; výsledok najprv ručne skontrolujte.'
+            ;;
+        en:action_warning_source_error)
+            DBTUNE_I18N_MESSAGE='Non-executable diagnostic: the audit source failed, so no command was generated.'
+            ;;
+        sk:action_warning_source_error)
+            DBTUNE_I18N_MESSAGE='Neexekvovateľná diagnostika: auditný zdroj zlyhal, preto príkaz nebol vygenerovaný.'
+            ;;
+        en:action_warning_sql_unavailable)
+            DBTUNE_I18N_MESSAGE='Non-executable SQL diagnostic: statement-timeout capability or database mapping is unsafe, so no command was generated.'
+            ;;
+        sk:action_warning_sql_unavailable)
+            DBTUNE_I18N_MESSAGE='Neexekvovateľná SQL diagnostika: statement-timeout capability alebo databázové mapovanie nie je bezpečné, preto príkaz nebol vygenerovaný.'
+            ;;
+        en:action_warning_wp_unavailable)
+            DBTUNE_I18N_MESSAGE='Non-executable diagnostic: a verified WordPress webroot or owner is unavailable, so no command was generated.'
+            ;;
+        sk:action_warning_wp_unavailable)
+            DBTUNE_I18N_MESSAGE='Neexekvovateľná diagnostika: overený WordPress webroot alebo vlastník nie je dostupný, preto príkaz nebol vygenerovaný.'
+            ;;
+        en:actions_warning_summary)
+            DBTUNE_I18N_MESSAGE='Do not execute destructive SQL automatically; action steps are read-only diagnostics.'
+            ;;
+        sk:actions_warning_summary)
+            DBTUNE_I18N_MESSAGE='Nevykonávajte deštruktívne SQL automaticky; action kroky sú iba read-only diagnostika.'
+            ;;
+        en:report_inventory_unavailable)
+            DBTUNE_I18N_MESSAGE='_Data is unavailable._'
+            ;;
+        sk:report_inventory_unavailable)
+            DBTUNE_I18N_MESSAGE='_Údaje nie sú dostupné._'
+            ;;
+        en:report_inventory_no_safe_values)
+            DBTUNE_I18N_MESSAGE='_no safely displayable values_'
+            ;;
+        sk:report_inventory_no_safe_values)
+            DBTUNE_I18N_MESSAGE='_bez bezpečne zobraziteľných hodnôt_'
+            ;;
+        en:report_inventory_record)
+            DBTUNE_I18N_MESSAGE='- Record %s: %s\n'
+            ;;
+        sk:report_inventory_record)
+            DBTUNE_I18N_MESSAGE='- Záznam %s: %s\n'
+            ;;
+        en:report_no_findings)
+            DBTUNE_I18N_MESSAGE='- The analysis contains no findings.\n'
+            ;;
+        sk:report_no_findings)
+            DBTUNE_I18N_MESSAGE='- Analýza neobsahuje žiadne nálezy.\n'
+            ;;
+        en:report_application_heading)
+            DBTUNE_I18N_MESSAGE='## Application layer - FIX FIRST\n\n'
+            ;;
+        sk:report_application_heading)
+            DBTUNE_I18N_MESSAGE='## Aplikačná vrstva - RIEŠ PRVÚ\n\n'
+            ;;
+        en:report_application_intro)
+            DBTUNE_I18N_MESSAGE='Object cache removes queries; database tuning only makes them cheaper. Resolve application findings before applying the server proposal.\n\n'
+            ;;
+        sk:report_application_intro)
+            DBTUNE_I18N_MESSAGE='Object cache odstráni dotazy; databázový tuning ich iba zlacní. Najprv vyriešte aplikačné nálezy, až potom aplikujte serverový návrh.\n\n'
+            ;;
+        en:report_application_table)
+            DBTUNE_I18N_MESSAGE=$'| Severity | Application | Verdict | Reason |\n|---|---|---|---|\n'
+            ;;
+        sk:report_application_table)
+            DBTUNE_I18N_MESSAGE=$'| Závažnosť | Aplikácia | Verdikt | Dôvod |\n|---|---|---|---|\n'
+            ;;
+        en:report_application_none)
+            DBTUNE_I18N_MESSAGE='| info | - | No application findings | - |\n'
+            ;;
+        sk:report_application_none)
+            DBTUNE_I18N_MESSAGE='| info | - | Bez aplikačných nálezov | - |\n'
+            ;;
+        en:report_server_heading)
+            DBTUNE_I18N_MESSAGE='## Server, hardware, and workload profile\n\n'
+            ;;
+        sk:report_server_heading)
+            DBTUNE_I18N_MESSAGE='## Server, hardvér a profil záťaže\n\n'
+            ;;
+        en:report_label_host)
+            DBTUNE_I18N_MESSAGE='Host'
+            ;;
+        sk:report_label_host)
+            DBTUNE_I18N_MESSAGE='Host'
+            ;;
+        en:report_label_mariadb)
+            DBTUNE_I18N_MESSAGE='MariaDB'
+            ;;
+        sk:report_label_mariadb)
+            DBTUNE_I18N_MESSAGE='MariaDB'
+            ;;
+        en:report_label_os)
+            DBTUNE_I18N_MESSAGE='Operating system'
+            ;;
+        sk:report_label_os)
+            DBTUNE_I18N_MESSAGE='Operačný systém'
+            ;;
+        en:report_label_cpu_cores)
+            DBTUNE_I18N_MESSAGE='CPU cores'
+            ;;
+        sk:report_label_cpu_cores)
+            DBTUNE_I18N_MESSAGE='CPU jadrá'
+            ;;
+        en:report_label_ram_bytes)
+            DBTUNE_I18N_MESSAGE='RAM (bytes)'
+            ;;
+        sk:report_label_ram_bytes)
+            DBTUNE_I18N_MESSAGE='RAM (bajty)'
+            ;;
+        en:report_label_disk)
+            DBTUNE_I18N_MESSAGE='Disk'
+            ;;
+        sk:report_label_disk)
+            DBTUNE_I18N_MESSAGE='Disk'
+            ;;
+        en:report_label_dataset_bytes)
+            DBTUNE_I18N_MESSAGE='Dataset (bytes)'
+            ;;
+        sk:report_label_dataset_bytes)
+            DBTUNE_I18N_MESSAGE='Dataset (bajty)'
+            ;;
+        en:report_valid_samples)
+            DBTUNE_I18N_MESSAGE='- **Valid samples:** %s\n\n'
+            ;;
+        sk:report_valid_samples)
+            DBTUNE_I18N_MESSAGE='- **Počet validných vzoriek:** %s\n\n'
+            ;;
+        en:report_rejected_samples)
+            DBTUNE_I18N_MESSAGE='- **Rejected samples:** %s (%s)\n\n'
+            ;;
+        sk:report_rejected_samples)
+            DBTUNE_I18N_MESSAGE='- **Odmietnuté vzorky:** %s (%s)\n\n'
+            ;;
+        en:report_percentiles_heading)
+            DBTUNE_I18N_MESSAGE='### Short-window percentiles\n\n'
+            ;;
+        sk:report_percentiles_heading)
+            DBTUNE_I18N_MESSAGE='### Percentily krátkych okien\n\n'
+            ;;
+        en:report_metrics_table)
+            DBTUNE_I18N_MESSAGE=$'| Metric | p50 | p95 | p99 | Maximum |\n|---|---:|---:|---:|---:|\n'
+            ;;
+        sk:report_metrics_table)
+            DBTUNE_I18N_MESSAGE=$'| Metrika | p50 | p95 | p99 | Maximum |\n|---|---:|---:|---:|---:|\n'
+            ;;
+        en:report_metric_mariadb_cpu)
+            DBTUNE_I18N_MESSAGE='MariaDB CPU'
+            ;;
+        sk:report_metric_mariadb_cpu)
+            DBTUNE_I18N_MESSAGE='MariaDB CPU'
+            ;;
+        en:report_metric_bp_hit)
+            DBTUNE_I18N_MESSAGE='Buffer pool hit ratio'
+            ;;
+        sk:report_metric_bp_hit)
+            DBTUNE_I18N_MESSAGE='Buffer pool hit ratio'
+            ;;
+        en:report_metric_bp_misses)
+            DBTUNE_I18N_MESSAGE='Buffer pool misses/s'
+            ;;
+        sk:report_metric_bp_misses)
+            DBTUNE_I18N_MESSAGE='Buffer pool missy/s'
+            ;;
+        en:report_metric_data_read)
+            DBTUNE_I18N_MESSAGE='Data read/s'
+            ;;
+        sk:report_metric_data_read)
+            DBTUNE_I18N_MESSAGE='Čítanie dát/s'
+            ;;
+        en:report_metric_rnd_next)
+            DBTUNE_I18N_MESSAGE='Handler_read_rnd_next/s'
+            ;;
+        sk:report_metric_rnd_next)
+            DBTUNE_I18N_MESSAGE='Handler_read_rnd_next/s'
+            ;;
+        en:report_metric_threads_running)
+            DBTUNE_I18N_MESSAGE='Threads_running'
+            ;;
+        sk:report_metric_threads_running)
+            DBTUNE_I18N_MESSAGE='Threads_running'
+            ;;
+        en:report_metric_disk_temp)
+            DBTUNE_I18N_MESSAGE='Disk temporary tables'
+            ;;
+        sk:report_metric_disk_temp)
+            DBTUNE_I18N_MESSAGE='Diskové temp tabuľky'
+            ;;
+        en:report_metric_available_ram)
+            DBTUNE_I18N_MESSAGE='Available RAM'
+            ;;
+        sk:report_metric_available_ram)
+            DBTUNE_I18N_MESSAGE='Dostupná RAM'
+            ;;
+        en:report_metric_swap)
+            DBTUNE_I18N_MESSAGE='Swap used'
+            ;;
+        sk:report_metric_swap)
+            DBTUNE_I18N_MESSAGE='Použitý swap'
+            ;;
+        en:report_worst_heading)
+            DBTUNE_I18N_MESSAGE='\n### Worst windows\n\n'
+            ;;
+        sk:report_worst_heading)
+            DBTUNE_I18N_MESSAGE='\n### Najhoršie okná\n\n'
+            ;;
+        en:report_worst_table)
+            DBTUNE_I18N_MESSAGE=$'| Time | CPU %% | BP hit %% | Misses/s | Read B/s | Threads running | Backup correlation |\n|---|---:|---:|---:|---:|---:|---|\n'
+            ;;
+        sk:report_worst_table)
+            DBTUNE_I18N_MESSAGE=$'| Čas | CPU %% | BP hit %% | Missy/s | Čítanie B/s | Threads running | Backup korelácia |\n|---|---:|---:|---:|---:|---:|---|\n'
+            ;;
+        en:report_proposal_heading)
+            DBTUNE_I18N_MESSAGE='## Configuration proposal: current -> proposed value\n\n'
+            ;;
+        sk:report_proposal_heading)
+            DBTUNE_I18N_MESSAGE='## Návrh konfigurácie: aktuálna -> navrhnutá hodnota\n\n'
+            ;;
+        en:report_proposal_table)
+            DBTUNE_I18N_MESSAGE=$'| Key | Current value | Proposed value | Evidence | Reason |\n|---|---|---|---|---|\n'
+            ;;
+        sk:report_proposal_table)
+            DBTUNE_I18N_MESSAGE=$'| Kľúč | Aktuálna hodnota | Navrhnutá hodnota | Evidencia | Odôvodnenie |\n|---|---|---|---|---|\n'
+            ;;
+        en:report_proposal_none)
+            DBTUNE_I18N_MESSAGE='| - | - | - | The analysis proposed no server change. | - |\n'
+            ;;
+        sk:report_proposal_none)
+            DBTUNE_I18N_MESSAGE='| - | - | - | Analýza nenavrhla žiadnu serverovú zmenu. | - |\n'
+            ;;
+        en:report_per_app_heading)
+            DBTUNE_I18N_MESSAGE='## Per-application sections\n\n'
+            ;;
+        sk:report_per_app_heading)
+            DBTUNE_I18N_MESSAGE='## Per-app sekcie\n\n'
+            ;;
+        en:report_per_app_table)
+            DBTUNE_I18N_MESSAGE=$'| Severity | Verdict | Evidence | Recommendation | Safe action step |\n|---|---|---|---|---|\n'
+            ;;
+        sk:report_per_app_table)
+            DBTUNE_I18N_MESSAGE=$'| Závažnosť | Verdikt | Evidencia | Odporúčanie | Bezpečný action krok |\n|---|---|---|---|---|\n'
+            ;;
+        en:report_autoload_heading)
+            DBTUNE_I18N_MESSAGE='\n#### Top autoload entries (name and size only)\n\n'
+            ;;
+        sk:report_autoload_heading)
+            DBTUNE_I18N_MESSAGE='\n#### Top autoload položky (iba názov a veľkosť)\n\n'
+            ;;
+        en:report_autoload_table)
+            DBTUNE_I18N_MESSAGE=$'| Option | Bytes |\n|---|---:|\n'
+            ;;
+        sk:report_autoload_table)
+            DBTUNE_I18N_MESSAGE=$'| Option | Bajty |\n|---|---:|\n'
+            ;;
+        en:report_autoload_unavailable)
+            DBTUNE_I18N_MESSAGE='| - | Data is unavailable. |\n'
+            ;;
+        sk:report_autoload_unavailable)
+            DBTUNE_I18N_MESSAGE='| - | Údaje nie sú dostupné. |\n'
+            ;;
+        en:report_per_app_none)
+            DBTUNE_I18N_MESSAGE='_No per-application findings._\n\n'
+            ;;
+        sk:report_per_app_none)
+            DBTUNE_I18N_MESSAGE='_Bez per-app nálezov._\n\n'
+            ;;
+        en:report_inventory_apps)
+            DBTUNE_I18N_MESSAGE='Application inventory'
+            ;;
+        sk:report_inventory_apps)
+            DBTUNE_I18N_MESSAGE='Inventár aplikácií'
+            ;;
+        en:report_inventory_databases)
+            DBTUNE_I18N_MESSAGE='Databases'
+            ;;
+        sk:report_inventory_databases)
+            DBTUNE_I18N_MESSAGE='Databázy'
+            ;;
+        en:report_security_heading)
+            DBTUNE_I18N_MESSAGE='## Security findings\n\n'
+            ;;
+        sk:report_security_heading)
+            DBTUNE_I18N_MESSAGE='## Bezpečnostné nálezy\n\n'
+            ;;
+        en:report_security_none)
+            DBTUNE_I18N_MESSAGE='- No separate security findings in the analysis.\n'
+            ;;
+        sk:report_security_none)
+            DBTUNE_I18N_MESSAGE='- Bez samostatných bezpečnostných nálezov v analýze.\n'
+            ;;
+        en:report_generated)
+            DBTUNE_I18N_MESSAGE='_Generated: %s | dbtune %s_\n\n'
+            ;;
+        sk:report_generated)
+            DBTUNE_I18N_MESSAGE='_Vygenerované: %s | dbtune %s_\n\n'
+            ;;
+        en:report_provenance)
+            DBTUNE_I18N_MESSAGE="_Run: \`%s\` | fingerprint: \`%s\` | audit SHA-256: \`%s\` | samples SHA-256: \`%s\` | dbsize SHA-256: \`%s\`_\n\n"
+            ;;
+        sk:report_provenance)
+            DBTUNE_I18N_MESSAGE="_Run: \`%s\` | fingerprint: \`%s\` | audit SHA-256: \`%s\` | samples SHA-256: \`%s\` | dbsize SHA-256: \`%s\`_\n\n"
+            ;;
+        en:report_unsupported)
+            DBTUNE_I18N_MESSAGE='> **Unsupported MariaDB:** the server family was not explicitly approved. Server tuning recommendations and the configuration proposal are suppressed.\n\n'
+            ;;
+        sk:report_unsupported)
+            DBTUNE_I18N_MESSAGE='> **Nepodporovaná MariaDB:** serverová rodina nebola explicitne schválená. Serverové tuning odporúčania a návrh konfigurácie sú potlačené.\n\n'
+            ;;
+        en:report_summary_heading)
+            DBTUNE_I18N_MESSAGE='## Executive summary\n\n'
+            ;;
+        sk:report_summary_heading)
+            DBTUNE_I18N_MESSAGE='## Executive summary\n\n'
+            ;;
+        en:report_audit_status)
+            DBTUNE_I18N_MESSAGE='**Overall audit status:** %s.\n\n'
+            ;;
+        sk:report_audit_status)
+            DBTUNE_I18N_MESSAGE='**Celkový stav auditu:** %s.\n\n'
+            ;;
+        en:report_required_sections)
+            DBTUNE_I18N_MESSAGE='- **Required sections:** %s\n'
+            ;;
+        sk:report_required_sections)
+            DBTUNE_I18N_MESSAGE='- **Povinné sekcie:** %s\n'
+            ;;
+        en:report_failed_sections)
+            DBTUNE_I18N_MESSAGE='- **Failed sections:** %s\n'
+            ;;
+        sk:report_failed_sections)
+            DBTUNE_I18N_MESSAGE='- **Zlyhané sekcie:** %s\n'
+            ;;
+        en:report_partial_sections)
+            DBTUNE_I18N_MESSAGE='- **Partial sections:** %s\n'
+            ;;
+        sk:report_partial_sections)
+            DBTUNE_I18N_MESSAGE='- **Čiastočné sekcie:** %s\n'
+            ;;
+        en:report_affected_domains)
+            DBTUNE_I18N_MESSAGE='- **Affected recommendation domains:** %s\n\n'
+            ;;
+        sk:report_affected_domains)
+            DBTUNE_I18N_MESSAGE='- **Ovplyvnené domény odporúčaní:** %s\n\n'
+            ;;
+        en:report_mariadb_missing)
+            DBTUNE_I18N_MESSAGE='- **Missing MariaDB evidence:** %s\n'
+            ;;
+        sk:report_mariadb_missing)
+            DBTUNE_I18N_MESSAGE='- **MariaDB chýbajúce dôkazy:** %s\n'
+            ;;
+        en:report_mariadb_invalid)
+            DBTUNE_I18N_MESSAGE='- **Invalid MariaDB evidence:** %s\n'
+            ;;
+        sk:report_mariadb_invalid)
+            DBTUNE_I18N_MESSAGE='- **MariaDB neplatné dôkazy:** %s\n'
+            ;;
+        en:report_mariadb_conflicting)
+            DBTUNE_I18N_MESSAGE='- **Conflicting MariaDB evidence:** %s\n'
+            ;;
+        sk:report_mariadb_conflicting)
+            DBTUNE_I18N_MESSAGE='- **MariaDB konfliktné dôkazy:** %s\n'
+            ;;
+        en:report_mariadb_optional)
+            DBTUNE_I18N_MESSAGE='- **Optional MariaDB evidence:** %s\n\n'
+            ;;
+        sk:report_mariadb_optional)
+            DBTUNE_I18N_MESSAGE='- **MariaDB voliteľné dôkazy:** %s\n\n'
+            ;;
+        en:report_findings)
+            DBTUNE_I18N_MESSAGE='**Findings:** critical %s, high %s, medium %s, low %s.\n\n'
+            ;;
+        sk:report_findings)
+            DBTUNE_I18N_MESSAGE='**Nálezy:** critical %s, high %s, medium %s, low %s.\n\n'
+            ;;
+        en:report_safety_warning)
+            DBTUNE_I18N_MESSAGE='> **Safety warning:** action steps are read-only diagnostics. dbtune does not automatically run application SQL or cleanup; run destructive DELETE, DROP, or UPDATE only after separate review and a verified backup.\n\n'
+            ;;
+        sk:report_safety_warning)
+            DBTUNE_I18N_MESSAGE='> **Bezpečnostné upozornenie:** action kroky sú iba read-only diagnostika. dbtune automaticky nespúšťa aplikačné SQL ani cleanup; deštruktívne DELETE, DROP a UPDATE vykonajte iba po samostatnom review a overenej zálohe.\n\n'
+            ;;
+        en:report_next_steps_heading)
+            DBTUNE_I18N_MESSAGE='## Next steps\n\n'
+            ;;
+        sk:report_next_steps_heading)
+            DBTUNE_I18N_MESSAGE='## Ďalší postup\n\n'
+            ;;
+        en:report_next_step_apps)
+            DBTUNE_I18N_MESSAGE='1. Resolve application findings, especially object cache, autoload, HPOS, and wp-cron.\n'
+            ;;
+        sk:report_next_step_apps)
+            DBTUNE_I18N_MESSAGE='1. Vyriešte aplikačné nálezy, najmä object cache, autoload, HPOS a wp-cron.\n'
+            ;;
+        en:report_next_step_unsupported)
+            DBTUNE_I18N_MESSAGE='2. Do not use server tuning recommendations until this MariaDB family passes compatibility review.\n'
+            ;;
+        sk:report_next_step_unsupported)
+            DBTUNE_I18N_MESSAGE='2. Nepoužívajte serverové tuning odporúčania, kým táto MariaDB rodina neprejde compatibility review.\n'
+            ;;
+        en:report_next_step_propose)
+            DBTUNE_I18N_MESSAGE="2. Review the diff and create the gated server file with \`dbtune propose\`.\n"
+            ;;
+        sk:report_next_step_propose)
+            DBTUNE_I18N_MESSAGE="2. Skontrolujte diff a vytvorte gated serverový súbor príkazom \`dbtune propose\`.\n"
+            ;;
+        en:report_next_step_restart)
+            DBTUNE_I18N_MESSAGE='3. Validate variable names and configuration before restart; restart through the RunCloud panel.\n'
+            ;;
+        sk:report_next_step_restart)
+            DBTUNE_I18N_MESSAGE='3. Pred reštartom validujte názvy premenných a konfiguráciu; reštart vykonajte cez RunCloud panel.\n'
+            ;;
+        en:report_next_step_verify)
+            DBTUNE_I18N_MESSAGE="4. After restart, run \`dbtune verify --post\`, then \`dbtune verify --24h\` after 24 hours.\n"
+            ;;
+        sk:report_next_step_verify)
+            DBTUNE_I18N_MESSAGE="4. Po reštarte spustite \`dbtune verify --post\` a po 24 hodinách \`dbtune verify --24h\`.\n"
+            ;;
+        en:report_saved)
+            DBTUNE_I18N_MESSAGE='\nReport saved: %s\nJSON saved: %s\n'
+            ;;
+        sk:report_saved)
+            DBTUNE_I18N_MESSAGE='\nReport uložený: %s\nJSON uložený: %s\n'
+            ;;
+        en:proposal_saved)
+            DBTUNE_I18N_MESSAGE='Proposal saved: %s\n'
+            ;;
+        sk:proposal_saved)
+            DBTUNE_I18N_MESSAGE='Návrh uložený: %s\n'
+            ;;
+        en:cnf_generated)
+            DBTUNE_I18N_MESSAGE='# Generated by dbtune %s at %s.\n'
+            ;;
+        sk:cnf_generated)
+            DBTUNE_I18N_MESSAGE='# Vygeneroval dbtune %s dňa %s.\n'
+            ;;
+        en:cnf_load_order)
+            DBTUNE_I18N_MESSAGE='# Loaded after /etc/mysql/conf.d/runcloud.cnf.\n'
+            ;;
+        sk:cnf_load_order)
+            DBTUNE_I18N_MESSAGE='# Načíta sa po /etc/mysql/conf.d/runcloud.cnf.\n'
+            ;;
+        en:cnf_rollback)
+            DBTUNE_I18N_MESSAGE='# Rollback: remove deployed 99-zz-tuning.cnf and restart MariaDB through RunCloud.\n'
+            ;;
+        sk:cnf_rollback)
+            DBTUNE_I18N_MESSAGE='# Rollback: odstráňte nasadený 99-zz-tuning.cnf a reštartujte MariaDB cez RunCloud.\n'
+            ;;
+        en:cnf_baseline_intro)
+            DBTUNE_I18N_MESSAGE='# The safe portable baseline is an inactive catalog. Only keys supported and permitted by version or measurement in analysis.tsv are activated:\n'
+            ;;
+        sk:cnf_baseline_intro)
+            DBTUNE_I18N_MESSAGE='# Bezpečný prenosný baseline je neaktívny katalóg. Aktivujú sa iba kľúče podporené a verziou alebo meraním povolené v analysis.tsv:\n'
+            ;;
+        en:cnf_evidence)
+            DBTUNE_I18N_MESSAGE='Evidence'
+            ;;
+        sk:cnf_evidence)
+            DBTUNE_I18N_MESSAGE='Evidencia'
+            ;;
         *)
             printf 'dbtune: missing interface message: %s\n' "$message_id" >&2
             return 70
@@ -657,7 +1593,7 @@ dbtune_printf() {
 
     dbtune_i18n_lookup "$message_id" || return
     # shellcheck disable=SC2059 # Format strings come only from the trusted static catalog.
-    printf "$DBTUNE_I18N_MESSAGE" "$@"
+    printf -- "$DBTUNE_I18N_MESSAGE" "$@"
 }
 
 dbtune_eprintf() {
