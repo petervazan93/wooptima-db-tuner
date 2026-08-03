@@ -90,6 +90,17 @@ dbtune_analysis_parse() {
     DBTUNE_ANALYSIS_REASON_ID=${DBTUNE_ANALYSIS_REASON_ID%$'\r'}
 }
 
+dbtune_analysis_verdict_is_valid() {
+    case ${1:-} in
+        ACTION|CHANGE|CLEANUP|CREDENTIAL-NOTE|DEPRECATED|DISABLED|DROPIN-MISSING|DUPLICATE-WRITES|EXPOSED|FAILED|FREQUENT|KEEP|MEMORY-GUARD|MIGRATE|MISSING|NO-SHRINK|OK|POLICY|PURGE-CANDIDATE|REDIS-DOWN|REDUCE|REMOVED|REVIEW|ROGUE-INDEX|SYSTEMD-LIMIT|TOO-LARGE|UNKNOWN|UNSUPPORTED)
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
 dbtune_analysis_load() {
     local file=${1:-}
     local line header=1
@@ -107,7 +118,8 @@ dbtune_analysis_load() {
             return 65
         fi
         dbtune_analysis_parse "$line" || return 65
-        if [[ ! $DBTUNE_ANALYSIS_REASON_ID =~ ^reason_[a-z0-9_]+$ ]] ||
+        if ! dbtune_analysis_verdict_is_valid "$DBTUNE_ANALYSIS_VERDICT" ||
+            [[ ! $DBTUNE_ANALYSIS_REASON_ID =~ ^reason_[a-z0-9_]+$ ]] ||
             ! dbtune_i18n_lookup "$DBTUNE_ANALYSIS_REASON_ID"; then
             dbtune_log error "$(dbtune_msg analysis_invalid_record)"
             return 65
@@ -834,7 +846,7 @@ dbtune_render_markdown() {
     mariadb_conflicting=$(dbtune_audit_value "$DBTUNE_AUDIT_FILE" audit.section.mariadb.conflicting_evidence 2>/dev/null || printf unknown)
     mariadb_optional=$(dbtune_audit_value "$DBTUNE_AUDIT_FILE" audit.section.mariadb.optional_evidence 2>/dev/null || printf unknown)
 
-    printf '# dbtune report\n\n'
+    dbtune_printf report_title
     dbtune_printf report_generated "$(dbtune_markdown_escape "$generated_at")" "$(dbtune_markdown_escape "$DBTUNE_ARTIFACT_VERSION")"
     dbtune_printf report_provenance \
         "$(dbtune_markdown_escape "$DBTUNE_RUN_ID")" \
@@ -1216,6 +1228,7 @@ cmd_report() {
     DBTUNE_DATABASES_FILE=$(dbtune_path databases.tsv) || return
     DBTUNE_SAMPLES_FILE=$(dbtune_path samples.tsv) || return
     DBTUNE_ANALYSIS_FILE=$(dbtune_path analysis.tsv) || return
+    dbtune_analysis_validate_schema "$DBTUNE_ANALYSIS_FILE" || return
     dbtune_provenance_validate_analysis || return
     dbtune_audit_validate "$DBTUNE_AUDIT_FILE" || return 65
     analysis_manifest=$(dbtune_analysis_manifest_file) || return
@@ -1263,8 +1276,9 @@ cmd_propose() {
         return 65
     fi
     dbtune_init_state_dir || return
-    dbtune_provenance_validate_analysis || return
     analysis_file=$(dbtune_path analysis.tsv) || return
+    dbtune_analysis_validate_schema "$analysis_file" || return
+    dbtune_provenance_validate_analysis || return
     DBTUNE_AUDIT_FILE=$(dbtune_path audit.tsv) || return
     dbtune_audit_validate "$DBTUNE_AUDIT_FILE" || return 65
     if [[ ! -r $analysis_file ]]; then

@@ -208,6 +208,9 @@ write_current_audit_manifest() {
     run awk -F '\t' 'NR > 1 && $8 !~ /^reason_[a-z0-9_]+$/ {bad=1} END {print bad+0}' "$BATS_TEST_TMPDIR/en.tsv"
     [ "$status" -eq 0 ]
     [ "$output" = 0 ]
+    run awk -F '\t' 'NR > 1 && $4 !~ /^(ACTION|CHANGE|CLEANUP|CREDENTIAL-NOTE|DEPRECATED|DISABLED|DROPIN-MISSING|DUPLICATE-WRITES|EXPOSED|FAILED|FREQUENT|KEEP|MEMORY-GUARD|MIGRATE|MISSING|NO-SHRINK|OK|POLICY|PURGE-CANDIDATE|REDIS-DOWN|REDUCE|REMOVED|REVIEW|ROGUE-INDEX|SYSTEMD-LIMIT|TOO-LARGE|UNKNOWN|UNSUPPORTED)$/ {bad=1} END {print bad+0}' "$BATS_TEST_TMPDIR/en.tsv"
+    [ "$status" -eq 0 ]
+    [ "$output" = 0 ]
     run awk -F '\t' '$1=="R-BP-SIZE" && $4=="CHANGE" {print $7 "\t" $8; exit}' "$BATS_TEST_TMPDIR/en.tsv"
     [[ "$output" == *'dataset='* ]]
     [[ "$output" == *$'\treason_buffer_pool_change' ]]

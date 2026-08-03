@@ -2022,11 +2022,15 @@ dbtune_lifecycle_apply_snapshot() {
 }
 
 cmd_apply() {
-    local parsed restart force proposal snapshot backup_file backup_snapshot='' status=0
+    local parsed restart force analysis proposal snapshot backup_file backup_snapshot='' status=0
 
     parsed=$(dbtune_lifecycle_parse_args "$@") || return
     IFS=$'\t' read -r restart force <<<"$parsed"
     dbtune_init_state_dir || return 1
+    analysis=$(dbtune_path analysis.tsv) || return
+    if [[ -s $analysis ]]; then
+        dbtune_analysis_validate_schema "$analysis" || return
+    fi
     proposal=$(dbtune_lifecycle_proposal)
     [[ -s $proposal ]] || {
         dbtune_log error "Chyba navrh konfiguracie: $proposal"

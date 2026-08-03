@@ -87,12 +87,12 @@ write_analysis_manifest() {
 write_analysis() {
     cat >"$DBTUNE_STATE_DIR/analysis.tsv" <<'EOF'
 rule_id	scope	severity	verdict	proposed_key	proposed_value	evidence	reason_id
-R-OC	app:shop-a	critical	Chýba object cache			Redis inactive | drop-in chýba	reason_redis_down
+R-OC	app:shop-a	critical	REDIS-DOWN			Redis inactive | drop-in chýba	reason_redis_down
 R-APP-AUTOLOAD	app:shop-a	high	TOO-LARGE			autoload=4M	reason_autoload_too_large
-R-BP-SIZE	server	high	Pool je malý	innodb_buffer_pool_size	4G	dataset 4 GB; burst 80 %	reason_buffer_pool_change
-R-MAXCONN	server	medium	Limit je privysoký	max_connections	200	FPM 120; peak 80	reason_max_connections_change
-R-SEC	server	high	MariaDB počúva verejne			bind-address=0.0.0.0	reason_security_exposed
-R-APP-SQL	app:shop-a	high	Diagnostika			app SQL	reason_app_source_unavailable
+R-BP-SIZE	server	high	CHANGE	innodb_buffer_pool_size	4G	dataset 4 GB; burst 80 %	reason_buffer_pool_change
+R-MAXCONN	server	medium	CHANGE	max_connections	200	FPM 120; peak 80	reason_max_connections_change
+R-SEC	server	high	EXPOSED			bind-address=0.0.0.0	reason_security_exposed
+R-APP-SQL	app:shop-a	high	UNKNOWN			app SQL	reason_app_source_unavailable
 EOF
     write_analysis_manifest
 }
@@ -104,6 +104,28 @@ R-APP-OBJECT-CACHE	app:shop-a	critical	REDIS-DOWN			redis=0; dropin=1	reason_red
 R-BP-SIZE	server	high	CHANGE	innodb_buffer_pool_size	4G	dataset=4G; current=128M	reason_buffer_pool_change
 EOF
     write_analysis_manifest
+}
+
+@test "analysis loader accepts every rules verdict and rejects localized prose" {
+    local analysis="$BATS_TEST_TMPDIR/verdicts.tsv" verdict
+    local verdicts=(
+        ACTION CHANGE CLEANUP CREDENTIAL-NOTE DEPRECATED DISABLED DROPIN-MISSING
+        DUPLICATE-WRITES EXPOSED FAILED FREQUENT KEEP MEMORY-GUARD MIGRATE MISSING
+        NO-SHRINK OK POLICY PURGE-CANDIDATE REDIS-DOWN REDUCE REMOVED REVIEW
+        ROGUE-INDEX SYSTEMD-LIMIT TOO-LARGE UNKNOWN UNSUPPORTED
+    )
+
+    printf 'rule_id\tscope\tseverity\tverdict\tproposed_key\tproposed_value\tevidence\treason_id\n' >"$analysis"
+    for verdict in "${verdicts[@]}"; do
+        printf 'R-TEST\tserver\tinfo\t%s\t\t\ttest\treason_query_cache_keep\n' "$verdict" >>"$analysis"
+    done
+
+    run dbtune_analysis_load "$analysis"
+    [ "$status" -eq 0 ]
+
+    printf 'R-LOCALIZED\tserver\thigh\tChýba object cache\t\t\ttest\treason_redis_down\n' >>"$analysis"
+    run dbtune_analysis_load "$analysis"
+    [ "$status" -eq 65 ]
 }
 
 @test "report is valid escaped flat JSON and keeps app section first" {
@@ -197,13 +219,33 @@ EOF
     [ "$en_proposal_hash" != "$sk_proposal_hash" ]
 }
 
-@test "report and propose reject the exact reason_sk schema with localized cycle guidance" {
+@test "Markdown document title and executive summary are localized" {
+    write_stable_analysis
+
+    dbtune_i18n_set en
+    cmd_report >/dev/null
+    grep -Fx '# dbtune report' "$DBTUNE_STATE_DIR/report.md"
+    grep -Fx '## Executive summary' "$DBTUNE_STATE_DIR/report.md"
+
+    dbtune_i18n_set sk
+    cmd_report >/dev/null
+    grep -Fx '# dbtune správa' "$DBTUNE_STATE_DIR/report.md"
+    grep -Fx '## Manažérske zhrnutie' "$DBTUNE_STATE_DIR/report.md"
+    run grep -F 'Executive summary' "$DBTUNE_STATE_DIR/report.md"
+    [ "$status" -ne 0 ]
+}
+
+@test "report rejects reason_sk schema before stale provenance" {
+    local analysis_hash manifest_hash state_before
+
     write_analysis
     awk -F '\t' 'BEGIN {OFS="\t"} NR==1 {$8="reason_sk"} {print}' "$DBTUNE_STATE_DIR/analysis.tsv" >"$BATS_TEST_TMPDIR/old-analysis.tsv"
     mv "$BATS_TEST_TMPDIR/old-analysis.tsv" "$DBTUNE_STATE_DIR/analysis.tsv"
-    write_analysis_manifest
+    analysis_hash=$(dbtune_sha256_file "$DBTUNE_STATE_DIR/analysis.tsv")
+    manifest_hash=$(dbtune_sha256_file "$DBTUNE_STATE_DIR/analysis-manifest.tsv")
     DBTUNE_LOG_LEVEL=error
     dbtune_state_write analyzed
+    state_before=$(dbtune_state_read)
 
     dbtune_i18n_set en
     run cmd_report
@@ -211,12 +253,34 @@ EOF
     [[ "$output" == *'start a new v0.4.0 audit and measurement cycle'* ]]
     [ ! -e "$DBTUNE_STATE_DIR/report.md" ]
     [ ! -e "$DBTUNE_STATE_DIR/report.json" ]
+    [ "$(dbtune_sha256_file "$DBTUNE_STATE_DIR/analysis.tsv")" = "$analysis_hash" ]
+    [ "$(dbtune_sha256_file "$DBTUNE_STATE_DIR/analysis-manifest.tsv")" = "$manifest_hash" ]
+    [ "$(dbtune_state_read)" = "$state_before" ]
+}
+
+@test "propose rejects reason_sk schema before invalid provenance without writes" {
+    local analysis_hash manifest_hash state_before
+
+    write_analysis
+    awk -F '\t' 'BEGIN {OFS="\t"} NR==1 {$8="reason_sk"} {print}' "$DBTUNE_STATE_DIR/analysis.tsv" >"$BATS_TEST_TMPDIR/old-analysis.tsv"
+    mv "$BATS_TEST_TMPDIR/old-analysis.tsv" "$DBTUNE_STATE_DIR/analysis.tsv"
+    printf 'invalid\tmanifest\n' >"$DBTUNE_STATE_DIR/analysis-manifest.tsv"
+    analysis_hash=$(dbtune_sha256_file "$DBTUNE_STATE_DIR/analysis.tsv")
+    manifest_hash=$(dbtune_sha256_file "$DBTUNE_STATE_DIR/analysis-manifest.tsv")
+    DBTUNE_LOG_LEVEL=error
+    dbtune_state_write analyzed
+    state_before=$(dbtune_state_read)
 
     dbtune_i18n_set sk
     run cmd_propose
     [ "$status" -eq 65 ]
     [[ "$output" == *'spustite nový auditný a merací cyklus v0.4.0'* ]]
     [ ! -e "$DBTUNE_STATE_DIR/proposed-99-zz-tuning.cnf" ]
+    [ ! -e "$DBTUNE_STATE_DIR/proposal-manifest.tsv" ]
+    ! compgen -G "$DBTUNE_STATE_DIR/.proposal*.tmp.*" >/dev/null
+    [ "$(dbtune_sha256_file "$DBTUNE_STATE_DIR/analysis.tsv")" = "$analysis_hash" ]
+    [ "$(dbtune_sha256_file "$DBTUNE_STATE_DIR/analysis-manifest.tsv")" = "$manifest_hash" ]
+    [ "$(dbtune_state_read)" = "$state_before" ]
 }
 
 @test "report exposes failed and partial audit sections and affected domains" {
@@ -383,7 +447,7 @@ EOF
     cat >"$DBTUNE_STATE_DIR/analysis.tsv" <<'EOF'
 rule_id	scope	severity	verdict	proposed_key	proposed_value	evidence	reason_id
 R-VERSION	server	critical	UNSUPPORTED			version=12.0.0-MariaDB	reason_version_unsupported
-R-APP-AUTOLOAD	app:shop-a	high	CHECK			autoload=4M	reason_autoload_review
+R-APP-AUTOLOAD	app:shop-a	high	REVIEW			autoload=4M	reason_autoload_review
 EOF
     dbtune_provenance_write_audit_manifest "$DBTUNE_STATE_DIR/audit-manifest.tsv" \
         report-run "$DBTUNE_STATE_DIR/audit.tsv" "$DBTUNE_STATE_DIR/apps.tsv" "$DBTUNE_STATE_DIR/databases.tsv"
@@ -466,7 +530,7 @@ shop-a	table_prefix	wp_
 EOF
     cat >"$DBTUNE_STATE_DIR/analysis.tsv" <<'EOF'
 rule_id	scope	severity	verdict	proposed_key	proposed_value	evidence	reason_id
-R-APP-WPCRON	app:shop-a	high	CHECK			owner missing	reason_wp_cron_mapping_unknown
+R-APP-WPCRON	app:shop-a	high	UNKNOWN			owner missing	reason_wp_cron_mapping_unknown
 EOF
     dbtune_provenance_write_audit_manifest "$DBTUNE_STATE_DIR/audit-manifest.tsv" \
         report-run "$DBTUNE_STATE_DIR/audit.tsv" "$DBTUNE_STATE_DIR/apps.tsv" "$DBTUNE_STATE_DIR/databases.tsv"
@@ -511,7 +575,7 @@ EOF
     local expected
     write_analysis
     printf 'password\tdont-print-me\n' >>"$DBTUNE_STATE_DIR/audit.tsv"
-    printf 'R-ESC\tapp:shop-a\tmedium\tPipe | tick ` and slash \\\t\t\tevidence | cell; password=secret\treason_app_source_unavailable\n' >>"$DBTUNE_STATE_DIR/analysis.tsv"
+    printf 'R-ESC\tapp:shop-a\tmedium\tUNKNOWN\t\t\tPipe | tick ` and slash \\; evidence | cell; password=secret\treason_app_source_unavailable\n' >>"$DBTUNE_STATE_DIR/analysis.tsv"
     dbtune_provenance_write_audit_manifest "$DBTUNE_STATE_DIR/audit-manifest.tsv" \
         report-run "$DBTUNE_STATE_DIR/audit.tsv" "$DBTUNE_STATE_DIR/apps.tsv" "$DBTUNE_STATE_DIR/databases.tsv"
     write_analysis_manifest

@@ -1236,21 +1236,33 @@ STUB
 }
 
 @test "apply rejects reason_sk analysis without mutating lifecycle artifacts" {
-    local analysis_hash proposal_hash state_before
+    local analysis_hash backup_hash proposal_hash proposal_manifest_hash state_before target_hash
 
     awk -F '\t' 'BEGIN {OFS="\t"} NR==1 {$8="reason_sk"} {print}' "$DBTUNE_STATE_DIR/analysis.tsv" >"$BATS_TEST_TMPDIR/old-analysis.tsv"
     mv "$BATS_TEST_TMPDIR/old-analysis.tsv" "$DBTUNE_STATE_DIR/analysis.tsv"
+    printf 'original target\n' >"$DBTUNE_CONFIG_TARGET"
     analysis_hash=$(dbtune_sha256_file "$DBTUNE_STATE_DIR/analysis.tsv")
+    backup_hash=$(dbtune_sha256_file "$(dbtune_backup_evidence_file)")
     proposal_hash=$(dbtune_sha256_file "$DBTUNE_STATE_DIR/proposed-99-zz-tuning.cnf")
+    proposal_manifest_hash=$(dbtune_sha256_file "$DBTUNE_STATE_DIR/proposal-manifest.tsv")
     state_before=$(dbtune_state_read)
+    target_hash=$(dbtune_sha256_file "$DBTUNE_CONFIG_TARGET")
     dbtune_i18n_set en
+    mktemp() {
+        printf '%s\n' "$*" >>"$BATS_TEST_TMPDIR/mktemp.log"
+        command mktemp "$@"
+    }
 
     run cmd_apply
 
     [ "$status" -eq 65 ]
     [[ "$output" == *'start a new v0.4.0 audit and measurement cycle'* ]]
     [ "$(dbtune_sha256_file "$DBTUNE_STATE_DIR/analysis.tsv")" = "$analysis_hash" ]
+    [ "$(dbtune_sha256_file "$(dbtune_backup_evidence_file)")" = "$backup_hash" ]
     [ "$(dbtune_sha256_file "$DBTUNE_STATE_DIR/proposed-99-zz-tuning.cnf")" = "$proposal_hash" ]
+    [ "$(dbtune_sha256_file "$DBTUNE_STATE_DIR/proposal-manifest.tsv")" = "$proposal_manifest_hash" ]
     [ "$(dbtune_state_read)" = "$state_before" ]
-    [ ! -e "$DBTUNE_CONFIG_TARGET" ]
+    [ "$(dbtune_sha256_file "$DBTUNE_CONFIG_TARGET")" = "$target_hash" ]
+    [ ! -e "$BATS_TEST_TMPDIR/mktemp.log" ]
+    [ ! -e "$DBTUNE_STATE_DIR/apply" ]
 }

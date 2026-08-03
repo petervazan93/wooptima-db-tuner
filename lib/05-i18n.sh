@@ -630,10 +630,10 @@ dbtune_i18n_lookup() {
             DBTUNE_I18N_MESSAGE='analysis.tsv nemá očakávanú osemstĺpcovú hlavičku reason_id'
             ;;
         en:analysis_invalid_record)
-            DBTUNE_I18N_MESSAGE='Invalid analysis.tsv record; exactly eight fields and a catalog reason_id are required'
+            DBTUNE_I18N_MESSAGE='Invalid analysis.tsv record; exactly eight fields, a supported verdict token, and a catalog reason_id are required'
             ;;
         sk:analysis_invalid_record)
-            DBTUNE_I18N_MESSAGE='Neplatný analysis.tsv záznam; vyžaduje sa presne osem polí a katalógový reason_id'
+            DBTUNE_I18N_MESSAGE='Neplatný analysis.tsv záznam; vyžaduje sa presne osem polí, podporovaný verdict token a katalógový reason_id'
             ;;
         en:analysis_empty)
             DBTUNE_I18N_MESSAGE='analysis.tsv is empty'
@@ -1385,6 +1385,12 @@ dbtune_i18n_lookup() {
         sk:report_security_none)
             DBTUNE_I18N_MESSAGE='- Bez samostatných bezpečnostných nálezov v analýze.\n'
             ;;
+        en:report_title)
+            DBTUNE_I18N_MESSAGE='# dbtune report\n\n'
+            ;;
+        sk:report_title)
+            DBTUNE_I18N_MESSAGE='# dbtune správa\n\n'
+            ;;
         en:report_generated)
             DBTUNE_I18N_MESSAGE='_Generated: %s | dbtune %s_\n\n'
             ;;
@@ -1407,7 +1413,7 @@ dbtune_i18n_lookup() {
             DBTUNE_I18N_MESSAGE='## Executive summary\n\n'
             ;;
         sk:report_summary_heading)
-            DBTUNE_I18N_MESSAGE='## Executive summary\n\n'
+            DBTUNE_I18N_MESSAGE='## Manažérske zhrnutie\n\n'
             ;;
         en:report_audit_status)
             DBTUNE_I18N_MESSAGE='**Overall audit status:** %s.\n\n'
