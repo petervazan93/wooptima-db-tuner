@@ -7,7 +7,7 @@
 Odporucany auditovatelny postup pouziva pripnuty release. Najprv stiahnite a overte povod samotneho installera, potom ho precitajte a az nasledne spustite ako root:
 
 ```bash
-release=v0.2.0
+release=v0.3.0
 curl --proto '=https' --tlsv1.2 -fsSLo install.sh \
   "https://github.com/petervazan93/wooptima-db-tuner/releases/download/$release/install.sh"
 curl --proto '=https' --tlsv1.2 -fsSLo dbtune-attestation.jsonl \
@@ -24,13 +24,34 @@ sudo sh install.sh --version "$release"
 
 Installer vyzaduje `gh` CLI, stiahne zvoleny GitHub Release aj offline `dbtune-attestation.jsonl`, overi SHA-256, GitHub keyless artifact attestation pre `dbtune` voci explicitnemu repozitaru a jeho vlastnikovi, signer workflowu a release tagu a Bash syntax. Overenie bundle nevyzaduje `gh auth login` ani API token. Az potom artefakt atomicky nainstaluje do `/usr/local/bin/dbtune`. Nespusta audit ani nemeni MariaDB. Runtime `apply`, rollback a crash recovery vyzaduju `python3` s podporou `dir_fd` a Linux `renameat2`, ktoru poskytuju podporovane Ubuntu/RunCloud systemy. Download selector je `--version vX.Y.Z` alebo `DBTUNE_RELEASE=vX.Y.Z`; nema vplyv na immutable verziu vlozenu do artefaktu pri builde.
 
-Upstream installer ma repository identitu aj attestation trust policy pevne viazanu na `petervazan93/wooptima-db-tuner` a nepodporuje `DBTUNE_REPOSITORY`. Alternativny download endpoint moze poskytovat iba identicke upstream artefakty, ktore stale prejdu upstream provenance kontrolou; samotna zmena endpointu nemeni doveru. Fork alebo mirror s vlastnym buildom je ina doverova domena: musi udrziavat vlastny installer a explicitne v nom zmenit spolu repository, ocakavaneho vlastnika, signer workflow a source ref. Upstream default sa fail-closed automaticky neprepina.
+Pre produkciu je odporucany pripnuty `vX.Y.Z` release. Predvolene `latest` je pohyblivy selector: installer ho najprv cez GitHub release metadata prelozi na konkretny semver tag a potom overi artefakt voci presnemu `refs/tags/vX.Y.Z`. Hodnota verzie moze byt zadana s `v` aj bez neho.
+
+GitHub Releases je predvoleny transport. Interny `DBTUNE_DOWNLOAD_BASE` moze ukazat na kontrolovany HTTPS mirror; `file://` je urceny iba pre testy. Transport override nemeni upstream repository, vlastnika, signer workflow ani exact source-ref politiku a nemoze autorizovat vlastny fork build. `DBTUNE_REPOSITORY` nie je podporovane.
 
 Prvy read-only krok po instalacii:
 
 ```bash
 sudo dbtune audit --json
 ```
+
+## Podpora a zavislosti
+
+| Oblast | Kontrakt |
+| --- | --- |
+| Akceptovane MariaDB rodiny | 10.6, 10.11 a 11.x |
+| Integracne testovane MariaDB | 10.6 a 11.4 |
+| CI operacny system | Ubuntu 24.04 |
+| Cielove nasadenie | Linux RunCloud host so systemd |
+
+- Installer: POSIX `sh`, Linux, `curl`, `gh`, Bash 4+, `install`, `stat`, SHA-256 nastroj a `sudo` pri privilegovanom cieli.
+- Runtime: Bash 4+, standardne GNU/Linux nastroje a `flock`.
+- Databaza: MariaDB/MySQL klient a podporovana root socket alebo defaults-file autentizacia.
+- Apply, rollback a recovery: Python 3 s `dir_fd`, Linux `renameat2`, systemd a validacny prikaz MariaDB daemonu.
+- Autoritativny hardware/security audit: `findmnt`, `lsblk`, `ss`, `free` a `pgrep` pre prislusne evidence domeny.
+- WordPress actions: WP-CLI je volitelne; bez overeneho non-root vlastnika a kanonickeho webrootu ostane action `not-executable`.
+- Vyvoj: Bats, ShellCheck, Docker a Docker Compose.
+
+CI pokrytie netvrdi, ze kazdy Ubuntu release alebo kazdy MariaDB 11.x minor bol integracne testovany.
 
 ## Build a testy
 
@@ -62,7 +83,7 @@ Dispatcher vola funkcie `cmd_audit`, `cmd_collect`, `cmd_analyze`, `cmd_report`,
 
 Kazdy uspesny `audit` je stale read-only voci MariaDB a systemovej konfiguracii, ale zacina novy immutable meraci cyklus. Dostane jedinecny `run_id`; `audit_hash` pokryva `audit.tsv`, `apps.tsv` aj `databases.tsv`. Predchadzajuci cyklus sa skopiruje do `$DBTUNE_STATE_DIR/runs/<run_id>/`, jeho collect/analysis/report/proposal subory sa z aktivneho priestoru odstrania a stav sa nastavi na `audited`. `apply/` a `apply/current` sa nearchivuju ani nemazu, preto zostava dostupny rollback predchadzajuceho apply. Explicitny `audit --new-run` nie je potrebny.
 
-Autoritativny audit vyzaduje styri sekcie: `mariadb` (serverove premenne, status a databazovy inventar), `hardware` (CPU, RAM a trieda datadir uloziska), `applications` (uplne discovery a per-app audit statusy) a `security` (granty a stav listenera na porte 3306). `audit.overall_status` ma presnu semantiku: `PASS` znamena uplne povinne sekcie bez nalezov, `FINDINGS` uplne povinne sekcie s aspon jednym nalezom, `UNKNOWN` aspon jednu `partial` alebo `failed` sekciu pri zachovani casti povinnych dokazov a `ERROR` zlyhanie vsetkych povinnych sekcii. `audit --json`, textovy summary aj report publikuju `audit.required_sections`, `audit.failed_sections`, `audit.partial_sections`, `audit.affected_domains` a stav kazdej sekcie. Exit status `0` patri `PASS` a `FINDINGS`, `2` patri `UNKNOWN` a `1` patri `ERROR` alebo technickej chybe. Artefakty sa pri klasifikovanom `UNKNOWN`/`ERROR` zachovaju pre diagnostiku, ale automatizacia musi ne-nulovy status povazovat za neautoritativny vysledok.
+Autoritativny audit vyzaduje styri sekcie: `mariadb` (serverove premenne, status a databazovy inventar), `hardware` (CPU, RAM a trieda datadir uloziska), `applications` (uplne discovery a per-app audit statusy) a `security` (granty a stav listenera na porte 3306). `audit.overall_status` ma presnu semantiku: `PASS` znamena uplne povinne sekcie bez nalezov, `FINDINGS` uplne povinne sekcie s aspon jednym nalezom, `UNKNOWN` aspon jednu `partial` alebo `failed` sekciu pri zachovani casti povinnych dokazov a `ERROR` zlyhanie vsetkych povinnych sekcii. `audit --json`, textovy summary aj report publikuju `audit.required_sections`, `audit.failed_sections`, `audit.partial_sections`, `audit.affected_domains` a stav kazdej sekcie. Klasifikovany audit vracia `0` pre `PASS`/`FINDINGS`, `2` pre `UNKNOWN` a `1` pre `ERROR`. Usage, validacne, dependency a ine technicke zlyhania mozu pouzit existujuce exit kody `64+`; automatizacia ich nesmie interpretovat ako auditnu klasifikaciu. Artefakty sa pri klasifikovanom `UNKNOWN`/`ERROR` zachovaju pre diagnostiku, ale automatizacia musi ne-nulovy status povazovat za neautoritativny vysledok.
 
 MariaDB sekcia pouziva jedinu verziovanu evidence schemu pre vsetky proposal current hodnoty a MariaDB vstupy serverovych pravidiel. Schema urcuje kanonicky kluc, validator (`uint`, kladne cislo, decimal, percento, bool/enum, cesta alebo text), verziovy gate a rolu `proposal|input`; z rovnakej tabulky sa generuje GLOBAL_VARIABLES query aj rules proposal kontrakt. Chybajuci, `unknown`, malformed, konfliktny alebo nepodporovany povinny kluc nastavi sekciu na `partial` a audit na `UNKNOWN`. Bezpecne diagnostiky `audit.section.mariadb.{missing,invalid,conflicting,optional}_evidence` obsahuju iba nazvy klucov a dovody, nie hodnoty. `innodb_flush_method` je povinny na 10.6/10.11 a explicitne volitelny ako deprecated vstup na 11.x; ostatne podporovane proposal current hodnoty su povinne.
 
