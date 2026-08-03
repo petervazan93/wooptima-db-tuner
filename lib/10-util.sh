@@ -1350,6 +1350,9 @@ dbtune_with_lifecycle_lock() {
     shift 3 || true
 
     dbtune_init_state_dir || return
+    if [[ $operation == _tick ]] && declare -F dbtune_collect_restore_language >/dev/null 2>&1; then
+        dbtune_collect_restore_language || return
+    fi
     if ! command -v "$flock_command" >/dev/null 2>&1; then
         dbtune_log error "$(dbtune_msg core_lifecycle_flock_required)"
         [[ $mode == skip ]] && return 75

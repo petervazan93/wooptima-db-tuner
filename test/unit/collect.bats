@@ -86,6 +86,11 @@ dbtune_embedded_get() {
     esac
 }
 
+source_tick_dispatch() {
+    source "$BATS_TEST_DIRNAME/../../lib/60-lifecycle.sh"
+    source "$BATS_TEST_DIRNAME/../../lib/90-main.sh"
+}
+
 @test "collector usage defaults to English" {
     run dbtune_collect_usage
 
@@ -321,6 +326,7 @@ dbtune_embedded_get() {
 }
 
 @test "tick restores the persisted language before diagnostics and automatic reporting" {
+    source_tick_dispatch
     dbtune_state_write collecting
     write_collect_config 999999 sk
     write_sample_rows 288
@@ -333,12 +339,27 @@ dbtune_embedded_get() {
         dbtune_printf report_title >"$BATS_TEST_TMPDIR/automatic-report.md"
     }
 
-    run cmd_tick unexpected
+    run dbtune_main _tick unexpected
 
     [ "$status" -eq 0 ]
     [[ "$output" == *'_tick ignoruje argumenty'* ]]
     [ "$(cat "$BATS_TEST_TMPDIR/analyze-language")" = sk ]
     [ "$(cat "$BATS_TEST_TMPDIR/automatic-report.md")" = '# dbtune správa' ]
+}
+
+@test "public tick restores persisted language before lifecycle lock diagnostics" {
+    source_tick_dispatch
+    dbtune_state_write collecting
+    write_collect_config 999999 sk
+    export DBTUNE_UI_LANG=en
+    export DBTUNE_LOG_LEVEL=error
+    export DBTUNE_FLOCK="$BATS_TEST_TMPDIR/missing-flock"
+
+    run dbtune_main _tick
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *'Lifecycle lock vyzaduje flock'* ]]
+    [[ "$output" != *'Lifecycle lock requires flock'* ]]
 }
 
 @test "status does not invoke SQL or systemctl" {

@@ -842,7 +842,6 @@ dbtune_collect_tick_body() {
 cmd_tick() {
     local lock_file lock_identity lock_fd
 
-    dbtune_collect_restore_language || return 0
     if (($#)); then
         dbtune_log warn "$(dbtune_msg collect_tick_arguments_ignored)"
     fi
