@@ -8,9 +8,11 @@ setup() {
     mkdir -p "$DBTUNE_STATE_DIR"
     chmod 700 "$DBTUNE_STATE_DIR"
     source "$BATS_TEST_DIRNAME/../../lib/00-header.sh"
+    source "$BATS_TEST_DIRNAME/../../lib/05-i18n.sh"
     source "$BATS_TEST_DIRNAME/../../lib/10-util.sh"
     source "$BATS_TEST_DIRNAME/../../lib/20-audit.sh"
     source "$BATS_TEST_DIRNAME/../../lib/40-rules.sh"
+    dbtune_i18n_set sk
 }
 
 make_audit() {

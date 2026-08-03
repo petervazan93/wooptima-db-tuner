@@ -9,35 +9,333 @@ DOWNLOAD_BASE=${DBTUNE_DOWNLOAD_BASE:-}
 ALLOW_UNSUPPORTED_OS=${DBTUNE_ALLOW_UNSUPPORTED_OS:-0}
 ATTESTATION_REPOSITORY=petervazan93/wooptima-db-tuner
 ATTESTATION_SIGNER_WORKFLOW=petervazan93/wooptima-db-tuner/.github/workflows/release.yml
+UI_LANG=${DBTUNE_UI_LANG:-en}
 
-usage() {
-    cat <<'EOF'
-Pouzitie: install.sh [--version vX.Y.Z] [--install-dir CESTA]
+case $UI_LANG in
+    en|sk) ;;
+    *)
+        printf 'dbtune install: unsupported interface language: %s (expected en or sk)\n' "$UI_LANG" >&2
+        exit 64
+        ;;
+esac
+
+installer_message() {
+    case "$UI_LANG:$1" in
+        en:usage)
+            INSTALLER_MESSAGE='Usage: install.sh [--version vX.Y.Z] [--install-dir PATH]
+
+Environment:
+  DBTUNE_RELEASE               Release tag, default latest
+  DBTUNE_INSTALL_DIR           Target directory, default /usr/local/bin
+'
+            ;;
+        sk:usage)
+            INSTALLER_MESSAGE='Pouzitie: install.sh [--version vX.Y.Z] [--install-dir CESTA]
 
 Premenne:
   DBTUNE_RELEASE               Release tag, default latest
   DBTUNE_INSTALL_DIR           Cielovy adresar, default /usr/local/bin
-EOF
+'
+            ;;
+        en:repository_override)
+            INSTALLER_MESSAGE='DBTUNE_REPOSITORY is not supported; repository and attestation trust policy are pinned to upstream'
+            ;;
+        sk:repository_override)
+            INSTALLER_MESSAGE='DBTUNE_REPOSITORY nie je podporovane; repository a attestation trust policy su pevne viazane na upstream'
+            ;;
+        en:version_value_required)
+            INSTALLER_MESSAGE='--version requires a value'
+            ;;
+        sk:version_value_required)
+            INSTALLER_MESSAGE='--version vyzaduje hodnotu'
+            ;;
+        en:install_dir_value_required)
+            INSTALLER_MESSAGE='--install-dir requires a path'
+            ;;
+        sk:install_dir_value_required)
+            INSTALLER_MESSAGE='--install-dir vyzaduje cestu'
+            ;;
+        en:unknown_option)
+            INSTALLER_MESSAGE='unknown option: %s'
+            ;;
+        sk:unknown_option)
+            INSTALLER_MESSAGE='neznama volba: %s'
+            ;;
+        en:install_dir_absolute)
+            INSTALLER_MESSAGE='installation directory must be an absolute path'
+            ;;
+        sk:install_dir_absolute)
+            INSTALLER_MESSAGE='installacny adresar musi byt absolutna cesta'
+            ;;
+        en:install_dir_components)
+            INSTALLER_MESSAGE='installation directory must not contain . or .. components'
+            ;;
+        sk:install_dir_components)
+            INSTALLER_MESSAGE='installacny adresar nesmie obsahovat . ani .. komponenty'
+            ;;
+        en:version_invalid)
+            INSTALLER_MESSAGE='version must be latest or vX.Y.Z'
+            ;;
+        sk:version_invalid)
+            INSTALLER_MESSAGE='verzia musi byt latest alebo vX.Y.Z'
+            ;;
+        en:linux_required)
+            INSTALLER_MESSAGE='dbtune is intended for Linux; set DBTUNE_ALLOW_UNSUPPORTED_OS=1 for testing'
+            ;;
+        sk:linux_required)
+            INSTALLER_MESSAGE='dbtune je urceny pre Linux; pre test nastavte DBTUNE_ALLOW_UNSUPPORTED_OS=1'
+            ;;
+        en:curl_missing)
+            INSTALLER_MESSAGE='curl is missing'
+            ;;
+        sk:curl_missing)
+            INSTALLER_MESSAGE='chyba curl'
+            ;;
+        en:install_missing)
+            INSTALLER_MESSAGE='install command is missing'
+            ;;
+        sk:install_missing)
+            INSTALLER_MESSAGE='chyba prikaz install'
+            ;;
+        en:bash_missing)
+            INSTALLER_MESSAGE='bash is missing'
+            ;;
+        sk:bash_missing)
+            INSTALLER_MESSAGE='chyba bash'
+            ;;
+        en:gh_missing)
+            INSTALLER_MESSAGE='missing gh CLI required for artifact attestation verification'
+            ;;
+        sk:gh_missing)
+            INSTALLER_MESSAGE='chyba gh CLI potrebne pre overenie artifact attestation'
+            ;;
+        en:bash_version)
+            INSTALLER_MESSAGE='dbtune requires Bash 4 or newer'
+            ;;
+        sk:bash_version)
+            INSTALLER_MESSAGE='dbtune vyzaduje Bash 4 alebo novsi'
+            ;;
+        en:parent_not_directory)
+            INSTALLER_MESSAGE='nearest existing parent %s is not a directory'
+            ;;
+        sk:parent_not_directory)
+            INSTALLER_MESSAGE='najblizsi existujuci rodic %s nie je adresar'
+            ;;
+        en:stat_missing)
+            INSTALLER_MESSAGE='stat command required for secure installation is missing'
+            ;;
+        sk:stat_missing)
+            INSTALLER_MESSAGE='chyba prikaz stat potrebny pre bezpecnu instalaciu'
+            ;;
+        en:stat_unsupported)
+            INSTALLER_MESSAGE='stat does not support reading directory owner and mode'
+            ;;
+        sk:stat_unsupported)
+            INSTALLER_MESSAGE='stat nepodporuje citanie vlastnika a modu adresara'
+            ;;
+        en:parent_unverifiable)
+            INSTALLER_MESSAGE='cannot verify privileged parent %s'
+            ;;
+        sk:parent_unverifiable)
+            INSTALLER_MESSAGE='neda sa overit privilegovany rodic %s'
+            ;;
+        en:parent_metadata_invalid)
+            INSTALLER_MESSAGE='invalid metadata for privileged parent %s'
+            ;;
+        sk:parent_metadata_invalid)
+            INSTALLER_MESSAGE='neplatne metadata privilegovaneho rodica %s'
+            ;;
+        en:parent_not_root)
+            INSTALLER_MESSAGE='privileged parent %s is not owned by root'
+            ;;
+        sk:parent_not_root)
+            INSTALLER_MESSAGE='privilegovany rodic %s nie je vlastneny rootom'
+            ;;
+        en:parent_untrusted_writable)
+            INSTALLER_MESSAGE='privileged parent %s is writable by untrusted users'
+            ;;
+        sk:parent_untrusted_writable)
+            INSTALLER_MESSAGE='privilegovany rodic %s je zapisovatelny nedoveryhodnymi pouzivatelmi'
+            ;;
+        en:path_symlink)
+            INSTALLER_MESSAGE='privileged installation path contains a symlink: %s'
+            ;;
+        sk:path_symlink)
+            INSTALLER_MESSAGE='privilegovana instalacna cesta obsahuje symlink: %s'
+            ;;
+        en:path_component_not_directory)
+            INSTALLER_MESSAGE='privileged installation path component is not a directory: %s'
+            ;;
+        sk:path_component_not_directory)
+            INSTALLER_MESSAGE='komponent privilegovanej instalacnej cesty nie je adresar: %s'
+            ;;
+        en:target_symlink)
+            INSTALLER_MESSAGE='privileged target must not be a symlink: %s'
+            ;;
+        sk:target_symlink)
+            INSTALLER_MESSAGE='privilegovany ciel nesmie byt symlink: %s'
+            ;;
+        en:target_not_regular)
+            INSTALLER_MESSAGE='privileged target must be a regular file: %s'
+            ;;
+        sk:target_not_regular)
+            INSTALLER_MESSAGE='privilegovany ciel musi byt regularny subor: %s'
+            ;;
+        en:privilege_required)
+            INSTALLER_MESSAGE='writing to %s requires root or sudo'
+            ;;
+        sk:privilege_required)
+            INSTALLER_MESSAGE='zapis do %s vyzaduje root alebo sudo'
+            ;;
+        en:latest_metadata_failed)
+            INSTALLER_MESSAGE='failed to load latest release metadata'
+            ;;
+        sk:latest_metadata_failed)
+            INSTALLER_MESSAGE='nepodarilo sa nacitat metadata najnovsieho release'
+            ;;
+        en:latest_tag_invalid)
+            INSTALLER_MESSAGE='latest release metadata does not contain a valid vX.Y.Z tag'
+            ;;
+        sk:latest_tag_invalid)
+            INSTALLER_MESSAGE='metadata najnovsieho release neobsahuju platny tag vX.Y.Z'
+            ;;
+        en:mktemp_failed)
+            INSTALLER_MESSAGE='mktemp failed'
+            ;;
+        sk:mktemp_failed)
+            INSTALLER_MESSAGE='mktemp zlyhal'
+            ;;
+        en:download_https_required)
+            INSTALLER_MESSAGE='download URL must use HTTPS'
+            ;;
+        sk:download_https_required)
+            INSTALLER_MESSAGE='download URL musi pouzivat HTTPS'
+            ;;
+        en:downloading)
+            INSTALLER_MESSAGE='dbtune install: downloading %s (%s)\n'
+            ;;
+        sk:downloading)
+            INSTALLER_MESSAGE='dbtune install: stahujem %s (%s)\n'
+            ;;
+        en:checksum_record_invalid)
+            INSTALLER_MESSAGE='release contains an invalid SHA-256 record'
+            ;;
+        sk:checksum_record_invalid)
+            INSTALLER_MESSAGE='release obsahuje neplatny SHA-256 zaznam'
+            ;;
+        en:checksum_length_invalid)
+            INSTALLER_MESSAGE='release contains an invalid SHA-256 length'
+            ;;
+        sk:checksum_length_invalid)
+            INSTALLER_MESSAGE='release obsahuje neplatnu dlzku SHA-256'
+            ;;
+        en:checksum_tool_missing)
+            INSTALLER_MESSAGE='neither sha256sum nor shasum is available'
+            ;;
+        sk:checksum_tool_missing)
+            INSTALLER_MESSAGE='chyba sha256sum aj shasum'
+            ;;
+        en:checksum_failed)
+            INSTALLER_MESSAGE='artifact SHA-256 verification failed'
+            ;;
+        sk:checksum_failed)
+            INSTALLER_MESSAGE='SHA-256 kontrola artefaktu zlyhala'
+            ;;
+        en:attestation_failed)
+            INSTALLER_MESSAGE='GitHub artifact attestation verification failed'
+            ;;
+        sk:attestation_failed)
+            INSTALLER_MESSAGE='GitHub artifact attestation overenie zlyhalo'
+            ;;
+        en:artifact_syntax_invalid)
+            INSTALLER_MESSAGE='downloaded artifact does not have valid Bash syntax'
+            ;;
+        sk:artifact_syntax_invalid)
+            INSTALLER_MESSAGE='stiahnuty artefakt nema platnu Bash syntax'
+            ;;
+        en:artifact_version_invalid)
+            INSTALLER_MESSAGE='artifact did not return a valid version'
+            ;;
+        sk:artifact_version_invalid)
+            INSTALLER_MESSAGE='artefakt nevratil platnu verziu'
+            ;;
+        en:artifact_version_mismatch)
+            INSTALLER_MESSAGE='artifact version is %s, expected %s'
+            ;;
+        sk:artifact_version_mismatch)
+            INSTALLER_MESSAGE='artefakt ma verziu %s, ocakavana je %s'
+            ;;
+        en:temporary_target_exists)
+            INSTALLER_MESSAGE='temporary privileged target already exists: %s'
+            ;;
+        sk:temporary_target_exists)
+            INSTALLER_MESSAGE='docasny privilegovany ciel uz existuje: %s'
+            ;;
+        en:temporary_target_not_regular)
+            INSTALLER_MESSAGE='temporary privileged target is not a regular file: %s'
+            ;;
+        sk:temporary_target_not_regular)
+            INSTALLER_MESSAGE='docasny privilegovany ciel nie je regularny subor: %s'
+            ;;
+        en:installed_unusable)
+            INSTALLER_MESSAGE='installed dbtune cannot be executed'
+            ;;
+        sk:installed_unusable)
+            INSTALLER_MESSAGE='nainstalovany dbtune sa neda spustit'
+            ;;
+        en:install_done)
+            INSTALLER_MESSAGE='dbtune install: done: %s/dbtune\n'
+            ;;
+        sk:install_done)
+            INSTALLER_MESSAGE='dbtune install: hotovo: %s/dbtune\n'
+            ;;
+        en:next_step)
+            INSTALLER_MESSAGE='Next safe step: sudo dbtune audit --json\n'
+            ;;
+        sk:next_step)
+            INSTALLER_MESSAGE='Dalsi bezpecny krok: sudo dbtune audit --json\n'
+            ;;
+        *)
+            printf 'dbtune install: missing interface message: %s\n' "$1" >&2
+            return 70
+            ;;
+    esac
+}
+
+installer_printf() {
+    installer_printf_id=$1
+    shift
+    installer_message "$installer_printf_id" || return
+    # shellcheck disable=SC2059 # Format strings come only from the trusted static selector.
+    printf "$INSTALLER_MESSAGE" "$@"
+}
+
+usage() {
+    installer_printf usage
 }
 
 fail() {
-    printf 'dbtune install: %s\n' "$*" >&2
+    installer_fail_id=$1
+    shift
+    printf 'dbtune install: ' >&2
+    installer_printf "$installer_fail_id" "$@" >&2
+    printf '\n' >&2
     exit 1
 }
 
 if [ "${DBTUNE_REPOSITORY+x}" = x ]; then
-    fail 'DBTUNE_REPOSITORY nie je podporovane; repository a attestation trust policy su pevne viazane na upstream'
+    fail repository_override
 fi
 
 while [ "$#" -gt 0 ]; do
     case $1 in
         --version)
-            [ "$#" -ge 2 ] || fail '--version vyzaduje hodnotu'
+            [ "$#" -ge 2 ] || fail version_value_required
             RELEASE=$2
             shift 2
             ;;
         --install-dir)
-            [ "$#" -ge 2 ] || fail '--install-dir vyzaduje cestu'
+            [ "$#" -ge 2 ] || fail install_dir_value_required
             INSTALL_DIR=$2
             shift 2
             ;;
@@ -45,19 +343,19 @@ while [ "$#" -gt 0 ]; do
             usage
             exit 0
             ;;
-        *) fail "neznama volba: $1" ;;
+        *) fail unknown_option "$1" ;;
     esac
 done
 
 case $INSTALL_DIR in
     /*) ;;
-    *) fail 'installacny adresar musi byt absolutna cesta' ;;
+    *) fail install_dir_absolute ;;
 esac
 while [ "$INSTALL_DIR" != / ] && [ "${INSTALL_DIR%/}" != "$INSTALL_DIR" ]; do
     INSTALL_DIR=${INSTALL_DIR%/}
 done
 case $INSTALL_DIR in
-    */./*|*/.|*/../*|*/..) fail 'installacny adresar nesmie obsahovat . ani .. komponenty' ;;
+    */./*|*/.|*/../*|*/..) fail install_dir_components ;;
 esac
 
 case $RELEASE in
@@ -66,18 +364,18 @@ case $RELEASE in
     *) RELEASE="v$RELEASE" ;;
 esac
 if [ "$RELEASE" != latest ] && ! printf '%s\n' "$RELEASE" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
-    fail 'verzia musi byt latest alebo vX.Y.Z'
+    fail version_invalid
 fi
 if [ "$(uname -s)" != Linux ] && [ "$ALLOW_UNSUPPORTED_OS" != 1 ]; then
-    fail 'dbtune je urceny pre Linux; pre test nastavte DBTUNE_ALLOW_UNSUPPORTED_OS=1'
+    fail linux_required
 fi
-command -v curl >/dev/null 2>&1 || fail 'chyba curl'
-command -v install >/dev/null 2>&1 || fail 'chyba prikaz install'
-command -v bash >/dev/null 2>&1 || fail 'chyba bash'
-command -v gh >/dev/null 2>&1 || fail 'chyba gh CLI potrebne pre overenie artifact attestation'
+command -v curl >/dev/null 2>&1 || fail curl_missing
+command -v install >/dev/null 2>&1 || fail install_missing
+command -v bash >/dev/null 2>&1 || fail bash_missing
+command -v gh >/dev/null 2>&1 || fail gh_missing
 
 bash_major=$(bash -c 'printf "%s" "${BASH_VERSINFO[0]}"')
-[ "$bash_major" -ge 4 ] || fail 'dbtune vyzaduje Bash 4 alebo novsi'
+[ "$bash_major" -ge 4 ] || fail bash_version
 
 path_parent() {
     path=$1
@@ -92,18 +390,18 @@ find_nearest_existing_parent() {
         [ "$nearest_existing" != / ] || break
         nearest_existing=$(path_parent "$nearest_existing")
     done
-    [ -d "$nearest_existing" ] || fail "najblizsi existujuci rodic $nearest_existing nie je adresar"
+    [ -d "$nearest_existing" ] || fail parent_not_directory "$nearest_existing"
 }
 
 STAT_STYLE=
 configure_stat() {
-    command -v stat >/dev/null 2>&1 || fail 'chyba prikaz stat potrebny pre bezpecnu instalaciu'
+    command -v stat >/dev/null 2>&1 || fail stat_missing
     if stat -c '%u %a' -- / >/dev/null 2>&1; then
         STAT_STYLE=gnu
     elif stat -f '%u %Lp' / >/dev/null 2>&1; then
         STAT_STYLE=bsd
     else
-        fail 'stat nepodporuje citanie vlastnika a modu adresara'
+        fail stat_unsupported
     fi
 }
 
@@ -118,19 +416,19 @@ directory_metadata() {
 validate_trusted_directory() {
     directory=$1
     metadata=$(directory_metadata "$directory") ||
-        fail "neda sa overit privilegovany rodic $directory"
+        fail parent_unverifiable "$directory"
     owner=${metadata%% *}
     mode=${metadata#* }
-    [ "$owner" != "$metadata" ] || fail "neplatne metadata privilegovaneho rodica $directory"
+    [ "$owner" != "$metadata" ] || fail parent_metadata_invalid "$directory"
     case $owner:$mode in
-        *[!0-9:]*|:*|*' '*) fail "neplatne metadata privilegovaneho rodica $directory" ;;
+        *[!0-9:]*|:*|*' '*) fail parent_metadata_invalid "$directory" ;;
     esac
-    [ "$owner" -eq 0 ] || fail "privilegovany rodic $directory nie je vlastneny rootom"
+    [ "$owner" -eq 0 ] || fail parent_not_root "$directory"
     group_digit=$((mode / 10 % 10))
     other_digit=$((mode % 10))
     case $group_digit:$other_digit in
         2:*|3:*|6:*|7:*|*:2|*:3|*:6|*:7)
-            fail "privilegovany rodic $directory je zapisovatelny nedoveryhodnymi pouzivatelmi"
+            fail parent_untrusted_writable "$directory"
             ;;
     esac
 }
@@ -138,9 +436,9 @@ validate_trusted_directory() {
 validate_privileged_install_path() {
     path=$INSTALL_DIR
     while :; do
-        [ ! -L "$path" ] || fail "privilegovana instalacna cesta obsahuje symlink: $path"
+        [ ! -L "$path" ] || fail path_symlink "$path"
         if [ -e "$path" ]; then
-            [ -d "$path" ] || fail "komponent privilegovanej instalacnej cesty nie je adresar: $path"
+            [ -d "$path" ] || fail path_component_not_directory "$path"
             validate_trusted_directory "$path"
         fi
         [ "$path" != / ] || break
@@ -148,9 +446,9 @@ validate_privileged_install_path() {
     done
 
     destination=$INSTALL_DIR/dbtune
-    [ ! -L "$destination" ] || fail "privilegovany ciel nesmie byt symlink: $destination"
+    [ ! -L "$destination" ] || fail target_symlink "$destination"
     if [ -e "$destination" ] && [ ! -f "$destination" ]; then
-        fail "privilegovany ciel musi byt regularny subor: $destination"
+        fail target_not_regular "$destination"
     fi
 }
 
@@ -160,7 +458,7 @@ find_nearest_existing_parent
 if [ "$(id -u)" -eq 0 ]; then
     PRIVILEGED_INSTALL=1
 elif [ ! -w "$nearest_existing" ] || [ ! -x "$nearest_existing" ]; then
-    command -v sudo >/dev/null 2>&1 || fail "zapis do $INSTALL_DIR vyzaduje root alebo sudo"
+    command -v sudo >/dev/null 2>&1 || fail privilege_required "$INSTALL_DIR"
     SUDO=sudo
     PRIVILEGED_INSTALL=1
 fi
@@ -172,11 +470,11 @@ fi
 if [ "$RELEASE" = latest ]; then
     release_metadata=$(curl --proto '=https' --proto-redir '=https' --tlsv1.2 -fsSL --retry 3 --retry-delay 1 \
         "https://api.github.com/repos/$ATTESTATION_REPOSITORY/releases/latest") ||
-        fail 'nepodarilo sa nacitat metadata najnovsieho release'
+        fail latest_metadata_failed
     selected_release=$(printf '%s\n' "$release_metadata" | awk -F '"' \
         '$2 == "tag_name" {print $4; exit}')
     if ! printf '%s\n' "$selected_release" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
-        fail 'metadata najnovsieho release neobsahuju platny tag vX.Y.Z'
+        fail latest_tag_invalid
     fi
 else
     selected_release=$RELEASE
@@ -186,7 +484,7 @@ if [ -z "$DOWNLOAD_BASE" ]; then
     DOWNLOAD_BASE="https://github.com/$REPOSITORY/releases/download/$selected_release"
 fi
 
-temporary=$(mktemp -d "${TMPDIR:-/tmp}/dbtune-install.XXXXXX") || fail 'mktemp zlyhal'
+temporary=$(mktemp -d "${TMPDIR:-/tmp}/dbtune-install.XXXXXX") || fail mktemp_failed
 target_new="$INSTALL_DIR/.dbtune.new.$$"
 target_created=0
 cleanup() {
@@ -207,7 +505,7 @@ download() {
     case $DOWNLOAD_BASE in
         https://*) curl --proto '=https' --tlsv1.2 -fsSL --retry 3 --retry-delay 1 "$DOWNLOAD_BASE/$name" -o "$destination" ;;
         file://*) curl -fsSL "$DOWNLOAD_BASE/$name" -o "$destination" ;;
-        *) fail 'download URL musi pouzivat HTTPS' ;;
+        *) fail download_https_required ;;
     esac
 }
 
@@ -222,37 +520,37 @@ verify_attestation() {
         --deny-self-hosted-runners >/dev/null
 }
 
-printf 'dbtune install: stahujem %s (%s)\n' "$REPOSITORY" "$selected_release"
+installer_printf downloading "$REPOSITORY" "$selected_release"
 download dbtune "$temporary/dbtune"
 download dbtune.sha256 "$temporary/dbtune.sha256"
 download dbtune-attestation.jsonl "$temporary/dbtune-attestation.jsonl"
 
 expected=$(awk '$2 == "dbtune" || $2 == "*dbtune" {print $1; exit}' "$temporary/dbtune.sha256")
 case $expected in
-    *[!0-9a-fA-F]*|'') fail 'release obsahuje neplatny SHA-256 zaznam' ;;
+    *[!0-9a-fA-F]*|'') fail checksum_record_invalid ;;
 esac
-[ "${#expected}" -eq 64 ] || fail 'release obsahuje neplatnu dlzku SHA-256'
+[ "${#expected}" -eq 64 ] || fail checksum_length_invalid
 
 if command -v sha256sum >/dev/null 2>&1; then
     actual=$(sha256sum "$temporary/dbtune" | awk '{print $1}')
 elif command -v shasum >/dev/null 2>&1; then
     actual=$(shasum -a 256 "$temporary/dbtune" | awk '{print $1}')
 else
-    fail 'chyba sha256sum aj shasum'
+    fail checksum_tool_missing
 fi
-[ "$actual" = "$expected" ] || fail 'SHA-256 kontrola artefaktu zlyhala'
+[ "$actual" = "$expected" ] || fail checksum_failed
 verify_attestation "$temporary/dbtune" "refs/tags/$selected_release" ||
-    fail 'GitHub artifact attestation overenie zlyhalo'
-bash -n "$temporary/dbtune" || fail 'stiahnuty artefakt nema platnu Bash syntax'
+    fail attestation_failed
+bash -n "$temporary/dbtune" || fail artifact_syntax_invalid
 artifact_version=$(
     (
         unset DBTUNE_VERSION DBTUNE_ARTIFACT_VERSION DBTUNE_RELEASE DBTUNE_PROGRAM
         bash "$temporary/dbtune" version
     ) | awk 'NF == 2 && $1 == "dbtune" {print $2}'
 )
-[ -n "$artifact_version" ] || fail 'artefakt nevratil platnu verziu'
+[ -n "$artifact_version" ] || fail artifact_version_invalid
 if [ "v$artifact_version" != "$selected_release" ]; then
-    fail "artefakt ma verziu $artifact_version, ocakavana je ${selected_release#v}"
+    fail artifact_version_mismatch "$artifact_version" "${selected_release#v}"
 fi
 
 run_privileged() {
@@ -270,7 +568,7 @@ run_privileged install -d -m 0755 "$INSTALL_DIR"
 if [ "$PRIVILEGED_INSTALL" -eq 1 ]; then
     validate_privileged_install_path
     if [ -e "$target_new" ] || [ -L "$target_new" ]; then
-        fail "docasny privilegovany ciel uz existuje: $target_new"
+        fail temporary_target_exists "$target_new"
     fi
     run_privileged install -o root -g root -m 0755 "$temporary/dbtune" "$target_new"
     target_created=1
@@ -280,14 +578,14 @@ else
 fi
 if [ "$PRIVILEGED_INSTALL" -eq 1 ]; then
     if [ ! -f "$target_new" ] || [ -L "$target_new" ]; then
-        fail "docasny privilegovany ciel nie je regularny subor: $target_new"
+        fail temporary_target_not_regular "$target_new"
     fi
     validate_privileged_install_path
 fi
 run_privileged mv -f "$target_new" "$INSTALL_DIR/dbtune"
 target_created=0
 
-installed_version=$("$INSTALL_DIR/dbtune" version) || fail 'nainstalovany dbtune sa neda spustit'
+installed_version=$("$INSTALL_DIR/dbtune" version) || fail installed_unusable
 printf 'dbtune install: %s\n' "$installed_version"
-printf 'dbtune install: hotovo: %s/dbtune\n' "$INSTALL_DIR"
-printf 'Dalsi bezpecny krok: sudo dbtune audit --json\n'
+installer_printf install_done "$INSTALL_DIR"
+installer_printf next_step

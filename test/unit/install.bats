@@ -103,6 +103,32 @@ bats::on_failure() {
     printf '%s\n' "$output" >&3
 }
 
+@test "installer help defaults to English" {
+    run sh "$BATS_TEST_DIRNAME/../../install.sh" --help
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == 'Usage: install.sh [--version vX.Y.Z] [--install-dir PATH]'* ]]
+    [[ "$output" == *'Environment:'* ]]
+}
+
+@test "installer help supports explicit Slovak" {
+    run env DBTUNE_UI_LANG=sk sh "$BATS_TEST_DIRNAME/../../install.sh" --help
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == 'Pouzitie: install.sh [--version vX.Y.Z] [--install-dir CESTA]'* ]]
+    [[ "$output" == *'Premenne:'* ]]
+}
+
+@test "installer rejects an unsupported interface language before trust checks" {
+    run env DBTUNE_UI_LANG=de DBTUNE_REPOSITORY=other-owner/wooptima-db-tuner \
+        sh "$BATS_TEST_DIRNAME/../../install.sh"
+
+    [ "$status" -eq 64 ]
+    [ "$output" = 'dbtune install: unsupported interface language: de (expected en or sk)' ]
+    [ ! -e "$ATTESTATION_LOG" ]
+    [ ! -e "$INSTALL_DIR/dbtune" ]
+}
+
 @test "installer applies the fixed upstream trust policy and atomically installs" {
     run env DBTUNE_DOWNLOAD_BASE="file://$RELEASE_DIR" \
         DBTUNE_INSTALL_DIR="$INSTALL_DIR" \
@@ -113,14 +139,45 @@ bats::on_failure() {
     [ "$status" -eq 0 ]
     [ -x "$INSTALL_DIR/dbtune" ]
     [ "$("$INSTALL_DIR/dbtune" version)" = 'dbtune 0.3.0' ]
-    [[ "$output" == *'SHA-256'* || "$output" == *'hotovo'* ]]
+    [[ "$output" == *'dbtune install: downloading petervazan93/wooptima-db-tuner (v0.3.0)'* ]]
+    [[ "$output" == *"dbtune install: done: $INSTALL_DIR/dbtune"* ]]
+    [[ "$output" == *'Next safe step: sudo dbtune audit --json'* ]]
     grep -F -- '--repo petervazan93/wooptima-db-tuner' "$ATTESTATION_LOG"
     grep -F -- '--signer-workflow petervazan93/wooptima-db-tuner/.github/workflows/release.yml' "$ATTESTATION_LOG"
     grep -F -- '--source-ref refs/tags/v0.3.0' "$ATTESTATION_LOG"
 }
 
+@test "installer success supports explicit Slovak" {
+    run env DBTUNE_UI_LANG=sk \
+        DBTUNE_DOWNLOAD_BASE="file://$RELEASE_DIR" \
+        DBTUNE_INSTALL_DIR="$INSTALL_DIR" \
+        DBTUNE_ALLOW_UNSUPPORTED_OS=1 \
+        sh "$BATS_TEST_DIRNAME/../../install.sh"
+
+    [ "$status" -eq 0 ]
+    [ -x "$INSTALL_DIR/dbtune" ]
+    [[ "$output" == *'dbtune install: stahujem petervazan93/wooptima-db-tuner (v0.3.0)'* ]]
+    [[ "$output" == *"dbtune install: hotovo: $INSTALL_DIR/dbtune"* ]]
+    [[ "$output" == *'Dalsi bezpecny krok: sudo dbtune audit --json'* ]]
+}
+
 @test "installer rejects a cross-repository override before download or verification" {
     run env DBTUNE_REPOSITORY=other-owner/wooptima-db-tuner \
+        DBTUNE_DOWNLOAD_BASE="file://$RELEASE_DIR" \
+        DBTUNE_INSTALL_DIR="$INSTALL_DIR" \
+        DBTUNE_ALLOW_UNSUPPORTED_OS=1 \
+        sh "$BATS_TEST_DIRNAME/../../install.sh"
+
+    [ "$status" -ne 0 ]
+    [[ "$output" == *'DBTUNE_REPOSITORY is not supported'* ]]
+    [[ "$output" == *'pinned to upstream'* ]]
+    [ ! -e "$ATTESTATION_LOG" ]
+    [ ! -e "$INSTALL_DIR/dbtune" ]
+}
+
+@test "installer trust failure supports explicit Slovak" {
+    run env DBTUNE_UI_LANG=sk \
+        DBTUNE_REPOSITORY=other-owner/wooptima-db-tuner \
         DBTUNE_DOWNLOAD_BASE="file://$RELEASE_DIR" \
         DBTUNE_INSTALL_DIR="$INSTALL_DIR" \
         DBTUNE_ALLOW_UNSUPPORTED_OS=1 \
@@ -155,7 +212,7 @@ ARTIFACT
         sh "$BATS_TEST_DIRNAME/../../install.sh"
 
     [ "$status" -ne 0 ]
-    [[ "$output" == *'attestation overenie zlyhalo'* ]]
+    [[ "$output" == *'artifact attestation verification failed'* ]]
     [ ! -e "$execution_marker" ]
     [ ! -e "$INSTALL_DIR/dbtune" ]
     grep -F -- '--source-ref refs/tags/v0.3.0' "$ATTESTATION_LOG"
@@ -169,7 +226,7 @@ ARTIFACT
         sh "$BATS_TEST_DIRNAME/../../install.sh"
 
     [ "$status" -ne 0 ]
-    [[ "$output" == *'attestation overenie zlyhalo'* ]]
+    [[ "$output" == *'artifact attestation verification failed'* ]]
     [ ! -e "$INSTALL_DIR/dbtune" ]
 }
 
@@ -187,7 +244,7 @@ ARTIFACT
         /bin/sh "$BATS_TEST_DIRNAME/../../install.sh"
 
     [ "$status" -ne 0 ]
-    [[ "$output" == *'chyba gh CLI'* ]]
+    [[ "$output" == *'missing gh CLI required for artifact attestation verification'* ]]
     [ ! -e "$INSTALL_DIR/dbtune" ]
 }
 
@@ -212,7 +269,7 @@ ARTIFACT
         sh "$BATS_TEST_DIRNAME/../../install.sh" --version 9.9.9
 
     [ "$status" -ne 0 ]
-    [[ "$output" == *'artefakt ma verziu 0.1.0, ocakavana je 9.9.9'* ]]
+    [[ "$output" == *'artifact version is 0.1.0, expected 9.9.9'* ]]
     [ ! -e "$INSTALL_DIR/dbtune" ]
 }
 
@@ -225,7 +282,7 @@ ARTIFACT
         sh "$BATS_TEST_DIRNAME/../../install.sh"
 
     [ "$status" -ne 0 ]
-    [[ "$output" == *'SHA-256 kontrola'* ]]
+    [[ "$output" == *'artifact SHA-256 verification failed'* ]]
     [ ! -e "$INSTALL_DIR/dbtune" ]
 }
 
@@ -283,7 +340,7 @@ ARTIFACT
         sh "$BATS_TEST_DIRNAME/../../install.sh"
 
     [ "$status" -ne 0 ]
-    [[ "$output" == *'privilegovany ciel nesmie byt symlink'* ]]
+    [[ "$output" == *'privileged target must not be a symlink'* ]]
     ! grep -F -- 'mv -f' "$SUDO_LOG"
 }
 
@@ -301,7 +358,7 @@ ARTIFACT
         sh "$BATS_TEST_DIRNAME/../../install.sh"
 
     [ "$status" -ne 0 ]
-    [[ "$output" == *'obsahuje symlink'* ]]
+    [[ "$output" == *'contains a symlink'* ]]
     [ ! -e "$INSTALL_DIR" ]
 }
 
@@ -318,6 +375,6 @@ ARTIFACT
         sh "$BATS_TEST_DIRNAME/../../install.sh"
 
     [ "$status" -ne 0 ]
-    [[ "$output" == *'zapisovatelny nedoveryhodnymi pouzivatelmi'* ]]
+    [[ "$output" == *'is writable by untrusted users'* ]]
     [ ! -e "$INSTALL_DIR" ]
 }

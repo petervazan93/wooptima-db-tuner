@@ -8,8 +8,10 @@ setup() {
     export DBTUNE_STATE_DIR="$BATS_TEST_TMPDIR/state"
     export DBTUNE_LOG_LEVEL=quiet
     source "$BATS_TEST_DIRNAME/../../lib/00-header.sh"
+    source "$BATS_TEST_DIRNAME/../../lib/05-i18n.sh"
     source "$BATS_TEST_DIRNAME/../../lib/10-util.sh"
     source "$BATS_TEST_DIRNAME/../../lib/50-report.sh"
+    dbtune_i18n_set sk
     mkdir -p "$DBTUNE_STATE_DIR"
     chmod 700 "$DBTUNE_STATE_DIR"
 

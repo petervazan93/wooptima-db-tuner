@@ -1,6 +1,7 @@
 #!/usr/bin/env bats
 
 setup() {
+    unset DBTUNE_UI_LANG
     BATS_TEST_TMPDIR=$(CDPATH='' cd -- "$BATS_TEST_TMPDIR" && pwd -P)
     export BATS_TEST_TMPDIR
     export DBTUNE_STATE_DIR="$BATS_TEST_TMPDIR/state"
@@ -17,6 +18,7 @@ setup() {
     mkdir -p "$DBTUNE_STATE_DIR" "$DBTUNE_HOME_ROOT" "$DBTUNE_MYSQL_CONFIG_DIR" "$DBTUNE_UNATTENDED_DIR" "$DBTUNE_CRON_ROOT"
     chmod 700 "$DBTUNE_STATE_DIR"
     source "$BATS_TEST_DIRNAME/../../lib/00-header.sh"
+    source "$BATS_TEST_DIRNAME/../../lib/05-i18n.sh"
     source "$BATS_TEST_DIRNAME/../../lib/10-util.sh"
     source "$BATS_TEST_DIRNAME/../../lib/20-audit.sh"
 }
@@ -856,6 +858,33 @@ EOF
     [[ "$output" != *$'\r'* ]]
 }
 
+@test "audit summary defaults to English labels and fallbacks" {
+    : >"$BATS_TEST_TMPDIR/summary-audit.tsv"
+    : >"$BATS_TEST_TMPDIR/summary-apps.tsv"
+    : >"$BATS_TEST_TMPDIR/summary-databases.tsv"
+
+    run dbtune_audit_summary "$BATS_TEST_TMPDIR/summary-audit.tsv" "$BATS_TEST_TMPDIR/summary-apps.tsv" "$BATS_TEST_TMPDIR/summary-databases.tsv"
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *'Required sections: not detected. Failed: not detected. Partial: not detected.'* ]]
+    [[ "$output" == *'Server: not detected CPU, not detected RAM, storage not detected.'* ]]
+    [[ "$output" == *'Applications: 0. Total findings: 0, critical: 0, warnings: 0.'* ]]
+}
+
+@test "audit summary supports explicit Slovak labels and fallbacks" {
+    : >"$BATS_TEST_TMPDIR/summary-audit.tsv"
+    : >"$BATS_TEST_TMPDIR/summary-apps.tsv"
+    : >"$BATS_TEST_TMPDIR/summary-databases.tsv"
+    dbtune_i18n_set sk
+
+    run dbtune_audit_summary "$BATS_TEST_TMPDIR/summary-audit.tsv" "$BATS_TEST_TMPDIR/summary-apps.tsv" "$BATS_TEST_TMPDIR/summary-databases.tsv"
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *'Povinne sekcie: nezistene. Zlyhane: nezistene. Ciastocne: nezistene.'* ]]
+    [[ "$output" == *'Server: nezistene CPU, nezistena RAM, ulozisko nezistene.'* ]]
+    [[ "$output" == *'Aplikacie: 0. Nalezy spolu: 0, kriticke: 0, varovania: 0.'* ]]
+}
+
 @test "cmd_audit publishes UNKNOWN evidence and returns exit status 2" {
     dbtune_audit_collect_mariadb() {
         dbtune_audit_put "$1" mariadb.available 1
@@ -969,8 +998,8 @@ EOF
     run cmd_audit
     [ "$status" -eq 0 ]
     [[ "$output" == *'DBTune audit status: FINDINGS.'* ]]
-    [[ "$output" == *'Zlyhane: none. Ciastocne: none.'* ]]
-    [[ "$output" == *'Nalezy spolu:'* ]]
+    [[ "$output" == *'Failed: none. Partial: none.'* ]]
+    [[ "$output" == *'Total findings:'* ]]
     [[ "$output" != *secret* ]]
     [ "$(dbtune_state_read)" = audited ]
     [ "$(dbtune_manifest_value "$DBTUNE_STATE_DIR/audit-manifest.tsv" run_id)" != "$old_run" ]

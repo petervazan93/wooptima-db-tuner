@@ -1,6 +1,7 @@
 #!/usr/bin/env bats
 
 setup() {
+    unset DBTUNE_UI_LANG
     BATS_TEST_TMPDIR=$(CDPATH='' cd -- "$BATS_TEST_TMPDIR" && pwd -P)
     export BATS_TEST_TMPDIR
     export DBTUNE_STATE_DIR="$BATS_TEST_TMPDIR/state"
@@ -13,6 +14,7 @@ setup() {
     mkdir -p "$DBTUNE_STATE_DIR" "$DBTUNE_SYSTEMD_DIR" "${DBTUNE_SLOW_LOG%/*}"
     chmod 700 "$DBTUNE_STATE_DIR"
     source "$BATS_TEST_DIRNAME/../../lib/00-header.sh"
+    source "$BATS_TEST_DIRNAME/../../lib/05-i18n.sh"
     source "$BATS_TEST_DIRNAME/../../lib/10-util.sh"
     source "$BATS_TEST_DIRNAME/../../lib/30-collect.sh"
     dbtune_sql() {
@@ -80,6 +82,24 @@ dbtune_embedded_get() {
         systemd/dbtune-collect.timer) command cat "$BATS_TEST_DIRNAME/../../systemd/dbtune-collect.timer" ;;
         *) return 64 ;;
     esac
+}
+
+@test "collector usage defaults to English" {
+    run dbtune_collect_usage
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == 'Usage:'* ]]
+    [[ "$output" == *'--long-query-time SECONDS'* ]]
+}
+
+@test "collector usage supports explicit Slovak" {
+    dbtune_i18n_set sk
+
+    run dbtune_collect_usage
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == 'Pouzitie:'* ]]
+    [[ "$output" == *'--long-query-time SEKUNDY'* ]]
 }
 
 @test "delta metrics use counter differences" {
@@ -276,6 +296,7 @@ dbtune_embedded_get() {
 
     run cmd_collect start --days 3 --long-query-time 0.5
     [ "$status" -eq 0 ]
+    [ "$output" = 'Collection started for 3 days (deadline epoch 1259200).' ]
     [ "$(dbtune_state_read)" = collecting ]
     [ "$(dbtune_collect_value days)" = 3 ]
     [ "$(dbtune_collect_value deadline_epoch)" = 1259200 ]
@@ -283,6 +304,16 @@ dbtune_embedded_get() {
     grep -F 'OnCalendar=*:0/5' "$DBTUNE_SYSTEMD_DIR/dbtune-collect.timer"
     grep -F 'enable --now dbtune-collect.timer' "$BATS_TEST_TMPDIR/systemctl.log"
     grep -F 'SET GLOBAL slow_query_log=ON' "$BATS_TEST_TMPDIR/sql.log"
+}
+
+@test "start confirmation supports explicit Slovak" {
+    dbtune_i18n_set sk
+    dbtune_state_write audited
+
+    run cmd_collect start --days 3 --long-query-time 0.5
+
+    [ "$status" -eq 0 ]
+    [ "$output" = 'Zber spusteny na 3 dni (deadline epoch 1259200).' ]
 }
 
 @test "status does not invoke SQL or systemctl" {
@@ -549,8 +580,20 @@ CONFIG
 
     run cmd_collect stop
     [ "$status" -eq 0 ]
+    [ "$output" = 'Collection stopped.' ]
     [ "$(dbtune_state_read)" = collected ]
     grep -F 'disable --now dbtune-collect.timer' "$BATS_TEST_TMPDIR/systemctl.log"
     grep -F "SET GLOBAL slow_query_log_file='/var/lib/mysql/original-slow.log'" "$BATS_TEST_TMPDIR/sql.log"
     grep -F 'SET GLOBAL slow_query_log=1' "$BATS_TEST_TMPDIR/sql.log"
+}
+
+@test "stop confirmation supports explicit Slovak" {
+    dbtune_i18n_set sk
+    dbtune_state_write collecting
+    write_collect_config
+
+    run cmd_collect stop
+
+    [ "$status" -eq 0 ]
+    [ "$output" = 'Zber zastaveny.' ]
 }
