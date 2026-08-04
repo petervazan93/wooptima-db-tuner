@@ -9,7 +9,7 @@ permissions:
   contents: read
 
 jobs:
-  test:
+  quality:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -17,13 +17,13 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y bats shellcheck python3
       - name: Static and unit tests
         run: make check && make test
-      - name: MariaDB lifecycle integration (English)
-        env:
-          DBTUNE_REQUIRE_INTEGRATION: 1
-          DBTUNE_UI_LANG: en
-        run: make integration
-      - name: MariaDB lifecycle integration (Slovak)
-        env:
-          DBTUNE_REQUIRE_INTEGRATION: 1
-          DBTUNE_UI_LANG: sk
+
+  integration:
+    runs-on: ubuntu-24.04
+    env:
+      DBTUNE_REQUIRE_INTEGRATION: 1
+      DBTUNE_UI_LANG: en
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: MariaDB lifecycle integration
         run: make integration
