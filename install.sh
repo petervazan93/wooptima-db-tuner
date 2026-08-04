@@ -27,6 +27,7 @@ installer_message() {
 Environment:
   DBTUNE_RELEASE               Release tag, default latest
   DBTUNE_INSTALL_DIR           Target directory, default /usr/local/bin
+  DBTUNE_UI_LANG=en|sk         Interface language, default en
 '
             ;;
         sk:usage)
@@ -35,6 +36,7 @@ Environment:
 Premenne:
   DBTUNE_RELEASE               Release tag, default latest
   DBTUNE_INSTALL_DIR           Cielovy adresar, default /usr/local/bin
+  DBTUNE_UI_LANG=en|sk         Jazyk rozhrania, default en
 '
             ;;
         en:repository_override)

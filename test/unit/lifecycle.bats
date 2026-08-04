@@ -613,8 +613,20 @@ STUB
     write_manifest
     run cmd_apply
     [ "$status" -eq 65 ]
-    [[ "$output" == *"R-VERSION"* ]]
-    [[ "$output" == *"R-BACKUP"* ]]
+    [ "$output" = '2026-07-31T12:00:00Z [ERROR] Apply is blocked by a critical server finding: R-VERSION: REMOVED - The variable was removed in MariaDB 11 and can prevent the next start. R-BACKUP: MISSING - Confirmed absence of a backup blocks tuning.' ]
+    [ ! -e "$DBTUNE_CONFIG_TARGET" ]
+}
+
+@test "critical-analysis rejection resolves exact Slovak reasons" {
+    printf 'R-VERSION\tserver\tcritical\tREMOVED\t\t\tinnodb_change_buffering\treason_variable_removed_startup\n' >>"$DBTUNE_STATE_DIR/analysis.tsv"
+    printf 'R-BACKUP\tserver\tcritical\tMISSING\t\t\tbackup unknown\treason_backup_missing\n' >>"$DBTUNE_STATE_DIR/analysis.tsv"
+    write_manifest
+    dbtune_i18n_set sk
+
+    run cmd_apply
+
+    [ "$status" -eq 65 ]
+    [ "$output" = '2026-07-31T12:00:00Z [ERROR] Apply blokuje kritický serverový nález: R-VERSION: REMOVED - Premenná je od MariaDB 11 odstránená a môže zablokovať ďalší štart. R-BACKUP: MISSING - Potvrdená absencia zálohy blokuje tuning.' ]
     [ ! -e "$DBTUNE_CONFIG_TARGET" ]
 }
 

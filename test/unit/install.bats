@@ -109,6 +109,7 @@ bats::on_failure() {
     [ "$status" -eq 0 ]
     [[ "$output" == 'Usage: install.sh [--version vX.Y.Z] [--install-dir PATH]'* ]]
     [[ "$output" == *'Environment:'* ]]
+    [[ "$output" == *'DBTUNE_UI_LANG=en|sk'* ]]
 }
 
 @test "installer help supports explicit Slovak" {
@@ -117,6 +118,7 @@ bats::on_failure() {
     [ "$status" -eq 0 ]
     [[ "$output" == 'Pouzitie: install.sh [--version vX.Y.Z] [--install-dir CESTA]'* ]]
     [[ "$output" == *'Premenne:'* ]]
+    [[ "$output" == *'DBTUNE_UI_LANG=en|sk'* ]]
 }
 
 @test "installer rejects an unsupported interface language before trust checks" {

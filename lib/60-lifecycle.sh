@@ -556,20 +556,24 @@ dbtune_lifecycle_reject_mydumper() {
 
 dbtune_lifecycle_reject_critical_analysis() {
     local analysis="$DBTUNE_STATE_DIR/analysis.tsv"
-    local findings
+    local records findings='' rule_id verdict reason_id reason
 
     [[ -r $analysis ]] || return 66
-    findings=$(awk -F '\t' '
+    records=$(awk -F '\t' 'BEGIN {OFS="\t"}
         NR > 1 && $2 == "server" && $3 == "critical" &&
         (($1 == "R-VERSION" && ($4 == "UNSUPPORTED" || $4 == "REMOVED")) ||
          ($1 == "R-BACKUP" && $4 == "MISSING")) {
-            print $1 ": " $4 " - " $8
+            print $1, $4, $8
         }
     ' "$analysis")
-    if [[ -n $findings ]]; then
-        dbtune_log error "$(dbtune_printf lifecycle_critical_finding "$findings")"
-        return 65
-    fi
+    [[ -n $records ]] || return 0
+    while IFS=$'\t' read -r rule_id verdict reason_id; do
+        reason=$(dbtune_msg "$reason_id") || return
+        [[ -z $findings ]] || findings+=$'\n'
+        findings+="$rule_id: $verdict - $reason"
+    done <<<"$records"
+    dbtune_log error "$(dbtune_printf lifecycle_critical_finding "$findings")"
+    return 65
 }
 
 dbtune_lifecycle_new_history() {
