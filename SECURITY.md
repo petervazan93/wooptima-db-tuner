@@ -21,7 +21,7 @@ gh attestation verify install.sh \
   --source-ref "refs/tags/$release" \
   --deny-self-hosted-runners
 less install.sh
-sudo sh install.sh --version "$release"
+sh install.sh --version "$release"
 ```
 
 The release can be pinned with `--version vX.Y.Z` or `DBTUNE_RELEASE=vX.Y.Z`. Neither `DBTUNE_VERSION` nor another runtime variable overrides the artifact's internal version. During its version check, the installer removes version/program override variables and never automatically runs audit, collection, apply, or restart. Current source is the `v0.4.1` release candidate, and its immutable artifact version is `0.4.1`.
