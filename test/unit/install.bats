@@ -141,6 +141,7 @@ bats::on_failure() {
     [ "$status" -eq 0 ]
     [ -x "$INSTALL_DIR/dbtune" ]
     [ "$("$INSTALL_DIR/dbtune" version)" = 'dbtune 0.4.1' ]
+    [ "${lines[1]}" = 'Wooptima DB Tuner install: dbtune 0.4.1' ]
     [[ "$output" == *'Wooptima DB Tuner install: downloading petervazan93/wooptima-db-tuner (v0.4.1)'* ]]
     [[ "$output" == *"Wooptima DB Tuner install: done: $INSTALL_DIR/dbtune"* ]]
     [[ "$output" == *'Next safe step: sudo dbtune audit --json'* ]]
@@ -171,8 +172,7 @@ bats::on_failure() {
         sh "$BATS_TEST_DIRNAME/../../install.sh"
 
     [ "$status" -ne 0 ]
-    [[ "$output" == *'DBTUNE_REPOSITORY is not supported'* ]]
-    [[ "$output" == *'pinned to upstream'* ]]
+    [ "$output" = 'Wooptima DB Tuner install: DBTUNE_REPOSITORY is not supported; repository and attestation trust policy are pinned to upstream' ]
     [ ! -e "$ATTESTATION_LOG" ]
     [ ! -e "$INSTALL_DIR/dbtune" ]
 }
