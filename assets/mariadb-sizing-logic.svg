@@ -1,0 +1,113 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="680" viewBox="0 0 1200 680" role="img" aria-labelledby="title desc">
+  <title id="title">Wooptima DB Tuner MariaDB sizing and safety logic</title>
+  <desc id="desc">Diagram of the default collection metrics and guarded MariaDB proposal rules for buffer pool sizing, maximum connections, storage I/O, query cache, and redo logs. The scoped fail-closed footer states that an unsupported MariaDB family blocks all server proposals, unknown or conflicting current evidence blocks the affected key, and excluded degraded or restart windows cannot drive evidence-dependent changes without sufficient valid evidence.</desc>
+
+  <rect width="1200" height="680" rx="16" fill="#0d1117"/>
+
+  <g font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif">
+    <text x="30" y="37" fill="#f0f6fc" font-size="26" font-weight="700">MariaDB target sizing: evidence before proposals</text>
+    <text x="30" y="62" fill="#8b949e" font-size="15">Representative executable rules; version gates and evidence quality remain authoritative.</text>
+
+    <rect x="30" y="78" width="1140" height="86" rx="10" fill="#161b22" stroke="#30363d"/>
+    <g text-anchor="middle">
+      <text x="125" y="112" fill="#58a6ff" font-size="19" font-weight="700">7 days</text>
+      <text x="125" y="139" fill="#8b949e" font-size="13">default collection</text>
+
+      <text x="315" y="112" fill="#58a6ff" font-size="19" font-weight="700">60 seconds</text>
+      <text x="315" y="139" fill="#8b949e" font-size="13">delta window</text>
+
+      <text x="505" y="112" fill="#58a6ff" font-size="19" font-weight="700">5 minutes</text>
+      <text x="505" y="139" fill="#8b949e" font-size="13">collection tick</text>
+
+      <text x="695" y="112" fill="#58a6ff" font-size="19" font-weight="700">&gt;= 288</text>
+      <text x="695" y="139" fill="#8b949e" font-size="13">valid samples</text>
+
+      <text x="885" y="112" fill="#58a6ff" font-size="19" font-weight="700">29</text>
+      <text x="885" y="139" fill="#8b949e" font-size="13">version-gated CNF keys</text>
+
+      <text x="1075" y="112" fill="#58a6ff" font-size="19" font-weight="700">0</text>
+      <text x="1075" y="139" fill="#8b949e" font-size="13">automatic app mutations</text>
+    </g>
+    <g stroke="#30363d">
+      <line x1="220" y1="92" x2="220" y2="150"/>
+      <line x1="410" y1="92" x2="410" y2="150"/>
+      <line x1="600" y1="92" x2="600" y2="150"/>
+      <line x1="790" y1="92" x2="790" y2="150"/>
+      <line x1="980" y1="92" x2="980" y2="150"/>
+    </g>
+
+    <rect x="30" y="180" width="560" height="190" rx="10" fill="#161b22" stroke="#30363d"/>
+    <circle cx="52" cy="205" r="6" fill="#bc8cff"/>
+    <text x="68" y="212" fill="#f0f6fc" font-size="19" font-weight="700">Buffer pool</text>
+    <text x="568" y="210" text-anchor="end" fill="#bc8cff" font-size="12" font-weight="700">MEMORY</text>
+    <rect x="48" y="225" width="524" height="38" rx="6" fill="#0d1117" stroke="#30363d"/>
+    <text x="60" y="250" fill="#d2a8ff" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="16">min((dataset + growth180) x 1.3, RAM x 0.5)</text>
+    <text x="48" y="291" fill="#c9d1d9" font-size="15">p05 available-memory guard</text>
+    <text x="48" y="317" fill="#c9d1d9" font-size="15">reserve = max(1 GiB, RAM x 0.1)</text>
+    <text x="48" y="343" fill="#c9d1d9" font-size="15">256 MiB steps; never auto-shrink</text>
+
+    <rect x="610" y="180" width="560" height="190" rx="10" fill="#161b22" stroke="#30363d"/>
+    <circle cx="632" cy="205" r="6" fill="#58a6ff"/>
+    <text x="648" y="212" fill="#f0f6fc" font-size="19" font-weight="700">Maximum connections</text>
+    <text x="1148" y="210" text-anchor="end" fill="#58a6ff" font-size="12" font-weight="700">CAPACITY</text>
+    <rect x="628" y="225" width="524" height="88" rx="6" fill="#0d1117" stroke="#30363d"/>
+    <g fill="#79c0ff" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="15">
+      <text x="642" y="249">max(100,</text>
+      <text x="666" y="273">ceil(workers x 1.25 + 20),</text>
+      <text x="666" y="297">ceil(measured_peak x 1.25))</text>
+    </g>
+    <text x="628" y="340" fill="#c9d1d9" font-size="15">Workers: summed PHP-FPM limits</text>
+    <text x="628" y="360" fill="#8b949e" font-size="14">Peak: measured concurrent connections</text>
+
+    <rect x="30" y="386" width="400" height="184" rx="10" fill="#161b22" stroke="#30363d"/>
+    <circle cx="52" cy="411" r="6" fill="#3fb950"/>
+    <text x="68" y="418" fill="#f0f6fc" font-size="19" font-weight="700">Storage matrix</text>
+    <g font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace">
+      <g fill="#8b949e" font-size="12" font-weight="700">
+        <text x="48" y="446">MEDIA</text>
+        <text x="157" y="446">CAP</text>
+        <text x="219" y="446">MAX</text>
+        <text x="281" y="446">R/W</text>
+        <text x="343" y="446">NEIGH</text>
+      </g>
+      <g fill="#aff5b4" font-size="14">
+        <text x="48" y="472">NVMe</text><text x="157" y="472">2000</text><text x="219" y="472">6000</text><text x="289" y="472">8</text><text x="359" y="472">0</text>
+        <text x="48" y="497">SSD/SATA</text><text x="157" y="497">1000</text><text x="219" y="497">2000</text><text x="289" y="497">4</text><text x="359" y="497">0</text>
+        <text x="48" y="522">HDD</text><text x="157" y="522">200</text><text x="219" y="522">400</text><text x="289" y="522">4</text><text x="359" y="522">1</text>
+      </g>
+    </g>
+    <text x="48" y="550" fill="#8b949e" font-size="13">capacity / max / each I/O thread / flush neighbors</text>
+
+    <rect x="450" y="386" width="350" height="184" rx="10" fill="#161b22" stroke="#30363d"/>
+    <circle cx="472" cy="411" r="6" fill="#d29922"/>
+    <text x="488" y="418" fill="#f0f6fc" font-size="19" font-weight="700">Query cache</text>
+    <rect x="468" y="431" width="314" height="64" rx="6" fill="#0d1117" stroke="#30363d"/>
+    <g fill="#e3b341" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="15">
+      <text x="482" y="456">p50 hit &lt; 20% OR</text>
+      <text x="482" y="480">p95 threads &gt; 8</text>
+    </g>
+    <text x="468" y="520" fill="#c9d1d9" font-size="14">Requires &gt;= 288 active windows</text>
+    <text x="468" y="544" fill="#e3b341" font-size="14">Disable type + size; otherwise KEEP</text>
+
+    <rect x="820" y="386" width="350" height="184" rx="10" fill="#161b22" stroke="#30363d"/>
+    <circle cx="842" cy="411" r="6" fill="#f85149"/>
+    <text x="858" y="418" fill="#f0f6fc" font-size="19" font-weight="700">Redo log</text>
+    <text x="838" y="446" fill="#8b949e" font-size="12" font-weight="700">LOG BUFFER</text>
+    <g fill="#ff7b72" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14">
+      <text x="838" y="469">any valid sampled log wait -&gt; 64M</text>
+      <text x="838" y="491">otherwise -&gt; 32M</text>
+    </g>
+    <text x="838" y="519" fill="#8b949e" font-size="12" font-weight="700">LOG FILE</text>
+    <g fill="#ff7b72" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14">
+      <text x="838" y="542">dataset &gt; 10 GiB -&gt; 1G</text>
+      <text x="838" y="562">otherwise -&gt; 512M</text>
+    </g>
+
+    <rect x="30" y="582" width="1140" height="78" rx="10" fill="#161b22" stroke="#30363d"/>
+    <path d="M40 582h8v78h-8a10 10 0 0 1-10-10v-58a10 10 0 0 1 10-10z" fill="#d29922"/>
+    <text x="64" y="626" fill="#e3b341" font-size="13" font-weight="700">FAIL CLOSED</text>
+    <text x="176" y="605" font-size="13.5"><tspan fill="#f0f6fc" font-weight="600">Unsupported MariaDB family</tspan><tspan fill="#8b949e"> -&gt; no server proposals</tspan></text>
+    <text x="176" y="628" font-size="13.5"><tspan fill="#f0f6fc" font-weight="600">Unknown or conflicting current evidence</tspan><tspan fill="#8b949e"> -&gt; affected key blocked</tspan></text>
+    <text x="176" y="651" font-size="13.5"><tspan fill="#f0f6fc" font-weight="600">Degraded / restart windows excluded</tspan><tspan fill="#8b949e">; insufficient valid evidence -&gt; no evidence-dependent change</tspan></text>
+  </g>
+</svg>

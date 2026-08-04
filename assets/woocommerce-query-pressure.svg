@@ -1,0 +1,106 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="620" viewBox="0 0 1200 620" role="img" aria-labelledby="title desc">
+  <title id="title">WooCommerce request path and application-first database diagnostics</title>
+  <desc id="desc">A GitHub-dark branched diagram shows a request entering page cache. A page-cache hit returns a response and bypasses WordPress, while a miss continues to WordPress and WooCommerce. A persistent object-cache hit reuses objects and reduces database reads, while a miss continues to database work and MariaDB. Four recommendation-only cards cover Redis and the object-cache drop-in, autoload size, HPOS and failed actions, estimated sessions, transients, and large log rows.</desc>
+  <rect width="1200" height="620" rx="14" fill="#0d1117"/>
+
+  <g font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif">
+    <text x="36" y="45" font-size="30" font-weight="700" fill="#f0f6fc">WooCommerce query pressure</text>
+    <text x="36" y="75" font-size="19" fill="#8b949e">Find the request layer creating database work before tuning MariaDB.</text>
+    <rect x="927" y="26" width="237" height="38" rx="19" fill="#1f2d3d" stroke="#58a6ff"/>
+    <text x="1045.5" y="51" text-anchor="middle" font-size="17" font-weight="600" fill="#79c0ff">APPLICATION FIRST</text>
+
+    <rect x="36" y="96" width="1128" height="210" rx="12" fill="#161b22" stroke="#30363d"/>
+
+    <g fill="#58a6ff" stroke="#58a6ff" stroke-width="3">
+      <path d="M 160 217 H 184 M 334 217 H 390 M 564 217 H 605 M 794 217 H 854 M 985 217 H 1026"/>
+      <path d="M 192 217 L 181 210 L 181 224 Z M 398 217 L 387 210 L 387 224 Z M 613 217 L 602 210 L 602 224 Z M 862 217 L 851 210 L 851 224 Z M 1034 217 L 1023 210 L 1023 224 Z" stroke="none"/>
+    </g>
+    <g fill="#3fb950" stroke="#3fb950" stroke-width="3">
+      <path d="M 263 186 V 174 M 704 186 V 174"/>
+      <path d="M 263 165 L 256 176 L 270 176 Z M 704 165 L 697 176 L 711 176 Z" stroke="none"/>
+    </g>
+
+    <g>
+      <rect x="178" y="112" width="170" height="53" rx="9" fill="#1c2128" stroke="#f2cc60"/>
+      <text x="263" y="135" text-anchor="middle" font-size="16" font-weight="700" fill="#f2cc60">Response / bypass</text>
+      <text x="263" y="155" text-anchor="middle" font-size="13" fill="#c9d1d9">full page, no WordPress</text>
+
+      <rect x="595" y="112" width="218" height="53" rx="9" fill="#0d1117" stroke="#3fb950"/>
+      <text x="704" y="135" text-anchor="middle" font-size="16" font-weight="700" fill="#56d364">Reused objects</text>
+      <text x="704" y="155" text-anchor="middle" font-size="13" fill="#c9d1d9">fewer database reads</text>
+
+      <text x="280" y="181" font-size="12" font-weight="700" fill="#56d364">HIT</text>
+      <text x="721" y="181" font-size="12" font-weight="700" fill="#56d364">HIT</text>
+      <text x="366" y="205" text-anchor="middle" font-size="12" font-weight="700" fill="#79c0ff">MISS</text>
+      <text x="828" y="205" text-anchor="middle" font-size="12" font-weight="700" fill="#79c0ff">MISS</text>
+
+      <rect x="52" y="186" width="108" height="62" rx="9" fill="#0d1117" stroke="#30363d"/>
+      <text x="106" y="223" text-anchor="middle" font-size="18" font-weight="700" fill="#f0f6fc">Request</text>
+
+      <rect x="192" y="186" width="142" height="62" rx="9" fill="#1c2128" stroke="#f2cc60"/>
+      <text x="263" y="223" text-anchor="middle" font-size="18" font-weight="700" fill="#f2cc60">Page cache</text>
+
+      <rect x="398" y="186" width="166" height="62" rx="9" fill="#0d1117" stroke="#a371f7"/>
+      <text x="481" y="212" text-anchor="middle" font-size="16" font-weight="700" fill="#d2a8ff">WordPress /</text>
+      <text x="481" y="234" text-anchor="middle" font-size="16" font-weight="700" fill="#d2a8ff">WooCommerce</text>
+
+      <rect x="613" y="186" width="181" height="62" rx="9" fill="#0d1117" stroke="#3fb950"/>
+      <text x="703.5" y="211" text-anchor="middle" font-size="16" font-weight="700" fill="#56d364">Persistent</text>
+      <text x="703.5" y="233" text-anchor="middle" font-size="16" font-weight="700" fill="#56d364">object cache</text>
+
+      <rect x="862" y="186" width="123" height="62" rx="9" fill="#0d1117" stroke="#f85149"/>
+      <text x="923.5" y="211" text-anchor="middle" font-size="16" font-weight="700" fill="#ff7b72">Database</text>
+      <text x="923.5" y="233" text-anchor="middle" font-size="16" font-weight="700" fill="#ff7b72">work</text>
+
+      <rect x="1034" y="186" width="114" height="62" rx="9" fill="#0d1117" stroke="#58a6ff"/>
+      <text x="1091" y="223" text-anchor="middle" font-size="17" font-weight="700" fill="#79c0ff">MariaDB</text>
+    </g>
+
+    <rect x="52" y="260" width="1096" height="32" rx="8" fill="#1c2128"/>
+    <circle cx="70" cy="276" r="6" fill="#f2cc60"/>
+    <text x="86" y="282" font-size="16" fill="#c9d1d9">
+      <tspan font-weight="700" fill="#f2cc60">Page cache is not object cache.</tspan>
+      <tspan> A page HIT bypasses WordPress; an object HIT reuses objects and reduces database reads.</tspan>
+    </text>
+
+    <g>
+      <rect x="36" y="321" width="552" height="104" rx="12" fill="#161b22" stroke="#30363d"/>
+      <rect x="36" y="321" width="6" height="104" rx="3" fill="#3fb950"/>
+      <text x="62" y="350" font-size="20" font-weight="700" fill="#f0f6fc">1  Persistent object cache</text>
+      <g font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="18" fill="#56d364">
+        <text x="62" y="378">redis-cli ping = PONG</text>
+        <text x="62" y="403">wp-content/object-cache.php = present</text>
+      </g>
+
+      <rect x="612" y="321" width="552" height="104" rx="12" fill="#161b22" stroke="#30363d"/>
+      <rect x="612" y="321" width="6" height="104" rx="3" fill="#f2cc60"/>
+      <text x="638" y="350" font-size="20" font-weight="700" fill="#f0f6fc">2  Autoload pressure</text>
+      <text x="638" y="374" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="17" fill="#c9d1d9">autoload IN ('yes','on','auto')</text>
+      <g font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="17" fill="#f2cc60">
+        <text x="638" y="398">&lt; 1 MiB OK  |  1-3 MiB REVIEW</text>
+        <text x="638" y="419">&gt; 3 MiB PRIORITY</text>
+      </g>
+
+      <rect x="36" y="439" width="552" height="104" rx="12" fill="#161b22" stroke="#30363d"/>
+      <rect x="36" y="439" width="6" height="104" rx="3" fill="#a371f7"/>
+      <text x="62" y="468" font-size="20" font-weight="700" fill="#f0f6fc">3  Orders and background jobs</text>
+      <g font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="18" fill="#d2a8ff">
+        <text x="62" y="497">HPOS state + compatibility sync</text>
+        <text x="62" y="522">failed Action Scheduler actions &gt; 0</text>
+      </g>
+
+      <rect x="612" y="439" width="552" height="104" rx="12" fill="#161b22" stroke="#30363d"/>
+      <rect x="612" y="439" width="6" height="104" rx="3" fill="#f85149"/>
+      <text x="638" y="468" font-size="20" font-weight="700" fill="#f0f6fc">4  Table pressure</text>
+      <g font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="17" fill="#ff7b72">
+        <text x="638" y="490">estimated sessions &gt;= 500k rows</text>
+        <text x="638" y="513">transients &gt;= 1,000 OR &gt;= 10 MiB</text>
+        <text x="638" y="536">logs &gt; 20 KiB / estimated row</text>
+      </g>
+    </g>
+
+    <rect x="36" y="553" width="1128" height="53" rx="10" fill="#1f2d3d" stroke="#58a6ff"/>
+    <text x="600" y="577" text-anchor="middle" font-size="18" font-weight="700" fill="#79c0ff">Application findings are recommendation-only.</text>
+    <text x="600" y="598" text-anchor="middle" font-size="17" fill="#c9d1d9">Wooptima DB Tuner never mutates WordPress or WooCommerce data.</text>
+  </g>
+</svg>
