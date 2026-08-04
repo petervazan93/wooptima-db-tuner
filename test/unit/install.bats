@@ -35,7 +35,7 @@ while [ "$#" -gt 0 ]; do
     fi
     shift
 done
-if [ -n "$source_ref" ] && [ "$source_ref" != "${STUB_ATTESTATION_SOURCE_REF:-refs/tags/v0.4.0}" ]; then
+if [ -n "$source_ref" ] && [ "$source_ref" != "${STUB_ATTESTATION_SOURCE_REF:-refs/tags/v0.4.1}" ]; then
     exit 1
 fi
 STUB
@@ -43,7 +43,7 @@ cat >"$STUB_BIN/curl" <<'STUB'
 #!/bin/sh
 case " $* " in
     *' https://api.github.com/repos/petervazan93/wooptima-db-tuner/releases/latest '*)
-        printf '{"tag_name":"%s"}\n' "${STUB_RELEASE_TAG:-v0.4.0}"
+        printf '{"tag_name":"%s"}\n' "${STUB_RELEASE_TAG:-v0.4.1}"
         exit 0
         ;;
 esac
@@ -126,7 +126,7 @@ bats::on_failure() {
         sh "$BATS_TEST_DIRNAME/../../install.sh"
 
     [ "$status" -eq 64 ]
-    [ "$output" = 'dbtune install: unsupported interface language: de (expected en or sk)' ]
+    [ "$output" = 'Wooptima DB Tuner install: unsupported interface language: de (expected en or sk)' ]
     [ ! -e "$ATTESTATION_LOG" ]
     [ ! -e "$INSTALL_DIR/dbtune" ]
 }
@@ -140,13 +140,13 @@ bats::on_failure() {
 
     [ "$status" -eq 0 ]
     [ -x "$INSTALL_DIR/dbtune" ]
-    [ "$("$INSTALL_DIR/dbtune" version)" = 'dbtune 0.4.0' ]
-    [[ "$output" == *'dbtune install: downloading petervazan93/wooptima-db-tuner (v0.4.0)'* ]]
-    [[ "$output" == *"dbtune install: done: $INSTALL_DIR/dbtune"* ]]
+    [ "$("$INSTALL_DIR/dbtune" version)" = 'dbtune 0.4.1' ]
+    [[ "$output" == *'Wooptima DB Tuner install: downloading petervazan93/wooptima-db-tuner (v0.4.1)'* ]]
+    [[ "$output" == *"Wooptima DB Tuner install: done: $INSTALL_DIR/dbtune"* ]]
     [[ "$output" == *'Next safe step: sudo dbtune audit --json'* ]]
     grep -F -- '--repo petervazan93/wooptima-db-tuner' "$ATTESTATION_LOG"
     grep -F -- '--signer-workflow petervazan93/wooptima-db-tuner/.github/workflows/release.yml' "$ATTESTATION_LOG"
-    grep -F -- '--source-ref refs/tags/v0.4.0' "$ATTESTATION_LOG"
+    grep -F -- '--source-ref refs/tags/v0.4.1' "$ATTESTATION_LOG"
 }
 
 @test "installer success supports explicit Slovak" {
@@ -158,8 +158,8 @@ bats::on_failure() {
 
     [ "$status" -eq 0 ]
     [ -x "$INSTALL_DIR/dbtune" ]
-    [[ "$output" == *'dbtune install: stahujem petervazan93/wooptima-db-tuner (v0.4.0)'* ]]
-    [[ "$output" == *"dbtune install: hotovo: $INSTALL_DIR/dbtune"* ]]
+    [[ "$output" == *'Wooptima DB Tuner install: stahujem petervazan93/wooptima-db-tuner (v0.4.1)'* ]]
+    [[ "$output" == *"Wooptima DB Tuner install: hotovo: $INSTALL_DIR/dbtune"* ]]
     [[ "$output" == *'Dalsi bezpecny krok: sudo dbtune audit --json'* ]]
 }
 
@@ -197,7 +197,7 @@ bats::on_failure() {
     cat >"$RELEASE_DIR/dbtune" <<'ARTIFACT'
 #!/usr/bin/env bash
 printf '%s\n' executed >"$ARTIFACT_EXECUTION_MARKER"
-if [[ ${1:-} == version ]]; then printf '%s\n' 'dbtune 0.4.0'; else exit 64; fi
+if [[ ${1:-} == version ]]; then printf '%s\n' 'dbtune 0.4.1'; else exit 64; fi
 ARTIFACT
     chmod +x "$RELEASE_DIR/dbtune"
     if command -v sha256sum >/dev/null 2>&1; then
@@ -217,7 +217,7 @@ ARTIFACT
     [[ "$output" == *'artifact attestation verification failed'* ]]
     [ ! -e "$execution_marker" ]
     [ ! -e "$INSTALL_DIR/dbtune" ]
-    grep -F -- '--source-ref refs/tags/v0.4.0' "$ATTESTATION_LOG"
+    grep -F -- '--source-ref refs/tags/v0.4.1' "$ATTESTATION_LOG"
 }
 
 @test "installer rejects an attestation failure without publishing a binary" {

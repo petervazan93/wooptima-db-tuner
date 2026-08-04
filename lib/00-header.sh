@@ -3,7 +3,7 @@
 set -u
 
 # shellcheck disable=SC2034 # Consumed by later modules in the assembled artifact.
-readonly DBTUNE_ARTIFACT_VERSION=0.4.0
+readonly DBTUNE_ARTIFACT_VERSION=0.4.1
 DBTUNE_PROGRAM="${DBTUNE_PROGRAM:-dbtune}"
 DBTUNE_STATE_DIR="${DBTUNE_STATE_DIR:-/var/lib/dbtune}"
 DBTUNE_DEFAULT_DAYS="${DBTUNE_DEFAULT_DAYS:-7}"

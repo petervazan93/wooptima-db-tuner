@@ -14,7 +14,7 @@ UI_LANG=${DBTUNE_UI_LANG:-en}
 case $UI_LANG in
     en|sk) ;;
     *)
-        printf 'dbtune install: unsupported interface language: %s (expected en or sk)\n' "$UI_LANG" >&2
+        printf 'Wooptima DB Tuner install: unsupported interface language: %s (expected en or sk)\n' "$UI_LANG" >&2
         exit 64
         ;;
 esac
@@ -214,10 +214,10 @@ Premenne:
             INSTALLER_MESSAGE='download URL musi pouzivat HTTPS'
             ;;
         en:downloading)
-            INSTALLER_MESSAGE='dbtune install: downloading %s (%s)\n'
+            INSTALLER_MESSAGE='Wooptima DB Tuner install: downloading %s (%s)\n'
             ;;
         sk:downloading)
-            INSTALLER_MESSAGE='dbtune install: stahujem %s (%s)\n'
+            INSTALLER_MESSAGE='Wooptima DB Tuner install: stahujem %s (%s)\n'
             ;;
         en:checksum_record_invalid)
             INSTALLER_MESSAGE='release contains an invalid SHA-256 record'
@@ -286,10 +286,10 @@ Premenne:
             INSTALLER_MESSAGE='nainstalovany dbtune sa neda spustit'
             ;;
         en:install_done)
-            INSTALLER_MESSAGE='dbtune install: done: %s/dbtune\n'
+            INSTALLER_MESSAGE='Wooptima DB Tuner install: done: %s/dbtune\n'
             ;;
         sk:install_done)
-            INSTALLER_MESSAGE='dbtune install: hotovo: %s/dbtune\n'
+            INSTALLER_MESSAGE='Wooptima DB Tuner install: hotovo: %s/dbtune\n'
             ;;
         en:next_step)
             INSTALLER_MESSAGE='Next safe step: sudo dbtune audit --json\n'
@@ -298,7 +298,7 @@ Premenne:
             INSTALLER_MESSAGE='Dalsi bezpecny krok: sudo dbtune audit --json\n'
             ;;
         *)
-            printf 'dbtune install: missing interface message: %s\n' "$1" >&2
+            printf 'Wooptima DB Tuner install: missing interface message: %s\n' "$1" >&2
             return 70
             ;;
     esac
@@ -319,7 +319,7 @@ usage() {
 fail() {
     installer_fail_id=$1
     shift
-    printf 'dbtune install: ' >&2
+    printf 'Wooptima DB Tuner install: ' >&2
     installer_printf "$installer_fail_id" "$@" >&2
     printf '\n' >&2
     exit 1
@@ -588,6 +588,6 @@ run_privileged mv -f "$target_new" "$INSTALL_DIR/dbtune"
 target_created=0
 
 installed_version=$("$INSTALL_DIR/dbtune" version) || fail installed_unusable
-printf 'dbtune install: %s\n' "$installed_version"
+printf 'Wooptima DB Tuner install: %s\n' "$installed_version"
 installer_printf install_done "$INSTALL_DIR"
 installer_printf next_step
