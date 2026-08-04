@@ -1,5 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1200" height="374" viewBox="0 0 1200 374" role="img" aria-labelledby="title desc">
-  <title id="title">Sanitized dbtune English audit summary</title>
+  <title id="title">Sanitized Wooptima DB Tuner English audit summary</title>
   <desc id="desc">Deterministic fixture output showing complete required audit sections, MariaDB 11.4 fixture data, and aggregate findings without server identity or production data.</desc>
   <rect width="1200" height="374" rx="14" fill="#0d1117"/>
   <rect width="1200" height="52" rx="14" fill="#161b22"/>
@@ -8,7 +8,7 @@
   <circle cx="52" cy="26" r="7" fill="#ffbd2e"/>
   <circle cx="76" cy="26" r="7" fill="#27c93f"/>
   <g font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14" fill="#c9d1d9">
-    <text x="38" y="89" fill="#f2cc60">DBTune audit status: FINDINGS.</text>
+    <text x="38" y="89" fill="#f2cc60">Wooptima DB Tuner audit status: FINDINGS.</text>
     <text x="38" y="127">Required sections: mariadb,hardware,applications,security. Failed: none. Partial: none.</text>
     <text x="38" y="165">Affected recommendation domains: none.</text>
     <text x="38" y="203">MariaDB evidence: missing=none; invalid=none; conflicting=none; optional=mariadb.variable.innodb_flush_method=deprecated_11x.</text>

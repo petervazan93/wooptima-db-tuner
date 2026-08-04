@@ -1,5 +1,5 @@
 <div align="center">
-  <h1>dbtune</h1>
+  <h1>Wooptima DB Tuner</h1>
   <p><strong>Evidence-based MariaDB tuning for RunCloud-hosted WordPress and WooCommerce.</strong></p>
   <p>
     <a href="#overview">Overview</a> &middot;
@@ -7,24 +7,24 @@
     <a href="#read-only-quickstart">Quickstart</a> &middot;
     <a href="#safety-model">Safety</a> &middot;
     <a href="#supported-environment">Support</a> &middot;
-    <a href="#pinned-attested-installation">Install</a> &middot;
+    <a href="#pinned-installation">Install</a> &middot;
     <a href="#documentation">Docs</a>
   </p>
   <p>
     <a href="https://github.com/petervazan93/wooptima-db-tuner/actions/workflows/ci.yml"><img alt="CI workflow status" src="https://github.com/petervazan93/wooptima-db-tuner/actions/workflows/ci.yml/badge.svg?branch=main"></a>
-    <a href="https://github.com/petervazan93/wooptima-db-tuner/releases/tag/v0.4.0"><img alt="Prepared release target: v0.4.0" src="https://img.shields.io/badge/release%20target-v0.4.0-0969da"></a>
+    <a href="https://github.com/petervazan93/wooptima-db-tuner/releases/tag/v0.4.1"><img alt="Release candidate: v0.4.1" src="https://img.shields.io/badge/release%20candidate-v0.4.1-0969da"></a>
     <img alt="Runtime: Bash 4 or newer" src="https://img.shields.io/badge/runtime-Bash%204%2B-4EAA25">
     <img alt="Supported MariaDB families: 10.6, 10.11, and 11.x" src="https://img.shields.io/badge/MariaDB-10.6%20%7C%2010.11%20%7C%2011.x-003545">
   </p>
 </div>
 
-![Sanitized current-source dbtune audit summary from a deterministic fixture. It shows FINDINGS, all four required sections complete, no missing or conflicting MariaDB evidence, and aggregate fixture sizing and finding counts.](assets/dbtune-audit.svg)
+![Sanitized current-source Wooptima DB Tuner audit summary from a deterministic fixture. It shows FINDINGS, all four required sections complete, no missing or conflicting MariaDB evidence, and aggregate fixture sizing and finding counts.](assets/dbtune-audit.svg)
 
 <p align="center"><sub>Current-source English output captured from a deterministic test fixture and sanitized to exclude server identity, addresses, paths, database names, credentials, and production evidence.</sub></p>
 
 ## Overview
 
-`dbtune` is a single-artifact Bash tool that audits a RunCloud host, measures its MariaDB workload, and turns the collected evidence into reviewable server and application recommendations.
+Wooptima DB Tuner is a single-artifact Bash tool that audits a RunCloud host, measures its MariaDB workload, and turns the collected evidence into reviewable server and application recommendations.
 
 - **Audit the whole decision context.** Inspect effective MariaDB variables, hardware and storage, WordPress/WooCommerce applications, database inventory, grants, and listener exposure.
 - **Measure before proposing.** Collect workload samples for 7 days by default, reject degraded or restart-affected intervals, and keep unknown evidence out of active changes.
@@ -32,7 +32,7 @@
 - **Keep mutation operator-controlled.** Audit and proposal generation do not apply configuration. Apply, restart, verification, and rollback are separate explicit steps.
 
 > [!IMPORTANT]
-> Release preparation is pinned to `v0.4.0`, with immutable artifact version `0.4.0`. This release defaults to English, selects Slovak explicitly with `DBTUNE_UI_LANG=sk`, and uses the `fleet-v3` report contract. The installation target below becomes available when the prepared tag and release are published.
+> Current source is the `v0.4.1` release candidate, with immutable artifact version `0.4.1`. It defaults to English, selects Slovak explicitly with `DBTUNE_UI_LANG=sk`, and uses the `fleet-v3` report contract. The pinned installation below becomes available when the `v0.4.1` tag and release assets are published.
 
 ## Lifecycle
 
@@ -94,29 +94,18 @@ Read the full operational contract in the [rollout runbook](docs/RUNBOOK.md) bef
 
 CI coverage does not imply that every Ubuntu release or every MariaDB 11.x minor version has been integration-tested. Galera/wsrep nodes are detected and blocked from apply.
 
-## Pinned, attested installation
+## Pinned installation
 
-The production-oriented path pins the prepared `v0.4.0` release target, verifies the installer against its offline GitHub artifact-attestation bundle, lets you inspect it, and only then executes it with privileges. Run it after the tag and release assets are published. It never pipes remote code into a root shell.
+Prerequisites: Linux, Bash 4+, `curl`, `gh`, and permission to write the installation destination.
 
 ```bash
-release=v0.4.0
-curl --proto '=https' --tlsv1.2 -fsSLo install.sh \
-  "https://github.com/petervazan93/wooptima-db-tuner/releases/download/$release/install.sh"
-curl --proto '=https' --tlsv1.2 -fsSLo dbtune-attestation.jsonl \
-  "https://github.com/petervazan93/wooptima-db-tuner/releases/download/$release/dbtune-attestation.jsonl"
-gh attestation verify install.sh \
-  --bundle dbtune-attestation.jsonl \
-  --repo petervazan93/wooptima-db-tuner \
-  --signer-workflow petervazan93/wooptima-db-tuner/.github/workflows/release.yml \
-  --source-ref "refs/tags/$release" \
-  --deny-self-hosted-runners
-less install.sh
-sudo sh install.sh --version "$release"
+curl -fsSL https://github.com/petervazan93/wooptima-db-tuner/releases/download/v0.4.1/install.sh | sh -s -- --version v0.4.1
 ```
 
-This pinned procedure targets the prepared `v0.4.0` release and works after its tag and assets are published. Bundle verification does not require `gh auth login` or an API token. The installer then verifies the selected `dbtune` artifact's SHA-256 checksum, GitHub attestation, fixed upstream repository and owner, signer workflow, exact release source ref, and Bash syntax before atomically publishing `/usr/local/bin/dbtune`. It does not run an audit or change MariaDB.
+> [!WARNING]
+> This pipeline trusts the remote `install.sh` before it verifies the downloaded `dbtune` artifact. For the verify-before-run procedure that authenticates and lets you inspect `install.sh` first, follow [Security: Installation](SECURITY.md#installation).
 
-The installer requires POSIX `sh`, Linux, `curl`, `gh`, Bash 4+, `install`, `stat`, a SHA-256 tool, and `sudo` for a privileged destination. See [Security](SECURITY.md#installation) for mirror and trust-policy details.
+This command targets the `v0.4.1` release candidate and works after its tag and release assets are published. The installer verifies the selected `dbtune` artifact's SHA-256 checksum, GitHub attestation, fixed upstream repository and owner, signer workflow, exact release source ref, and Bash syntax before atomically publishing it. It does not run an audit or change MariaDB.
 
 ## CLI
 
@@ -135,7 +124,7 @@ dbtune status | version
 dbtune _tick
 ```
 
-The v0.4.0 executable and installer default to English. Slovak is selected explicitly with `DBTUNE_UI_LANG=sk`; only `en` and `sk` are accepted. Commands, options, paths, keys, enums, booleans, schema versions, and exit statuses are never localized.
+The v0.4.1 executable and installer default to English. Slovak is selected explicitly with `DBTUNE_UI_LANG=sk`; only `en` and `sk` are accepted. Commands, options, paths, keys, enums, booleans, schema versions, and exit statuses are never localized.
 
 ## Documentation
 

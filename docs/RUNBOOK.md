@@ -1,4 +1,4 @@
-# dbtune rollout runbook
+# Wooptima DB Tuner rollout runbook
 
 ## Prerequisites
 
@@ -8,14 +8,14 @@
 - The default target is `/etc/mysql/mariadb.conf.d/99-zz-tuning.cnf`, and the allowed directory is `/etc/mysql/mariadb.conf.d`. A nonstandard `DBTUNE_CONFIG_TARGET` also requires an explicit `DBTUNE_CONFIG_ALLOWED_DIR`; the target must be a direct `.cnf` file in that directory. Apply, verify, and rollback reject a target symlink, dangling symlink, more than one stable hard link, a symlinked parent component, replacement of the parent directory during apply, and an existing file outside the `root:root 0644` contract. The state file and lifecycle lock file must have exactly one hard link at a stable path. Managed configuration publication uses an atomic exchange or no-replace rename, so the target never has a temporary second hard link, including at crash boundaries.
 - Without `--force`, apply is blocked from 05:30 to 07:30 local time and is always blocked by Galera, a running mydumper process, or authoritative backup status `missing`. Both apply and `--force` require a valid backup-evidence artifact or a separate safety confirmation on a TTY.
 
-## Interface language and v0.4.0 artifacts
+## Interface language and v0.4.1 artifacts
 
 - The executable and installer default to English when `DBTUNE_UI_LANG` is unset or empty. `DBTUNE_UI_LANG=en` selects English explicitly and `DBTUNE_UI_LANG=sk` selects Slovak. Any other non-empty value exits with status 64 before command dispatch. `LANG`, `LC_MESSAGES`, and other operating-system locale variables do not select the interface language.
 - Use `sudo dbtune audit` for the English default or `sudo DBTUNE_UI_LANG=sk dbtune audit` for Slovak. Commands, options, paths, keys, enums, schema versions, and exit statuses do not change with the selected language.
 - `collect start` stores the validated language as `ui_lang` in root-owned `collect.tsv`. The systemd `_tick` path first validates the state directory without reading persisted content. Only after that validation succeeds does it read and restore `ui_lang`, before subsequent lifecycle-lock, recovery, state, and automatic analyze/report diagnostics. Validation failures for an unsafe state path may therefore use the process-selected or default language; `_tick` never reads `collect.tsv` through an unvalidated path.
 - The flat JSON report schema is `fleet-v3`. It includes `report.language`, stable reason and warning IDs, and localized display text. Consumers must use stable IDs and machine keys rather than parse localized prose.
 - v0.4.0 `analysis.tsv` keeps eight columns but ends in `reason_id`. Report, propose, and apply reject the old `reason_sk` header without translating, rehashing, or mutating it. Start a new v0.4.0 audit and measurement cycle. Existing apply history and rollback recovery remain available.
-- Release preparation is pinned to `v0.4.0`, and the immutable artifact version is `0.4.0`; publishing the tag and release assets remains a separate release action.
+- Current source is the `v0.4.1` release candidate, and the immutable artifact version is `0.4.1`; publishing the tag and release assets remains a separate release action.
 
 ## Pilot
 
@@ -23,7 +23,7 @@
 2. Complete `audit`, collection, `analyze`, report review, and `propose`. Manually review pool sizing, `max_connections`, storage class, and application findings.
    The report must have a known current value for every active server change. A missing current value, unsafe proposal, or alias duplicate such as `max_connections`/`max-connections` is an input error, not an item to skip.
 3. Run `dbtune apply`. The tool verifies independent backup evidence, checks every active name from `[mysqld]` in one query against `information_schema.GLOBAL_VARIABLES`, stores the baseline, and atomically writes the configuration as `root:root 0644`.
-4. Read `$STATE/apply/<timestamp>-<pid>/ROLLBACK.txt` before restart. It contains literal commands and works without dbtune and without a working database.
+4. Read `$STATE/apply/<timestamp>-<pid>/ROLLBACK.txt` before restart. It contains literal commands and works without `dbtune` and without a working database.
 5. Without `--restart`, restart through RunCloud at `Services -> MariaDB -> Restart`. Use `--restart` only for pilot scripting; it invokes `systemctl restart mariadb`, checks the active state, and restores the configuration on failure.
 6. Wait approximately 5 minutes and run `dbtune verify --post`. Verify first checks that the target is a regular nonsymlink file with `root:root 0644` and the hash of the exact deployed snapshot. It then checks effective values and growth in `Innodb_buffer_pool_wait_free`, `Innodb_log_waits`, and `Aborted_connects` against a reset-aware baseline, swap growth, and critically low available RAM. A failure is a reason to roll back.
 7. After 24 hours and at least one real peak, run `dbtune verify --24h`. The output compares status and memory with the baseline; a reset lifetime counter is marked as `reset:<value>`.
@@ -71,7 +71,7 @@ The process displays and compares the selected phrase byte-for-byte, without cas
 3. Process the rest of the fleet in batches of at most approximately 10 servers. Do not start the next batch before `verify --post` for the previous batch.
 4. Keep the manual RunCloud restart. Check state with `dbtune status`; the command does not query SQL and works during a database outage.
 
-Per-app action steps in the report are copy-paste read-only diagnostics. Before running them, check the `target` (app, path, database, and prefix) and shell quoting. dbtune never runs them automatically; do not perform cleanup, migration, `DELETE`, `DROP`, or `UPDATE` without separate review, a verified restorable backup, and a maintenance plan. The top-autoload section contains only names and sizes. Backup correlation for the worst windows compares available evidence but does not establish causality by itself.
+Per-app action steps in the report are copy-paste read-only diagnostics. Before running them, check the `target` (app, path, database, and prefix) and shell quoting. Wooptima DB Tuner never runs them automatically; do not perform cleanup, migration, `DELETE`, `DROP`, or `UPDATE` without separate review, a verified restorable backup, and a maintenance plan. The top-autoload section contains only names and sizes. Backup correlation for the worst windows compares available evidence but does not establish causality by itself.
 
 ## Rollback
 
@@ -85,7 +85,7 @@ When the target was originally absent, rollback moves the deployed regular file 
 
 If filesystem restoration fails, `apply/current` remains on the problematic history, state becomes `recovery_required` or `rollback_failed`, and `dbtune status` prints both `sudo dbtune rollback` and the path to `ROLLBACK.txt`. Neither the pointer nor previous state is blindly reset after a failed apply; they are restored only after a confirmed restore.
 
-If dbtune is unavailable, run the lines from the latest `$STATE/apply/<timestamp>-<pid>/ROLLBACK.txt`. Do not edit `runcloud.cnf`.
+If `dbtune` is unavailable, run the lines from the latest `$STATE/apply/<timestamp>-<pid>/ROLLBACK.txt`. Do not edit `runcloud.cnf`.
 
 ## Artifacts and limits
 
