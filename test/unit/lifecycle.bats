@@ -933,7 +933,7 @@ STUB
     dbtune_lifecycle_is_interactive() { return 0; }
     run dbtune_lifecycle_check_backup "" <<<"POTVRDZUJEM OBNOVITELNU ZALOHU"
     [ "$status" -eq 0 ]
-    [[ "$output" == *"Chýba autoritatívny dôkaz"* ]]
+    [[ "$output" == *"Chýba autoritatívny dôkaz poslednej úspešnej zálohy. Overte obnovu mimo Wooptima DB Tuner."* ]]
 }
 
 @test "English backup confirmation accepts only its exact trusted phrase and records a stable ID" {
@@ -943,6 +943,7 @@ STUB
     run dbtune_lifecycle_check_backup "" <<<'I CONFIRM A RESTORABLE BACKUP'
 
     [ "$status" -eq 0 ]
+    [[ "$output" == *'Authoritative evidence of the last successful backup is missing. Verify restoration outside Wooptima DB Tuner.'* ]]
     [[ "$output" == *'Type exactly to continue: I CONFIRM A RESTORABLE BACKUP'* ]]
     grep -F '"confirmation_id":"restorable_backup"' "$(dbtune_events_file)"
     grep -F '"ui_lang":"en"' "$(dbtune_events_file)"
@@ -956,6 +957,7 @@ STUB
     run dbtune_lifecycle_check_backup "" <<<'POTVRDZUJEM OBNOVITELNU ZALOHU'
 
     [ "$status" -eq 0 ]
+    [[ "$output" == *'Chýba autoritatívny dôkaz poslednej úspešnej zálohy. Overte obnovu mimo Wooptima DB Tuner.'* ]]
     [[ "$output" == *'Pre pokračovanie napíšte presne: POTVRDZUJEM OBNOVITELNU ZALOHU'* ]]
     grep -F '"confirmation_id":"restorable_backup"' "$(dbtune_events_file)"
     grep -F '"ui_lang":"sk"' "$(dbtune_events_file)"
@@ -980,7 +982,7 @@ STUB
     run cmd_apply
     [ "$status" -eq 0 ]
     history=$(cat "$DBTUNE_STATE_DIR/apply/current")
-    grep -F '# Filesystem-first rollback; does not require a working MariaDB or dbtune.' "$history/ROLLBACK.txt"
+    grep -F '# Filesystem-first rollback; does not require a working MariaDB or Wooptima DB Tuner.' "$history/ROLLBACK.txt"
     grep -F 'Configuration restored; restart MariaDB through the RunCloud panel.' "$history/ROLLBACK.txt"
     apply_event=$(grep -F '"event":"apply_completed"' "$(dbtune_events_file)")
     [[ "$apply_event" == *'"restart":"false"'* ]]
@@ -1013,7 +1015,7 @@ STUB
 
     [ "$status" -eq 0 ]
     history=$(cat "$DBTUNE_STATE_DIR/apply/current")
-    grep -F '# Filesystem-first rollback; nevyžaduje funkčnú MariaDB ani dbtune.' "$history/ROLLBACK.txt"
+    grep -F '# Filesystem-first rollback; nevyžaduje funkčnú MariaDB ani Wooptima DB Tuner.' "$history/ROLLBACK.txt"
     grep -F 'Konfigurácia bola obnovená; reštartujte MariaDB cez RunCloud panel.' "$history/ROLLBACK.txt"
 }
 

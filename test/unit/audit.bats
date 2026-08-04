@@ -997,7 +997,7 @@ EOF
 
     run cmd_audit
     [ "$status" -eq 0 ]
-    [[ "$output" == *'DBTune audit status: FINDINGS.'* ]]
+    [[ "$output" == *'Wooptima DB Tuner audit status: FINDINGS.'* ]]
     [[ "$output" == *'Failed: none. Partial: none.'* ]]
     [[ "$output" == *'Total findings:'* ]]
     [[ "$output" != *secret* ]]

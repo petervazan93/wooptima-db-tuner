@@ -1,5 +1,5 @@
 [Unit]
-Description=Run dbtune collection every five minutes
+Description=Run Wooptima DB Tuner collection every five minutes
 
 [Timer]
 OnCalendar=*:0/5

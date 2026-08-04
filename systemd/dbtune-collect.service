@@ -1,5 +1,5 @@
 [Unit]
-Description=dbtune MariaDB metrics collection tick
+Description=Wooptima DB Tuner MariaDB metrics collection tick
 After=mariadb.service
 
 [Service]

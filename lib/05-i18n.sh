@@ -6,10 +6,10 @@ dbtune_i18n_lookup() {
 
     case "$DBTUNE_I18N_LANGUAGE:$message_id" in
         en:cli_usage)
-            DBTUNE_I18N_MESSAGE=$'Usage: dbtune <command> [options]\n\nCommands:\n  audit [--json]                  Read-only audit and a new measurement cycle\n  collect start [--days N] [--long-query-time SECONDS]\n                                 Collect metrics, 7 days by default\n  collect status | stop          Show or stop collection\n  analyze [--min-samples N]      Analyze collected metrics\n  report                         Generate a report\n  propose                        Propose MariaDB configuration\n  apply [--restart] [--force]    Safely apply the proposal\n  verify --post | --24h          Verify after applying\n  rollback                       Restore the original configuration\n  status                         Show dbtune status\n  version                        Show program version\n  _tick                          Internal timer tick\n\n  -h, --help                     Show this help\n'
+            DBTUNE_I18N_MESSAGE=$'Usage: dbtune <command> [options]\n\nCommands:\n  audit [--json]                  Read-only audit and a new measurement cycle\n  collect start [--days N] [--long-query-time SECONDS]\n                                 Collect metrics, 7 days by default\n  collect status | stop          Show or stop collection\n  analyze [--min-samples N]      Analyze collected metrics\n  report                         Generate a report\n  propose                        Propose MariaDB configuration\n  apply [--restart] [--force]    Safely apply the proposal\n  verify --post | --24h          Verify after applying\n  rollback                       Restore the original configuration\n  status                         Show Wooptima DB Tuner status\n  version                        Show Wooptima DB Tuner version\n  _tick                          Internal timer tick\n\n  -h, --help                     Show this help\n'
             ;;
         sk:cli_usage)
-            DBTUNE_I18N_MESSAGE=$'Pouzitie: dbtune <prikaz> [volby]\n\nPrikazy:\n  audit [--json]                  Read-only audit a novy meraci cyklus\n  collect start [--days N] [--long-query-time SECONDS]\n                                 Zber metrik, predvolene 7 dni\n  collect status | stop          Stav alebo zastavenie zberu\n  analyze [--min-samples N]      Analyza nazbieranych metrik\n  report                         Vygenerovanie reportu\n  propose                        Navrh MariaDB konfiguracie\n  apply [--restart] [--force]    Bezpecne nasadenie navrhu\n  verify --post | --24h          Kontrola po nasadeni\n  rollback                       Obnovenie povodnej konfiguracie\n  status                         Stav dbtune\n  version                        Verzia programu\n  _tick                          Interny timer tick\n\n  -h, --help                     Tato napoveda\n'
+            DBTUNE_I18N_MESSAGE=$'Pouzitie: dbtune <prikaz> [volby]\n\nPrikazy:\n  audit [--json]                  Read-only audit a novy meraci cyklus\n  collect start [--days N] [--long-query-time SECONDS]\n                                 Zber metrik, predvolene 7 dni\n  collect status | stop          Stav alebo zastavenie zberu\n  analyze [--min-samples N]      Analyza nazbieranych metrik\n  report                         Vygenerovanie reportu\n  propose                        Navrh MariaDB konfiguracie\n  apply [--restart] [--force]    Bezpecne nasadenie navrhu\n  verify --post | --24h          Kontrola po nasadeni\n  rollback                       Obnovenie povodnej konfiguracie\n  status                         Stav Wooptima DB Tuner\n  version                        Verzia Wooptima DB Tuner\n  _tick                          Interny timer tick\n\n  -h, --help                     Tato napoveda\n'
             ;;
         en:cli_module_unavailable)
             DBTUNE_I18N_MESSAGE="Module for '%s' is not available in this build"
@@ -438,10 +438,10 @@ dbtune_i18n_lookup() {
             DBTUNE_I18N_MESSAGE='nedostupna'
             ;;
         en:audit_summary_status)
-            DBTUNE_I18N_MESSAGE='DBTune audit status: %s.\n'
+            DBTUNE_I18N_MESSAGE='Wooptima DB Tuner audit status: %s.\n'
             ;;
         sk:audit_summary_status)
-            DBTUNE_I18N_MESSAGE='DBTune audit status: %s.\n'
+            DBTUNE_I18N_MESSAGE='Wooptima DB Tuner audit status: %s.\n'
             ;;
         en:audit_summary_sections)
             DBTUNE_I18N_MESSAGE='Required sections: %s. Failed: %s. Partial: %s.\n'
@@ -1482,16 +1482,16 @@ dbtune_i18n_lookup() {
             DBTUNE_I18N_MESSAGE='- Bez samostatných bezpečnostných nálezov v analýze.\n'
             ;;
         en:report_title)
-            DBTUNE_I18N_MESSAGE='# dbtune report\n\n'
+            DBTUNE_I18N_MESSAGE='# Wooptima DB Tuner report\n\n'
             ;;
         sk:report_title)
-            DBTUNE_I18N_MESSAGE='# dbtune správa\n\n'
+            DBTUNE_I18N_MESSAGE='# Wooptima DB Tuner správa\n\n'
             ;;
         en:report_generated)
-            DBTUNE_I18N_MESSAGE='_Generated: %s | dbtune %s_\n\n'
+            DBTUNE_I18N_MESSAGE='_Generated: %s | Wooptima DB Tuner %s_\n\n'
             ;;
         sk:report_generated)
-            DBTUNE_I18N_MESSAGE='_Vygenerované: %s | dbtune %s_\n\n'
+            DBTUNE_I18N_MESSAGE='_Vygenerované: %s | Wooptima DB Tuner %s_\n\n'
             ;;
         en:report_provenance)
             DBTUNE_I18N_MESSAGE="_Run: \`%s\` | fingerprint: \`%s\` | audit SHA-256: \`%s\` | samples SHA-256: \`%s\` | dbsize SHA-256: \`%s\`_\n\n"
@@ -1572,10 +1572,10 @@ dbtune_i18n_lookup() {
             DBTUNE_I18N_MESSAGE='**Nálezy:** critical %s, high %s, medium %s, low %s.\n\n'
             ;;
         en:report_safety_warning)
-            DBTUNE_I18N_MESSAGE='> **Safety warning:** action steps are read-only diagnostics. dbtune does not automatically run application SQL or cleanup; run destructive DELETE, DROP, or UPDATE only after separate review and a verified backup.\n\n'
+            DBTUNE_I18N_MESSAGE='> **Safety warning:** action steps are read-only diagnostics. Wooptima DB Tuner does not automatically run application SQL or cleanup; run destructive DELETE, DROP, or UPDATE only after separate review and a verified backup.\n\n'
             ;;
         sk:report_safety_warning)
-            DBTUNE_I18N_MESSAGE='> **Bezpečnostné upozornenie:** action kroky sú iba read-only diagnostika. dbtune automaticky nespúšťa aplikačné SQL ani cleanup; deštruktívne DELETE, DROP a UPDATE vykonajte iba po samostatnom review a overenej zálohe.\n\n'
+            DBTUNE_I18N_MESSAGE='> **Bezpečnostné upozornenie:** action kroky sú iba read-only diagnostika. Wooptima DB Tuner automaticky nespúšťa aplikačné SQL ani cleanup; deštruktívne DELETE, DROP a UPDATE vykonajte iba po samostatnom review a overenej zálohe.\n\n'
             ;;
         en:report_next_steps_heading)
             DBTUNE_I18N_MESSAGE='## Next steps\n\n'
@@ -1626,10 +1626,10 @@ dbtune_i18n_lookup() {
             DBTUNE_I18N_MESSAGE='Návrh uložený: %s\n'
             ;;
         en:cnf_generated)
-            DBTUNE_I18N_MESSAGE='# Generated by dbtune %s at %s.\n'
+            DBTUNE_I18N_MESSAGE='# Generated by Wooptima DB Tuner %s at %s.\n'
             ;;
         sk:cnf_generated)
-            DBTUNE_I18N_MESSAGE='# Vygeneroval dbtune %s dňa %s.\n'
+            DBTUNE_I18N_MESSAGE='# Vygeneroval Wooptima DB Tuner %s dňa %s.\n'
             ;;
         en:cnf_load_order)
             DBTUNE_I18N_MESSAGE='# Loaded after /etc/mysql/conf.d/runcloud.cnf.\n'
@@ -1695,8 +1695,8 @@ dbtune_i18n_lookup() {
         sk:lifecycle_force_confirmation_mismatch) DBTUNE_I18N_MESSAGE='Potvrdzovacia fráza sa nezhoduje' ;;
         en:lifecycle_backup_tty) DBTUNE_I18N_MESSAGE='Apply requires verified backup-evidence.tsv or interactive confirmation on a TTY' ;;
         sk:lifecycle_backup_tty) DBTUNE_I18N_MESSAGE='Apply vyžaduje overený backup-evidence.tsv alebo interaktívne potvrdenie na TTY' ;;
-        en:lifecycle_backup_missing_intro) DBTUNE_I18N_MESSAGE='Authoritative evidence of the last successful backup is missing. Verify restoration outside dbtune.\n' ;;
-        sk:lifecycle_backup_missing_intro) DBTUNE_I18N_MESSAGE='Chýba autoritatívny dôkaz poslednej úspešnej zálohy. Overte obnovu mimo dbtune.\n' ;;
+        en:lifecycle_backup_missing_intro) DBTUNE_I18N_MESSAGE='Authoritative evidence of the last successful backup is missing. Verify restoration outside Wooptima DB Tuner.\n' ;;
+        sk:lifecycle_backup_missing_intro) DBTUNE_I18N_MESSAGE='Chýba autoritatívny dôkaz poslednej úspešnej zálohy. Overte obnovu mimo Wooptima DB Tuner.\n' ;;
         en:lifecycle_backup_confirmation_mismatch) DBTUNE_I18N_MESSAGE='The restorable-backup confirmation does not match' ;;
         sk:lifecycle_backup_confirmation_mismatch) DBTUNE_I18N_MESSAGE='Potvrdenie obnoviteľnej zálohy sa nezhoduje' ;;
         en:lifecycle_backup_rejected) DBTUNE_I18N_MESSAGE='Apply is blocked: backup evidence was rejected; reason=%s; age_seconds=%s; max_age_seconds=%s' ;;
@@ -1751,8 +1751,8 @@ dbtune_i18n_lookup() {
         sk:lifecycle_mydumper_running) DBTUNE_I18N_MESSAGE='Prebieha mydumper backup; konfigurácia ani pokyn na reštart sa nevykoná' ;;
         en:lifecycle_critical_finding) DBTUNE_I18N_MESSAGE='Apply is blocked by a critical server finding: %s' ;;
         sk:lifecycle_critical_finding) DBTUNE_I18N_MESSAGE='Apply blokuje kritický serverový nález: %s' ;;
-        en:lifecycle_rollback_intro) DBTUNE_I18N_MESSAGE='# Filesystem-first rollback; does not require a working MariaDB or dbtune.\n' ;;
-        sk:lifecycle_rollback_intro) DBTUNE_I18N_MESSAGE='# Filesystem-first rollback; nevyžaduje funkčnú MariaDB ani dbtune.\n' ;;
+        en:lifecycle_rollback_intro) DBTUNE_I18N_MESSAGE='# Filesystem-first rollback; does not require a working MariaDB or Wooptima DB Tuner.\n' ;;
+        sk:lifecycle_rollback_intro) DBTUNE_I18N_MESSAGE='# Filesystem-first rollback; nevyžaduje funkčnú MariaDB ani Wooptima DB Tuner.\n' ;;
         en:lifecycle_rollback_restored_shell) DBTUNE_I18N_MESSAGE='  printf "Configuration restored; restart MariaDB through the RunCloud panel.\\n"\n' ;;
         sk:lifecycle_rollback_restored_shell) DBTUNE_I18N_MESSAGE='  printf "Konfigurácia bola obnovená; reštartujte MariaDB cez RunCloud panel.\\n"\n' ;;
         en:lifecycle_apply_report_title) DBTUNE_I18N_MESSAGE='# APPLY REPORT\n\n' ;;

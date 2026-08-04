@@ -94,8 +94,8 @@ integration_assert_report_language() {
     local title
 
     case $ui_lang in
-        en) title='# dbtune report' ;;
-        sk) title='# dbtune správa' ;;
+        en) title='# Wooptima DB Tuner report' ;;
+        sk) title='# Wooptima DB Tuner správa' ;;
         *) return 64 ;;
     esac
     # shellcheck disable=SC2016

@@ -97,6 +97,12 @@ source_tick_dispatch() {
     [ "$status" -eq 0 ]
     [[ "$output" == 'Usage:'* ]]
     [[ "$output" == *'--long-query-time SECONDS'* ]]
+
+    run dbtune_msg cli_usage
+    [ "$status" -eq 0 ]
+    [[ "$output" == 'Usage: dbtune <command> [options]'* ]]
+    [[ "$output" == *'Show Wooptima DB Tuner status'* ]]
+    [[ "$output" == *'Show Wooptima DB Tuner version'* ]]
 }
 
 @test "collector usage supports explicit Slovak" {
@@ -107,6 +113,12 @@ source_tick_dispatch() {
     [ "$status" -eq 0 ]
     [[ "$output" == 'Pouzitie:'* ]]
     [[ "$output" == *'--long-query-time SEKUNDY'* ]]
+
+    run dbtune_msg cli_usage
+    [ "$status" -eq 0 ]
+    [[ "$output" == 'Pouzitie: dbtune <prikaz> [volby]'* ]]
+    [[ "$output" == *'Stav Wooptima DB Tuner'* ]]
+    [[ "$output" == *'Verzia Wooptima DB Tuner'* ]]
 }
 
 @test "delta metrics use counter differences" {
@@ -309,7 +321,9 @@ source_tick_dispatch() {
     [ "$(dbtune_collect_value deadline_epoch)" = 1259200 ]
     [ "$(dbtune_collect_value ui_lang)" = en ]
     grep -F 'ExecStart=/usr/local/bin/dbtune _tick' "$DBTUNE_SYSTEMD_DIR/dbtune-collect.service"
+    grep -Fx 'Description=Wooptima DB Tuner MariaDB metrics collection tick' "$DBTUNE_SYSTEMD_DIR/dbtune-collect.service"
     grep -F 'OnCalendar=*:0/5' "$DBTUNE_SYSTEMD_DIR/dbtune-collect.timer"
+    grep -Fx 'Description=Run Wooptima DB Tuner collection every five minutes' "$DBTUNE_SYSTEMD_DIR/dbtune-collect.timer"
     grep -F 'enable --now dbtune-collect.timer' "$BATS_TEST_TMPDIR/systemctl.log"
     grep -F 'SET GLOBAL slow_query_log=ON' "$BATS_TEST_TMPDIR/sql.log"
 }
@@ -344,7 +358,7 @@ source_tick_dispatch() {
     [ "$status" -eq 0 ]
     [[ "$output" == *'_tick ignoruje argumenty'* ]]
     [ "$(cat "$BATS_TEST_TMPDIR/analyze-language")" = sk ]
-    [ "$(cat "$BATS_TEST_TMPDIR/automatic-report.md")" = '# dbtune správa' ]
+    [ "$(cat "$BATS_TEST_TMPDIR/automatic-report.md")" = '# Wooptima DB Tuner správa' ]
 }
 
 @test "public tick restores persisted language before lifecycle lock diagnostics" {
