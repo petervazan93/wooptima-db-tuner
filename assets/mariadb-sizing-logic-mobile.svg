@@ -1,0 +1,117 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="600" height="1550" viewBox="0 0 600 1550" role="img" aria-labelledby="mobile-title mobile-desc">
+  <title id="mobile-title">Wooptima DB Tuner MariaDB sizing and safety logic for mobile</title>
+  <desc id="mobile-desc">Mobile stacked rendering of the default collection metrics and guarded MariaDB proposal rules for buffer pool sizing, maximum connections, storage I/O, query cache, and redo logs. The valid-sample minimum is configurable with a default of 288, and query cache requires that configured minimum of active windows. Scoped fail-closed rules distinguish unsupported MariaDB families, affected keys with unknown or conflicting current evidence, excluded degraded or restart windows, and insufficient valid evidence.</desc>
+
+  <rect width="600" height="1550" rx="18" fill="#0d1117"/>
+
+  <g font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif">
+    <text x="20" y="42" fill="#f0f6fc" font-size="34" font-weight="700">MariaDB target sizing</text>
+    <text x="20" y="77" fill="#f0f6fc" font-size="28" font-weight="700">Evidence before proposals</text>
+    <text x="20" y="108" fill="#8b949e" font-size="20">Same executable rules, stacked for mobile.</text>
+
+    <g text-anchor="middle">
+      <rect x="20" y="128" width="270" height="64" rx="9" fill="#161b22" stroke="#30363d"/>
+      <text x="155" y="154" fill="#58a6ff" font-size="25" font-weight="700">7 days</text>
+      <text x="155" y="181" fill="#8b949e" font-size="22">default collection</text>
+
+      <rect x="310" y="128" width="270" height="64" rx="9" fill="#161b22" stroke="#30363d"/>
+      <text x="445" y="154" fill="#58a6ff" font-size="25" font-weight="700">60 seconds</text>
+      <text x="445" y="181" fill="#8b949e" font-size="22">delta window</text>
+
+      <rect x="20" y="198" width="270" height="64" rx="9" fill="#161b22" stroke="#30363d"/>
+      <text x="155" y="224" fill="#58a6ff" font-size="25" font-weight="700">5 minutes</text>
+      <text x="155" y="251" fill="#8b949e" font-size="22">collection tick</text>
+
+      <rect x="310" y="198" width="270" height="64" rx="9" fill="#161b22" stroke="#30363d"/>
+      <text x="445" y="224" fill="#58a6ff" font-size="24" font-weight="700">288 default</text>
+      <text x="445" y="251" fill="#8b949e" font-size="22">valid min; configurable</text>
+
+      <rect x="20" y="268" width="270" height="64" rx="9" fill="#161b22" stroke="#30363d"/>
+      <text x="155" y="294" fill="#58a6ff" font-size="25" font-weight="700">29 keys</text>
+      <text x="155" y="321" fill="#8b949e" font-size="22">version-gated CNF</text>
+
+      <rect x="310" y="268" width="270" height="64" rx="9" fill="#161b22" stroke="#30363d"/>
+      <text x="445" y="294" fill="#58a6ff" font-size="25" font-weight="700">0 mutations</text>
+      <text x="445" y="321" fill="#8b949e" font-size="22">application data</text>
+    </g>
+
+    <rect x="20" y="344" width="560" height="198" rx="12" fill="#161b22" stroke="#30363d"/>
+    <circle cx="42" cy="372" r="7" fill="#bc8cff"/>
+    <text x="60" y="380" fill="#f0f6fc" font-size="28" font-weight="700">Buffer pool</text>
+    <text x="558" y="378" text-anchor="end" fill="#bc8cff" font-size="18" font-weight="700">MEMORY</text>
+    <rect x="38" y="392" width="524" height="62" rx="7" fill="#0d1117" stroke="#30363d"/>
+    <g fill="#d2a8ff" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="22">
+      <text x="50" y="417">min((dataset + growth180) x 1.3,</text>
+      <text x="50" y="443">RAM x 0.5)</text>
+    </g>
+    <text x="38" y="477" fill="#c9d1d9" font-size="22">p05 available-memory guard</text>
+    <text x="38" y="503" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="21">reserve = max(1 GiB, RAM x 0.1)</text>
+    <text x="38" y="529" fill="#c9d1d9" font-size="22">256 MiB steps; never auto-shrink</text>
+
+    <rect x="20" y="552" width="560" height="180" rx="12" fill="#161b22" stroke="#30363d"/>
+    <circle cx="42" cy="580" r="7" fill="#58a6ff"/>
+    <text x="60" y="588" fill="#f0f6fc" font-size="28" font-weight="700">Maximum connections</text>
+    <rect x="38" y="600" width="524" height="96" rx="7" fill="#0d1117" stroke="#30363d"/>
+    <g fill="#79c0ff" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="22">
+      <text x="50" y="628">max(100,</text>
+      <text x="74" y="656">ceil(workers x 1.25 + 20),</text>
+      <text x="74" y="684">ceil(measured_peak x 1.25))</text>
+    </g>
+    <text x="38" y="720" fill="#c9d1d9" font-size="22">Workers: summed PHP-FPM; peak: measured</text>
+
+    <rect x="20" y="742" width="560" height="200" rx="12" fill="#161b22" stroke="#30363d"/>
+    <circle cx="42" cy="770" r="7" fill="#3fb950"/>
+    <text x="60" y="778" fill="#f0f6fc" font-size="28" font-weight="700">Storage matrix</text>
+    <g font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace">
+      <g fill="#8b949e" font-size="20" font-weight="700">
+        <text x="38" y="812">MEDIA</text>
+        <text x="220" y="812">CAP</text>
+        <text x="315" y="812">MAX</text>
+        <text x="410" y="812">R/W</text>
+        <text x="500" y="812">NEIGH</text>
+      </g>
+      <g fill="#aff5b4" font-size="22">
+        <text x="38" y="846">NVMe</text><text x="220" y="846">2000</text><text x="315" y="846">6000</text><text x="423" y="846">8</text><text x="520" y="846">0</text>
+        <text x="38" y="877">SSD/SATA</text><text x="220" y="877">1000</text><text x="315" y="877">2000</text><text x="423" y="877">4</text><text x="520" y="877">0</text>
+        <text x="38" y="908">HDD</text><text x="220" y="908">200</text><text x="315" y="908">400</text><text x="423" y="908">4</text><text x="520" y="908">1</text>
+      </g>
+    </g>
+    <text x="38" y="931" fill="#8b949e" font-size="20">capacity / max / R+W threads / neighbors</text>
+
+    <rect x="20" y="952" width="560" height="186" rx="12" fill="#161b22" stroke="#30363d"/>
+    <circle cx="42" cy="980" r="7" fill="#d29922"/>
+    <text x="60" y="988" fill="#f0f6fc" font-size="28" font-weight="700">Query cache</text>
+    <rect x="38" y="1000" width="524" height="62" rx="7" fill="#0d1117" stroke="#30363d"/>
+    <g fill="#e3b341" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="22">
+      <text x="50" y="1026">p50 hit &lt; 20% OR</text>
+      <text x="50" y="1052">p95 threads &gt; 8</text>
+    </g>
+    <text x="38" y="1084" fill="#c9d1d9" font-size="22">Active-window minimum: configured</text>
+    <text x="38" y="1110" fill="#8b949e" font-size="22">288 by default</text>
+    <text x="38" y="1132" fill="#e3b341" font-size="21">Disable type + size; otherwise KEEP</text>
+
+    <rect x="20" y="1148" width="560" height="200" rx="12" fill="#161b22" stroke="#30363d"/>
+    <circle cx="42" cy="1176" r="7" fill="#f85149"/>
+    <text x="60" y="1184" fill="#f0f6fc" font-size="28" font-weight="700">Redo log</text>
+    <text x="38" y="1210" fill="#8b949e" font-size="18" font-weight="700">LOG BUFFER</text>
+    <g fill="#ff7b72" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="22">
+      <text x="38" y="1236">any valid sampled log wait -&gt; 64M</text>
+      <text x="38" y="1262">otherwise -&gt; 32M</text>
+    </g>
+    <text x="38" y="1287" fill="#8b949e" font-size="18" font-weight="700">LOG FILE</text>
+    <g fill="#ff7b72" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="22">
+      <text x="38" y="1313">dataset &gt; 10 GiB -&gt; 1G</text>
+      <text x="38" y="1339">otherwise -&gt; 512M</text>
+    </g>
+
+    <rect x="20" y="1358" width="560" height="190" rx="12" fill="#161b22" stroke="#30363d"/>
+    <path d="M32 1358h10v190H32a12 12 0 0 1-12-12v-166a12 12 0 0 1 12-12z" fill="#d29922"/>
+    <text x="58" y="1388" fill="#e3b341" font-size="20" font-weight="700">SCOPED FAIL-CLOSED GUARDS</text>
+    <text x="58" y="1414" fill="#c9d1d9" font-size="21">Unsupported MariaDB family -&gt; no server proposals</text>
+    <text x="58" y="1440" fill="#f0f6fc" font-size="21" font-weight="600">Unknown or conflicting current evidence</text>
+    <text x="58" y="1465" fill="#8b949e" font-size="21">-&gt; affected key blocked</text>
+    <text x="58" y="1490" fill="#f0f6fc" font-size="21" font-weight="600">Degraded / restart windows excluded</text>
+    <text x="58" y="1514" fill="#c9d1d9" font-size="21">Insufficient valid evidence</text>
+    <text x="58" y="1538" fill="#8b949e" font-size="21">-&gt; no evidence-dependent change</text>
+  </g>
+</svg>

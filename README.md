@@ -3,16 +3,15 @@
   <p><strong>Evidence-based MariaDB tuning for RunCloud-hosted WordPress and WooCommerce.</strong></p>
   <p>
     <a href="#overview">Overview</a> &middot;
-    <a href="#lifecycle">Lifecycle</a> &middot;
-    <a href="#read-only-quickstart">Quickstart</a> &middot;
+    <a href="#woocommerce-tuning-scope">Tuning scope</a> &middot;
+    <a href="#how-mariadb-targets-are-calculated">Decision logic</a> &middot;
     <a href="#safety-model">Safety</a> &middot;
-    <a href="#supported-environment">Support</a> &middot;
     <a href="#pinned-installation">Install</a> &middot;
     <a href="#documentation">Docs</a>
   </p>
   <p>
     <a href="https://github.com/petervazan93/wooptima-db-tuner/actions/workflows/ci.yml"><img alt="CI workflow status" src="https://github.com/petervazan93/wooptima-db-tuner/actions/workflows/ci.yml/badge.svg?branch=main"></a>
-    <a href="https://github.com/petervazan93/wooptima-db-tuner/releases/tag/v0.4.1"><img alt="Release candidate: v0.4.1" src="https://img.shields.io/badge/release%20candidate-v0.4.1-0969da"></a>
+    <a href="https://github.com/petervazan93/wooptima-db-tuner/releases/tag/v0.4.1"><img alt="Release: v0.4.1" src="https://img.shields.io/badge/release-v0.4.1-0969da"></a>
     <img alt="Runtime: Bash 4 or newer" src="https://img.shields.io/badge/runtime-Bash%204%2B-4EAA25">
     <img alt="Supported MariaDB families: 10.6, 10.11, and 11.x" src="https://img.shields.io/badge/MariaDB-10.6%20%7C%2010.11%20%7C%2011.x-003545">
   </p>
@@ -32,7 +31,81 @@ Wooptima DB Tuner is a single-artifact Bash tool that audits a RunCloud host, me
 - **Keep mutation operator-controlled.** Audit and proposal generation do not apply configuration. Apply, restart, verification, and rollback are separate explicit steps.
 
 > [!IMPORTANT]
-> Current source is the `v0.4.1` release candidate, with immutable artifact version `0.4.1`. It defaults to English, selects Slovak explicitly with `DBTUNE_UI_LANG=sk`, and uses the `fleet-v3` report contract. The pinned installation below becomes available when the `v0.4.1` tag and release assets are published.
+> The latest published release is `v0.4.1`, with immutable artifact version `0.4.1`. The executable defaults to English, selects Slovak explicitly with `DBTUNE_UI_LANG=sk`, and uses the `fleet-v3` report contract.
+
+## WooCommerce tuning scope
+
+Wooptima DB Tuner starts at the application layer because page caching, object reuse, autoloaded options, order storage, background jobs, and table waste determine how much work reaches MariaDB. Application findings are recommendation-only: `dbtune` never mutates WordPress or WooCommerce data and does not perform automatic cleanup.
+
+<picture>
+  <source media="(max-width: 1100px)" srcset="assets/woocommerce-query-pressure-mobile.svg">
+  <img src="assets/woocommerce-query-pressure.svg" alt="WooCommerce request path showing how page-cache and persistent object-cache hits reduce MariaDB work, followed by recommendation-only checks for object cache, autoload, orders, jobs, sessions, transients, and plugin logs.">
+</picture>
+
+<p align="center"><sub>Application-first diagnostic flow. Thresholds are executable rules, not production measurements or benchmark claims.</sub></p>
+
+| Application check | Evidence and recommendation boundary |
+| --- | --- |
+| Persistent object cache | Requires a successful Redis probe (`redis-cli ping = PONG`) and `wp-content/object-cache.php`; reports Redis down, a missing drop-in, or unknown evidence. |
+| Redis policy | Recommends `maxmemory-policy=volatile-lru` when the observed policy differs. It does not size Redis memory or make eviction decisions. |
+| Autoloaded options | Sums option values where `autoload IN ('yes','on','auto')`: `0 < total < 1 MiB` is OK, 1-3 MiB needs review, and above 3 MiB is high priority. Zero emits no autoload verdict. |
+| HPOS | Recommends migration when HPOS is off and legacy orders exist; flags compatibility sync when HPOS and data sync are both on because it causes duplicate writes. It does not reconcile HPOS row counts. |
+| WooCommerce sessions | Flags an estimated row count of at least 500,000 for cleanup review, then supplies the exact read-only count shown below. |
+| Action Scheduler | Flags any failed actions for investigation. Current production audit does not collect retention, so it does not drive retention recommendations. |
+| Database transients | Flags at least 1,000 records or at least 10 MiB of option values for cleanup review. |
+| Plugin log tables | Flags tables whose estimated payload exceeds 20 KiB per estimated row as purge candidates. |
+| WP-Cron | Flags `DISABLE_WP_CRON=true` when no matching system cron can be confirmed; unknown application-to-cron mapping remains unknown. |
+| `postmeta.meta_value` index | Flags a standalone `meta_value` index for review; compound indexes beginning with another column are not classified by this check. |
+
+For a site using the detected WordPress table prefix, the session follow-up is:
+
+```sql
+SELECT COUNT(*) AS session_rows FROM `<prefix>woocommerce_sessions`;
+```
+
+Replace `<prefix>` with the detected prefix. All generated application follow-ups are operator-run, read-only diagnostics; they do not delete, update, or otherwise mutate application data. SQL follow-ups additionally use bounded connection and statement timeouts.
+
+## How MariaDB targets are calculated
+
+By default, `dbtune` collects workload evidence for 7 days on a 5-minute timer tick. Each tick measures a 60-second delta window. Analysis requires at least 288 valid samples by default, configurable with `dbtune analyze --min-samples N`, and excludes malformed rows, degraded intervals, and restart-affected intervals rather than allowing them to drive a proposal.
+
+The rules engine combines those samples with the current MariaDB variables, dataset and growth history, RAM availability, summed PHP-FPM worker limits, measured connection peak, and detected storage class. It can evaluate 29 version-gated proposal keys, but it does not propose all 29 on every server and makes zero automatic WordPress or WooCommerce mutations.
+
+<picture>
+  <source media="(max-width: 1100px)" srcset="assets/mariadb-sizing-logic-mobile.svg">
+  <img src="assets/mariadb-sizing-logic.svg" alt="MariaDB sizing logic showing collection quality gates and representative formulas for buffer pool, maximum connections, storage I/O, query cache, redo logs, and fail-closed proposal behavior.">
+</picture>
+
+<p align="center"><sub>Representative executable rules. Version gates, current-value evidence, and sample quality remain authoritative for every proposal.</sub></p>
+
+| Target | Executable decision logic |
+| --- | --- |
+| Buffer pool | Starts from `min((dataset + growth180) x 1.3, RAM x 0.5)`, rounds in 256 MiB steps, applies the p05 available-memory guard with `max(1 GiB, RAM x 0.1)` reserved, and never proposes an automatic shrink. |
+| Maximum connections | Uses `max(100, ceil(workers x 1.25 + 20), ceil(measured_peak x 1.25))`, where workers are summed PHP-FPM limits and the peak includes measured concurrent connections. |
+| Storage I/O matrix | Maps NVMe to `2000 / 6000 / 8 / 0`, SSD/SATA to `1000 / 2000 / 4 / 0`, and HDD to `200 / 400 / 4 / 1` for I/O capacity, capacity maximum, each read/write thread count, and flush neighbors. |
+| Query cache | Requires the configured minimum of active query-cache windows, 288 by default. It proposes disabling both type and size when p50 hit rate is below 20% **or** p95 running threads is above 8; otherwise it keeps the current setting. |
+| Redo log buffer | Selects 64 MiB when any valid sampled log wait exists; otherwise selects 32 MiB. |
+| Redo log file | Selects 1 GiB when the dataset is above 10 GiB; otherwise selects 512 MiB. |
+| Durability | When binary logging is disabled, may propose `innodb_flush_log_at_trx_commit=1`; `innodb_doublewrite=1` remains the pinned durability target. |
+
+Some collected metrics are diagnostic only. A value becomes proposal-driving evidence only where an executable rule consumes it. An unsupported MariaDB family blocks all server proposals; an unknown required current value or conflicting evidence blocks the affected key; malformed, degraded, and restart windows are excluded; and insufficient valid evidence prevents evidence-dependent changes.
+
+<details>
+<summary><strong>All 29 version-gated proposal keys</strong></summary>
+
+**Evidence-sized and storage (9):** `innodb_buffer_pool_size`, `max_connections`, `innodb_io_capacity`, `innodb_io_capacity_max`, `innodb_read_io_threads`, `innodb_write_io_threads`, `innodb_flush_neighbors`, `innodb_log_file_size`, `innodb_log_buffer_size`.
+
+**Query and working-set cache (5):** `query_cache_type`, `query_cache_size`, `tmp_table_size`, `max_heap_table_size`, `key_buffer_size`.
+
+**Durability, startup, and flushing (8):** `innodb_flush_log_at_trx_commit`, `innodb_doublewrite`, `innodb_flush_method`, `innodb_buffer_pool_dump_at_shutdown`, `innodb_buffer_pool_load_at_startup`, `innodb_max_dirty_pages_pct`, `innodb_max_dirty_pages_pct_lwm`, `innodb_lock_wait_timeout`.
+
+**Connections and table metadata (3):** `skip_name_resolve`, `thread_cache_size`, `table_definition_cache`.
+
+**Slow-query observability (4):** `slow_query_log`, `slow_query_log_file`, `long_query_time`, `log_slow_verbosity`.
+
+These are proposal-capable schema keys, not 29 changes on every server. Each key still requires supported-version and valid-current-value evidence; notably, `innodb_flush_method` is proposal-capable only before MariaDB 11, where the rule treats it as deprecated.
+
+</details>
 
 ## Lifecycle
 
@@ -105,7 +178,7 @@ curl -fsSL https://github.com/petervazan93/wooptima-db-tuner/releases/download/v
 > [!WARNING]
 > This pipeline trusts the remote `install.sh` before it verifies the downloaded `dbtune` artifact. For the verify-before-run procedure that authenticates and lets you inspect `install.sh` first, follow [Security: Installation](SECURITY.md#installation).
 
-This command targets the `v0.4.1` release candidate and works after its tag and release assets are published. The installer verifies the selected `dbtune` artifact's SHA-256 checksum, GitHub attestation, fixed upstream repository and owner, signer workflow, exact release source ref, and Bash syntax before atomically publishing it. It does not run an audit or change MariaDB.
+This command installs the published `v0.4.1` release. The installer verifies the selected `dbtune` artifact's SHA-256 checksum, GitHub attestation, fixed upstream repository and owner, signer workflow, exact release source ref, and Bash syntax before atomically publishing it. It does not run an audit or change MariaDB.
 
 ## CLI
 
