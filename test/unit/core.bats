@@ -1,11 +1,13 @@
 #!/usr/bin/env bats
 
 setup() {
+    unset DBTUNE_UI_LANG
     BATS_TEST_TMPDIR=$(CDPATH='' cd -- "$BATS_TEST_TMPDIR" && pwd -P)
     export BATS_TEST_TMPDIR
     export DBTUNE_STATE_DIR="$BATS_TEST_TMPDIR/state"
     export DBTUNE_LOG_LEVEL=quiet
     source "$BATS_TEST_DIRNAME/../../lib/00-header.sh"
+    source "$BATS_TEST_DIRNAME/../../lib/05-i18n.sh"
     source "$BATS_TEST_DIRNAME/../../lib/10-util.sh"
     source "$BATS_TEST_DIRNAME/../../lib/90-main.sh"
 }
@@ -40,7 +42,7 @@ file_mode() {
     run dbtune_init_state_dir
 
     [ "$status" -eq 65 ]
-    [[ "$output" == *"parent komponent"* ]]
+    [[ "$output" == *"parent component"* ]]
     [ ! -e "$BATS_TEST_TMPDIR/real-parent/state" ]
 }
 
@@ -54,7 +56,7 @@ file_mode() {
     run dbtune_init_state_dir
 
     [ "$status" -eq 65 ]
-    [[ "$output" == *"privilegovana identita"* ]]
+    [[ "$output" == *"privileged identity"* ]]
 }
 
 @test "state initialization rejects initially group or world writable directories without touching contents" {
@@ -66,7 +68,7 @@ file_mode() {
     run dbtune_init_state_dir
 
     [ "$status" -eq 65 ]
-    [[ "$output" == *"ocakavany mode"* ]]
+    [[ "$output" == *"expected mode"* ]]
     [ "$(file_mode "$DBTUNE_STATE_DIR")" = 777 ]
     [ "$(cat "$DBTUNE_STATE_DIR/prepared")" = attacker-content ]
 }
@@ -98,6 +100,25 @@ file_mode() {
     [ "$(cat "$BATS_TEST_TMPDIR/event-lock-target")" = unchanged ]
     [ ! -e "$BATS_TEST_TMPDIR/event-flock-called" ]
     [ ! -e "$(dbtune_events_file)" ]
+}
+
+@test "utility failures default to English" {
+    export DBTUNE_LOG_LEVEL=error
+
+    run dbtune_path ''
+
+    [ "$status" -eq 64 ]
+    [[ "$output" == *'Invalid state file name: <empty>'* ]]
+}
+
+@test "utility failures support explicit Slovak" {
+    export DBTUNE_LOG_LEVEL=error
+    dbtune_i18n_set sk
+
+    run dbtune_require_uint --days invalid
+
+    [ "$status" -eq 64 ]
+    [[ "$output" == *'--days musi byt cele nezaporne cislo'* ]]
 }
 
 @test "JSON escaping produces valid escaped content" {
@@ -169,11 +190,11 @@ file_mode() {
 
     run dbtune_state_read
     [ "$status" -eq 65 ]
-    [[ "$output" == *"hardlink topologiu"* ]]
+    [[ "$output" == *"hard-link topology"* ]]
 
     run dbtune_state_write applied
     [ "$status" -eq 65 ]
-    [[ "$output" == *"hardlink topologiu"* ]]
+    [[ "$output" == *"hard-link topology"* ]]
     [ "$(cat "$(dbtune_state_file)")" = proposed ]
     [ "$(cat "$BATS_TEST_TMPDIR/state-alias")" = proposed ]
 }
@@ -220,15 +241,15 @@ file_mode() {
 @test "CLI help and version are always available" {
     run dbtune_main --help
     [ "$status" -eq 0 ]
-    [[ "$output" == *'Pouzitie: dbtune'* ]]
+    [[ "$output" == *'Usage: dbtune <command> [options]'* ]]
 
     run dbtune_main version
     [ "$status" -eq 0 ]
-    [ "$output" = 'dbtune 0.3.0' ]
+    [ "$output" = 'dbtune 0.4.0' ]
 
     run env DBTUNE_VERSION=9.9.9 "$BATS_TEST_DIRNAME/../../dist/dbtune" version
     [ "$status" -eq 0 ]
-    [ "$output" = 'dbtune 0.3.0' ]
+    [ "$output" = 'dbtune 0.4.0' ]
 }
 
 @test "internal tick always exits zero" {

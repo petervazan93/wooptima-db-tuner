@@ -1,85 +1,96 @@
 # dbtune rollout runbook
 
-## Predpoklady
+## Prerequisites
 
-- Spustajte ako `root` na podporovanej MariaDB 10.6, 10.11 alebo 11.x, nie na Galera/wsrep uzle. Pre `apply`, rollback a crash recovery musi byt dostupny `python3` s podporou `dir_fd` a Linux `renameat2`.
-- Pred pilotom overte obnovitelny databazovy backup, pristup do RunCloud panela a konzolu mimo webu. Lokalne cron zaznamy nie su dokaz uspesnej RunCloud zalohy.
-- Bezny `apply` ocakava stav `proposed`, aspon 288 validnych vzoriek a `proposal-manifest.tsv`, ktory cez `run_id`, `audit_hash`, `samples_hash`, `analysis_hash` a `proposal_hash` viaze proposal na jeden meraci cyklus.
-- Predvoleny ciel je `/etc/mysql/mariadb.conf.d/99-zz-tuning.cnf` a povoleny adresar `/etc/mysql/mariadb.conf.d`. Nestandardny `DBTUNE_CONFIG_TARGET` vyzaduje aj explicitny `DBTUNE_CONFIG_ALLOWED_DIR`; target musi byt priamy `.cnf` v tomto adresari. Apply, verify a rollback odmietaju target symlink, dangling symlink, viac ako jeden stabilny hardlink, symlink parent komponent, vymenu parent adresara pocas apply a existujuci subor mimo `root:root 0644` kontraktu. State a lifecycle lock subor musia mat na stabilnej ceste presne jeden hardlink. Managed config publication pouziva atomicky exchange alebo no-replace rename, preto target nema ani pocas crash hranice docasny druhy hardlink.
-- Apply je bez `--force` blokovany v lokalnom case 05:30-07:30 a vzdy blokovany pri Galera, beziacom mydumper procese alebo autoritativnom backup stave `missing`. Apply aj `--force` vyzaduju platny backup evidence artefakt alebo samostatne bezpecnostne potvrdenie na TTY.
+- Run as `root` on supported MariaDB 10.6, 10.11, or 11.x, not on a Galera/wsrep node. `apply`, rollback, and crash recovery require `python3` with `dir_fd` support and Linux `renameat2`.
+- Before the pilot, verify a restorable database backup, RunCloud panel access, and an out-of-band console. Local cron entries are not evidence of a successful RunCloud backup.
+- A normal `apply` expects state `proposed`, at least 288 valid samples, and `proposal-manifest.tsv`, which binds the proposal to one measurement cycle through `run_id`, `audit_hash`, `samples_hash`, `analysis_hash`, and `proposal_hash`.
+- The default target is `/etc/mysql/mariadb.conf.d/99-zz-tuning.cnf`, and the allowed directory is `/etc/mysql/mariadb.conf.d`. A nonstandard `DBTUNE_CONFIG_TARGET` also requires an explicit `DBTUNE_CONFIG_ALLOWED_DIR`; the target must be a direct `.cnf` file in that directory. Apply, verify, and rollback reject a target symlink, dangling symlink, more than one stable hard link, a symlinked parent component, replacement of the parent directory during apply, and an existing file outside the `root:root 0644` contract. The state file and lifecycle lock file must have exactly one hard link at a stable path. Managed configuration publication uses an atomic exchange or no-replace rename, so the target never has a temporary second hard link, including at crash boundaries.
+- Without `--force`, apply is blocked from 05:30 to 07:30 local time and is always blocked by Galera, a running mydumper process, or authoritative backup status `missing`. Both apply and `--force` require a valid backup-evidence artifact or a separate safety confirmation on a TTY.
+
+## Interface language and v0.4.0 artifacts
+
+- The executable and installer default to English when `DBTUNE_UI_LANG` is unset or empty. `DBTUNE_UI_LANG=en` selects English explicitly and `DBTUNE_UI_LANG=sk` selects Slovak. Any other non-empty value exits with status 64 before command dispatch. `LANG`, `LC_MESSAGES`, and other operating-system locale variables do not select the interface language.
+- Use `sudo dbtune audit` for the English default or `sudo DBTUNE_UI_LANG=sk dbtune audit` for Slovak. Commands, options, paths, keys, enums, schema versions, and exit statuses do not change with the selected language.
+- `collect start` stores the validated language as `ui_lang` in root-owned `collect.tsv`. The systemd `_tick` path first validates the state directory without reading persisted content. Only after that validation succeeds does it read and restore `ui_lang`, before subsequent lifecycle-lock, recovery, state, and automatic analyze/report diagnostics. Validation failures for an unsafe state path may therefore use the process-selected or default language; `_tick` never reads `collect.tsv` through an unvalidated path.
+- The flat JSON report schema is `fleet-v3`. It includes `report.language`, stable reason and warning IDs, and localized display text. Consumers must use stable IDs and machine keys rather than parse localized prose.
+- v0.4.0 `analysis.tsv` keeps eight columns but ends in `reason_id`. Report, propose, and apply reject the old `reason_sk` header without translating, rehashing, or mutating it. Start a new v0.4.0 audit and measurement cycle. Existing apply history and rollback recovery remain available.
+- Release preparation is pinned to `v0.4.0`, and the immutable artifact version is `0.4.0`; publishing the tag and release assets remains a separate release action.
 
 ## Pilot
 
-1. Vyberte 1-2 servery: jeden MariaDB 10.6 a jeden z rodiny 11.x. Nevyberajte najvacsi obchod ani server bez otestovaneho backupu.
-2. Dokoncite `audit`, zber, `analyze`, kontrolu reportu a `propose`. Rucne skontrolujte sizing poolu, `max_connections`, diskovu triedu a aplikacne nalezy.
-   Report musi mat pre kazdu aktivnu serverovu zmenu znamu current hodnotu. Chybajuca current, unsafe proposal alebo aliasovy duplikat ako `max_connections`/`max-connections` je chyba vstupu, nie polozka na preskocenie.
-3. Spustite `dbtune apply`. Nastroj overi samostatny backup evidence, vsetky aktivne nazvy z `[mysqld]` jednym dotazom do `information_schema.GLOBAL_VARIABLES`, ulozi baseline a atomicky zapise config ako `root:root 0644`.
-4. Precitajte `$STATE/apply/<timestamp>-<pid>/ROLLBACK.txt` este pred restartom. Obsahuje doslovne prikazy a funguje bez dbtune aj bez funkcnej databazy.
-5. Bez `--restart` vykonajte restart cez RunCloud `Services -> MariaDB -> Restart`. `--restart` pouzivajte iba na pilotne skriptovanie; vola `systemctl restart mariadb`, kontroluje active stav a pri chybe obnovi config.
-6. Pockajte priblizne 5 minut a spustite `dbtune verify --post`. Verify najprv overi regularny nesymlinkovy target, `root:root 0644` a hash presne nasadeneho snapshotu. Potom kontroluje efektivne hodnoty a rast `Innodb_buffer_pool_wait_free`, `Innodb_log_waits`, `Aborted_connects` oproti reset-aware baseline, rast swapu a kriticky nizku dostupnu RAM. Zlyhanie je dovod na rollback.
-7. Po 24 hodinach a aspon jednej realnej spicke spustite `dbtune verify --24h`. Vystup porovna status a pamat s baseline; reset lifetime countera je oznaceny ako `reset:<hodnota>`.
+1. Select 1-2 servers: one MariaDB 10.6 and one from the 11.x family. Do not choose the largest store or a server without a tested backup.
+2. Complete `audit`, collection, `analyze`, report review, and `propose`. Manually review pool sizing, `max_connections`, storage class, and application findings.
+   The report must have a known current value for every active server change. A missing current value, unsafe proposal, or alias duplicate such as `max_connections`/`max-connections` is an input error, not an item to skip.
+3. Run `dbtune apply`. The tool verifies independent backup evidence, checks every active name from `[mysqld]` in one query against `information_schema.GLOBAL_VARIABLES`, stores the baseline, and atomically writes the configuration as `root:root 0644`.
+4. Read `$STATE/apply/<timestamp>-<pid>/ROLLBACK.txt` before restart. It contains literal commands and works without dbtune and without a working database.
+5. Without `--restart`, restart through RunCloud at `Services -> MariaDB -> Restart`. Use `--restart` only for pilot scripting; it invokes `systemctl restart mariadb`, checks the active state, and restores the configuration on failure.
+6. Wait approximately 5 minutes and run `dbtune verify --post`. Verify first checks that the target is a regular nonsymlink file with `root:root 0644` and the hash of the exact deployed snapshot. It then checks effective values and growth in `Innodb_buffer_pool_wait_free`, `Innodb_log_waits`, and `Aborted_connects` against a reset-aware baseline, swap growth, and critically low available RAM. A failure is a reason to roll back.
+7. After 24 hours and at least one real peak, run `dbtune verify --24h`. The output compares status and memory with the baseline; a reset lifetime counter is marked as `reset:<value>`.
 
-Prvy start moze pri zmene `innodb_log_file_size` trvat dlhsie. Zvysene `Innodb_buffer_pool_reads` pocas prveho warm-up okna samo osebe nie je regresia.
+The first start may take longer after changing `innodb_log_file_size`. Increased `Innodb_buffer_pool_reads` during the first warm-up window is not, by itself, a regression.
 
 ## Run semantics
 
-- Kazdy uspesny `dbtune audit` vytvori novy `run_id` a `audit_hash`. Audit nemeni MariaDB ani systemovu konfiguraciu, ale publikuje novy meraci cyklus; samostatny prepinac `--new-run` sa nepouziva.
-- Povinne autoritativne sekcie su `mariadb`, `hardware`, `applications` a `security`. `PASS` znamena kompletne sekcie bez nalezov, `FINDINGS` kompletne sekcie s nalezmi, `UNKNOWN` ciastocne alebo zlyhane povinne dokazy pri zachovani casti auditu a `ERROR` zlyhanie vsetkych povinnych sekcii. Text, audit JSON aj report uvadzaju zlyhane/ciastocne sekcie a ovplyvnene domeny odporucani.
-- MariaDB evidence schema je jedinym zdrojom pre audit query, proposal current kluce, datove domeny a verziove gate. Pred pokracovanim musia byt `audit.section.mariadb.missing_evidence`, `invalid_evidence` a `conflicting_evidence` rovne `none`; `optional_evidence` vysvetluje verziovo nepovinny vstup. Diagnostika nikdy neobsahuje odmietnutu hodnotu.
-- Klasifikovany audit vracia `0` pre `PASS`/`FINDINGS`, `2` pre `UNKNOWN` a `1` pre `ERROR`. Usage, validacne, dependency a ine technicke zlyhania mozu pouzit existujuce exit kody `64+`; automatizacia ich nesmie interpretovat ako auditnu klasifikaciu. Pri klasifikovanom `UNKNOWN`/`ERROR` zostanu diagnosticke artefakty publikovane, ale meraci cyklus nepovazujte za autoritativny a nepokracujte automaticky.
-- Audit pocas stavu `collecting` je odmietnuty, aby sa nestratila povodna slow-log recovery konfiguracia. Najprv pouzite `dbtune collect stop`.
-- Pri opakovanom audite sa predchadzajuce audit, collect, analysis, report a proposal artefakty skopiruju do `$STATE/runs/<run_id>/`. Aktivne downstream artefakty sa zneplatnia a stav prejde na `audited`.
-- `$STATE/apply/` a `$STATE/apply/current` sa novym auditom nemenia. `dbtune status` zobrazi `rollback_available: ano` a rollback zostava dostupny aj po zacati noveho meracieho cyklu; v aktivnom stave `collecting` je z bezpecnostnych dovodov potrebne najprv zastavit collect.
-- `analysis-manifest.tsv` musi presne sediet s aktualnym audit runom/hashom, `samples.tsv` a `analysis.tsv`. Report a proposal tento kontrakt znovu overia. Bezny apply overi aj proposal manifest a nasadi sukromny snapshot presne s overenym `proposal_hash`.
-- `proposal-manifest.tsv` navyse viaze `proposal_count` a `proposal_records_hash` na kanonicky zoznam. Apply porovna tento zoznam s analysis aj skutocnymi CNF klucmi a hodnotami.
-- Mutujuce lifecycle prikazy cakaju na spolocny exkluzivny lock. `_tick` je neblokujuci: pri obsadenom lifecycle locku zapise skip event a skonci uspesne, takze systemd timer nevytvara deadlock ani failed unit.
-- `samples.tsv` od noveho collectoru pridava za povodnych 17 stlpcov `qcache_queries_delta`, `interval_seconds` a `sample_status`. Iba `sample_status=ok` bez `restart_flag` sa rata medzi validne vzorky. `degraded_interval` znamena neplatny alebo prilis dlhy monotónny interval a nesmie vstupit do rules/report metrík; query-cache percentile navyse pouziva iba okna s `qcache_queries_delta > 0`.
+- Every successful `dbtune audit` creates a new `run_id` and `audit_hash`. Audit does not change MariaDB or system configuration, but it publishes a new measurement cycle; there is no separate `--new-run` option.
+- Required authoritative sections are `mariadb`, `hardware`, `applications`, and `security`. `PASS` means complete sections without findings, `FINDINGS` means complete sections with findings, `UNKNOWN` means partial or failed required evidence while preserving the available audit, and `ERROR` means all required sections failed. Terminal text, audit JSON, and the report identify failed/partial sections and affected recommendation domains.
+- The MariaDB evidence schema is the single source for the audit query, proposal current keys, data domains, and version gates. Before continuing, `audit.section.mariadb.missing_evidence`, `invalid_evidence`, and `conflicting_evidence` must equal `none`; `optional_evidence` explains version-specific optional input. Diagnostics never contain the rejected value.
+- A classified audit returns `0` for `PASS`/`FINDINGS`, `2` for `UNKNOWN`, and `1` for `ERROR`. Usage, validation, dependency, and other technical failures may use existing exit statuses `64+`; automation must not interpret those as audit classifications. Diagnostic artifacts remain published for classified `UNKNOWN`/`ERROR`, but do not treat the measurement cycle as authoritative or continue automatically.
+- Audit is rejected while state is `collecting` so that the original slow-log recovery configuration is not lost. Run `dbtune collect stop` first.
+- On a repeated audit, previous audit, collect, analysis, report, and proposal artifacts are copied to `$STATE/runs/<run_id>/`. Active downstream artifacts are invalidated and state changes to `audited`.
+- `$STATE/apply/` and `$STATE/apply/current` are unchanged by a new audit. `dbtune status` displays `rollback_available: true`, and rollback remains available after a new measurement cycle starts; while state is `collecting`, stop collection first for safety.
+- `analysis-manifest.tsv` must match the current audit run/hash, `samples.tsv`, and `analysis.tsv` exactly. Report and proposal verify this contract again. Normal apply also verifies the proposal manifest and deploys a private snapshot with the exact verified `proposal_hash`.
+- `proposal-manifest.tsv` additionally binds `proposal_count` and `proposal_records_hash` to a canonical list. Apply compares the list with both analysis and the actual CNF keys and values.
+- Mutating lifecycle commands wait for a shared exclusive lock. `_tick` is nonblocking: when the lifecycle lock is busy, it records a skip event and exits successfully, so the systemd timer creates neither a deadlock nor a failed unit.
+- New collector `samples.tsv` files append `qcache_queries_delta`, `interval_seconds`, and `sample_status` to the original 17 columns. Only `sample_status=ok` without `restart_flag` counts as a valid sample. `degraded_interval` means an invalid or excessively long monotonic interval and cannot enter rules/report metrics; the query-cache percentile additionally uses only windows with `qcache_queries_delta > 0`.
 
 ## Force
 
-`--force` obchadza iba chybanie alebo zmenu measurement/analysis manifestu a casove okno. Stale vyzaduje rucne pripraveny proposal a stav `audited|analyzed|proposed`; neobchadza live kontrolu premennych, Galera, mydumper, backup evidence, zapis, validaciu ani rollback ochrany.
+`--force` bypasses only a missing or changed measurement/analysis manifest and the time window. It still requires a manually prepared proposal and state `audited|analyzed|proposed`; it does not bypass live variable validation, Galera, mydumper, backup evidence, writes, validation, or rollback protections.
 
-Force funguje iba na TTY a vyzaduje presne zadat:
-
-```text
-APLIKUJ BEZ MERANIA
-```
-
-Nezavisle od force musi `$STATE/backup-evidence.tsv` obsahovat `schema`, `status`, `source`, `checked_at` a `last_success`, byt regularny nesymlinkovy subor vlastneny aktualnym root procesom s mode `0600` alebo `0400`. `verified` vyzaduje `source` a platny UTC cas posledneho uspesneho behu, ktory nie je v buducnosti ani starsi ako `DBTUNE_MAX_BACKUP_AGE_SECONDS` (predvolene 86400 sekund, vratane presnej hranice). Existujuci neplatny, buduci alebo expirovany artefakt blokuje apply a chyba uvadza vyhodnoteny `age_seconds` a `max_age_seconds`. `missing` znamena potvrdenu absenciu a apply blokuje. Pri chybajucom alebo platnom `unknown` artefakte je potrebna druha samostatna TTY fraza:
+Force works only on a TTY and requires the exact phrase for the active language:
 
 ```text
-POTVRDZUJEM OBNOVITELNU ZALOHU
+en: APPLY WITHOUT MEASUREMENTS
+sk: APLIKUJ BEZ MERANIA
 ```
 
-Pri skutocne chybajucom alebo neplatnom merani dostanu apply historia, `apply-report.md`, existujuci `report.md` a `events.log` oznacenie `BEZ MERANIA`. Force pouzity iba na casove okno sa zaznamena v `apply_completed`, ale report nespravne neoznaci ako nemerany.
+Independent of force, `$STATE/backup-evidence.tsv` must contain `schema`, `status`, `source`, `checked_at`, and `last_success`, be a regular nonsymlink file owned by the current root process, and have mode `0600` or `0400`. `verified` requires `source` and a valid UTC time for the last successful run that is neither in the future nor older than `DBTUNE_MAX_BACKUP_AGE_SECONDS` (default 86400 seconds, including the exact boundary). An existing invalid, future, or expired artifact blocks apply, and the error reports the evaluated `age_seconds` and `max_age_seconds`. `missing` means confirmed absence and blocks apply. A missing artifact or a valid artifact with status `unknown` requires a second, separate TTY phrase for the active language:
 
-## Staging a flotila
+```text
+en: I CONFIRM A RESTORABLE BACKUP
+sk: POTVRDZUJEM OBNOVITELNU ZALOHU
+```
 
-1. Po uspesnom pilote nasadte na 5 reprezentativnych serverov, vzdy jednotlivo a mimo backupov.
-2. Sledujte ich najmenej 24 hodin. Porovnajte checkout chyby, DB CPU/IO, swap, connection peak, wait-free a log waits.
-3. Zvysok flotily robte v davkach najviac priblizne 10 serverov. Dalsiu davku nezacinajte pred `verify --post` predchadzajucej davky.
-4. Zachovajte manualny RunCloud restart. Stav kontrolujte cez `dbtune status`; prikaz necita SQL a je pouzitelny aj pri vypadku DB.
+The process displays and compares the selected phrase byte-for-byte, without case folding or regular expressions. Safety events store stable confirmation IDs and `ui_lang`, not translated phrases. When measurement is actually missing or invalid, apply history, `apply-report.md`, an existing `report.md`, and `events.log` receive the localized `WITHOUT MEASUREMENTS`/`BEZ MERANIA` marker. Force used only for the time window is recorded in `apply_completed`, but the report is not incorrectly marked as unmeasured.
 
-Per-app action kroky z reportu su copy-paste read-only diagnostika. Pred spustenim skontrolujte `target` (app, path, database a prefix) a shell quoting. dbtune ich automaticky nespusta; cleanup, migraciu, `DELETE`, `DROP` ani `UPDATE` nevykonavajte bez samostatneho review, overenej obnovitelnej zalohy a maintenance planu. Top autoload sekcia obsahuje iba nazvy a velkosti. Backup korelacia pri najhorsich oknach porovnava dostupnu evidenciu, ale sama nepotvrdzuje kauzalitu.
+## Staging and fleet
+
+1. After a successful pilot, deploy to 5 representative servers, one at a time and outside backup windows.
+2. Observe them for at least 24 hours. Compare checkout errors, DB CPU/IO, swap, connection peak, wait-free, and log waits.
+3. Process the rest of the fleet in batches of at most approximately 10 servers. Do not start the next batch before `verify --post` for the previous batch.
+4. Keep the manual RunCloud restart. Check state with `dbtune status`; the command does not query SQL and works during a database outage.
+
+Per-app action steps in the report are copy-paste read-only diagnostics. Before running them, check the `target` (app, path, database, and prefix) and shell quoting. dbtune never runs them automatically; do not perform cleanup, migration, `DELETE`, `DROP`, or `UPDATE` without separate review, a verified restorable backup, and a maintenance plan. The top-autoload section contains only names and sizes. Backup correlation for the worst windows compares available evidence but does not establish causality by itself.
 
 ## Rollback
 
-Preferovany postup:
+Preferred procedure:
 
 ```bash
 sudo dbtune rollback
 ```
 
-Rollback pri povodne absent targete presunie nasadeny regularny subor do apply historie a ponecha target absent. Pri povodnom regularnom targete najprv zachova nasadeny subor v historii a povodny snapshot publikuje atomicky; symlinky neobnovuje ani nenasleduje. Nepouziva SQL. Ak MariaDB nebezi, zavola `systemctl start mariadb`; ak bezi, runtime hodnoty sa bez restartu nezmenia, preto vytvori `RESTART_REQUIRED` a vyziada manualny restart cez RunCloud panel. `dbtune status` tento pending restart zobrazi.
+When the target was originally absent, rollback moves the deployed regular file into apply history and leaves the target absent. When the original target was regular, it first preserves the deployed file in history and atomically publishes the original snapshot; it neither restores nor follows symlinks. It does not use SQL. If MariaDB is not running, it invokes `systemctl start mariadb`; if MariaDB is running, runtime values do not change without a restart, so it creates `RESTART_REQUIRED` and requests a manual restart through the RunCloud panel. `dbtune status` displays this pending restart.
 
-Ak filesystem restore zlyha, `apply/current` ostane na problemovej historii, stav bude `recovery_required` alebo `rollback_failed` a `dbtune status` vypise `sudo dbtune rollback` aj cestu k `ROLLBACK.txt`. Pointer ani predchadzajuci state sa po zlyhanom apply nerestartuju naslepo; obnovia sa az po potvrdenom restore.
+If filesystem restoration fails, `apply/current` remains on the problematic history, state becomes `recovery_required` or `rollback_failed`, and `dbtune status` prints both `sudo dbtune rollback` and the path to `ROLLBACK.txt`. Neither the pointer nor previous state is blindly reset after a failed apply; they are restored only after a confirmed restore.
 
-Ak dbtune nie je dostupny, vykonajte riadky z posledneho `$STATE/apply/<timestamp>-<pid>/ROLLBACK.txt`. Neupravujte `runcloud.cnf`.
+If dbtune is unavailable, run the lines from the latest `$STATE/apply/<timestamp>-<pid>/ROLLBACK.txt`. Do not edit `runcloud.cnf`.
 
-## Artefakty a limity
+## Artifacts and limits
 
-- Apply historia sa nikdy neprepisuje. Obsahuje `manifest.tsv` s nemennym `cycle_id`, run/audit/proposal a backup evidence hashmi aj povodom config backupu, nemenny nasadeny `proposed.cnf`, snapshot backup evidence alebo zaznam interaktivneho potvrdenia, volitelny `original.cnf`, baseline, validacne/rollback artefakty a `ROLLBACK.txt`.
-- Rollback pred prvou zmenou targetu durable publikuje `rollback-intent.tsv`. Po preruseni nasledujuci zamknuty lifecycle prikaz idempotentne dokonci restore, `ROLLBACK_COMPLETED.tsv`, `apply/last-rollback`, `apply/current` a stav `rolled_back`; journal odstrani az po synchronizacii vsetkych krokov. Pri obnove configu z predchadzajuceho apply cyklu ukazuje `apply/current` na presne tento cyklus, zatial co `apply/last-rollback` a completion metadata zachovavaju rollbacknuty cyklus, pouzity backup a hash.
-- Prvy uspesny `verify --post` ulozi `post-status.tsv` ako post-restart baseline. Dalsi `verify --post` aj `verify --24h` hodnotia health lifetime countery voci tejto baseline; `--24h` bez uspesneho `--post` zlyha. Pri poklese uptime alebo countera sa pouzije reset baseline nula. Nezmenena nenulova hodnota preto prejde, rast zlyha a reset na nulu prejde. Nenahradza to kratke 60-sekundove delty collectora ani aplikacny monitoring.
-- Validacia capability-probne `mariadbd --validate-config`; na verzii bez tejto volby pouzije parser vystupu `mariadbd --help --verbose`. Dokumentovane lock/Aria/InnoDB init chyby beziaceho servera toleruje, ostatne `[ERROR]`, unknown, invalid a value chyby odmietne.
-- Docker integration spusta realny `dist/dbtune` na MariaDB 10.6 aj 11.4 cez audit, kratky fake-timer zber, analyze, report, propose, apply, restart kontajnera a `verify --post`. Systemd-in-container nahradza iba minimalny stub; realny systemd timer a produkcne data musi potvrdit pilot.
+- Apply history is never overwritten. It contains `manifest.tsv` with immutable `cycle_id`, run/audit/proposal and backup-evidence hashes, and configuration-backup provenance; an immutable deployed `proposed.cnf`; a backup-evidence snapshot or interactive-confirmation record; optional `original.cnf`; baseline, validation, and rollback artifacts; and `ROLLBACK.txt`.
+- Before the first target change, rollback durably publishes `rollback-intent.tsv`. After interruption, the next locked lifecycle command idempotently completes restore, `ROLLBACK_COMPLETED.tsv`, `apply/last-rollback`, `apply/current`, and state `rolled_back`; it removes the journal only after synchronizing every step. When restoring configuration from an earlier apply cycle, `apply/current` points to that exact cycle, while `apply/last-rollback` and completion metadata preserve the rolled-back cycle, backup used, and hash.
+- The first successful `verify --post` stores `post-status.tsv` as the post-restart baseline. Later `verify --post` and `verify --24h` runs evaluate health lifetime counters against this baseline; `--24h` fails without a successful `--post`. If uptime or a counter decreases, the reset baseline is zero. An unchanged nonzero value therefore passes, growth fails, and reset to zero passes. This does not replace the collector's short 60-second deltas or application monitoring.
+- Validation capability-probes `mariadbd --validate-config`; on a version without that option, it parses `mariadbd --help --verbose`. It tolerates documented lock/Aria/InnoDB initialization errors from the running server and rejects other `[ERROR]`, unknown, invalid, and value errors.
+- Docker integration runs the real `dist/dbtune` against MariaDB 10.6 and 11.4 through audit, short fake-timer collection, analyze, report, propose, apply, container restart, and `verify --post`. Only systemd-in-container is replaced by a minimal stub; the pilot must validate the real systemd timer and production data.

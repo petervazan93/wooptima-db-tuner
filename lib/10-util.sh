@@ -16,7 +16,7 @@ dbtune_auth_method_file() {
 
 dbtune_path() {
     if (($# != 1)) || [[ -z ${1:-} || $1 == */* || $1 == .* ]]; then
-        dbtune_log error "Neplatny nazov state suboru: ${1:-<prazdny>}"
+        dbtune_log error "$(dbtune_printf core_invalid_state_file_name "${1:-$(dbtune_msg core_value_empty)}")"
         return 64
     fi
     printf '%s/%s\n' "$DBTUNE_STATE_DIR" "$1"
@@ -64,16 +64,16 @@ dbtune_file_links() {
 
 dbtune_validate_single_link_file() {
     local file=${1:-}
-    local label=${2:-Spravovany subor}
+    local label=${2:-$(dbtune_msg core_label_managed_file)}
     local links
 
     if [[ -L $file || ! -f $file ]]; then
-        dbtune_log error "$label nie je bezpecny regularny subor: $file"
+        dbtune_log error "$(dbtune_printf core_unsafe_regular_file "$label" "$file")"
         return 65
     fi
     links=$(dbtune_file_links "$file") || return 1
     if [[ $links != 1 ]]; then
-        dbtune_log error "$label nema ocakavanu hardlink topologiu: $file (links=$links, ocakavane=1)"
+        dbtune_log error "$(dbtune_printf core_unexpected_hardlink_topology "$label" "$file" "$links")"
         return 65
     fi
 }
@@ -89,7 +89,7 @@ dbtune_validate_state_parent_components() {
     local -a components
 
     dbtune_path_is_canonical_absolute "$directory" || {
-        dbtune_log error "State adresar musi byt kanonicka absolutna cesta: ${directory:-<prazdny>}"
+        dbtune_log error "$(dbtune_printf core_state_dir_canonical_absolute "${directory:-$(dbtune_msg core_value_empty)}")"
         return 65
     }
     [[ $expected_uid =~ ^[0-9]+$ ]] || return 64
@@ -98,17 +98,17 @@ dbtune_validate_state_parent_components() {
         [[ -n $component ]] || continue
         current+="/$component"
         if [[ -L $current || ! -d $current ]]; then
-            dbtune_log error "State parent komponent nie je bezpecny realny adresar: $current"
+            dbtune_log error "$(dbtune_printf core_state_parent_unsafe "$current")"
             return 65
         fi
         read -r uid gid mode < <(dbtune_file_stat "$current") || return 1
         if [[ ! $uid =~ ^[0-9]+$ || ! $mode =~ ^[0-7]{3,4}$ ||
             ($uid != 0 && $uid != "$expected_uid") ]]; then
-            dbtune_log error "State parent komponent ma nedoveryhodne vlastnictvo alebo mode: $current ($uid:$gid $mode)"
+            dbtune_log error "$(dbtune_printf core_state_parent_untrusted_metadata "$current" "$uid" "$gid" "$mode")"
             return 65
         fi
         if (((8#$mode & 0022) != 0 && ((8#$mode & 01000) == 0 || uid != 0))); then
-            dbtune_log error "State parent komponent je nedoveryhodne group/world writable: $current ($uid:$gid $mode)"
+            dbtune_log error "$(dbtune_printf core_state_parent_untrusted_writable "$current" "$uid" "$gid" "$mode")"
             return 65
         fi
     done
@@ -122,21 +122,21 @@ dbtune_validate_state_dir() {
 
     dbtune_validate_state_parent_components "$DBTUNE_STATE_DIR" "$expected_uid" || return
     if [[ -L $DBTUNE_STATE_DIR || ! -d $DBTUNE_STATE_DIR ]]; then
-        dbtune_log error "State cesta nie je bezpecny realny adresar: $DBTUNE_STATE_DIR"
+        dbtune_log error "$(dbtune_printf core_state_path_unsafe "$DBTUNE_STATE_DIR")"
         return 65
     fi
     read -r uid gid mode < <(dbtune_file_stat "$DBTUNE_STATE_DIR") || return 1
     if [[ $uid != "$expected_uid" ]]; then
-        dbtune_log error "State adresar nevlastni ocakavana privilegovana identita: $DBTUNE_STATE_DIR ($uid:$gid)"
+        dbtune_log error "$(dbtune_printf core_state_dir_wrong_owner "$DBTUNE_STATE_DIR" "$uid" "$gid")"
         return 65
     fi
     if [[ -n $expected_mode && $mode != "$expected_mode" ]]; then
-        dbtune_log error "State adresar nema ocakavany mode: $DBTUNE_STATE_DIR ($mode)"
+        dbtune_log error "$(dbtune_printf core_state_dir_wrong_mode "$DBTUNE_STATE_DIR" "$mode")"
         return 65
     fi
     identity=$(dbtune_file_identity "$DBTUNE_STATE_DIR") || return 1
     if [[ -n $expected_identity && $identity != "$expected_identity" ]]; then
-        dbtune_log error "State adresar bol pocas validacie vymeneny: $DBTUNE_STATE_DIR"
+        dbtune_log error "$(dbtune_printf core_state_dir_replaced "$DBTUNE_STATE_DIR")"
         return 65
     fi
 }
@@ -148,7 +148,7 @@ dbtune_init_state_dir() {
     [[ $expected_uid =~ ^[0-9]+$ ]] || return 64
     dbtune_validate_state_parent_components "$DBTUNE_STATE_DIR" "$expected_uid" || return
     if [[ -L $DBTUNE_STATE_DIR ]]; then
-        dbtune_log error "State cesta nesmie byt symlink: $DBTUNE_STATE_DIR"
+        dbtune_log error "$(dbtune_printf core_state_path_symlink "$DBTUNE_STATE_DIR")"
         return 65
     elif [[ -e $DBTUNE_STATE_DIR ]]; then
         dbtune_validate_state_dir "$expected_uid" "" 700 || return
@@ -453,15 +453,15 @@ dbtune_audit_normalize() {
         canonical=$(dbtune_audit_key_canonical "$raw_key") || return
         [[ -n $canonical ]] || continue
         if [[ ! $canonical =~ ^[a-z0-9][a-z0-9._-]*$ ]]; then
-            printf 'dbtune: neplatny audit key na riadku %s\n' "$line" >&2
+            dbtune_eprintf core_invalid_audit_key "$line"
             return 65
         fi
         if [[ -n ${seen[$canonical]+x} ]]; then
             if [[ ${values[$canonical]} != "$value" ]]; then
                 diagnostic=$canonical
                 dbtune_is_sensitive_key "$raw_key" && diagnostic='[REDACTED]'
-                printf 'dbtune: konfliktna duplicitna audit hodnota: key=%s; first_line=%s; duplicate_line=%s\n' \
-                    "$diagnostic" "${first_lines[$canonical]}" "$line" >&2
+                dbtune_eprintf core_conflicting_audit_value \
+                    "$diagnostic" "${first_lines[$canonical]}" "$line"
                 return 65
             fi
             continue
@@ -516,11 +516,11 @@ dbtune_atomic_write() {
     local directory base temporary
 
     [[ -n $target ]] || {
-        dbtune_log error "Atomicky zapis vyzaduje cielovu cestu"
+        dbtune_log error "$(dbtune_msg core_atomic_target_required)"
         return 64
     }
     [[ $mode =~ ^0?[0-7]{3}$ ]] || {
-        dbtune_log error "Neplatny mode pre atomicky zapis: $mode"
+        dbtune_log error "$(dbtune_printf core_atomic_mode_invalid "$mode")"
         return 64
     }
 
@@ -550,15 +550,15 @@ dbtune_require_uint() {
     local maximum=${4:-2147483647}
 
     if ! dbtune_is_uint "$value"; then
-        dbtune_log error "$name musi byt cele nezaporne cislo"
+        dbtune_log error "$(dbtune_printf core_uint_required "$name")"
         return 64
     fi
     if ! dbtune_is_uint "$minimum" || ! dbtune_is_uint "$maximum" || ((minimum > maximum)); then
-        dbtune_log error "Interny rozsah pre $name je neplatny"
+        dbtune_log error "$(dbtune_printf core_uint_internal_range "$name")"
         return 70
     fi
     if ((value < minimum || value > maximum)); then
-        dbtune_log error "$name musi byt v rozsahu $minimum az $maximum"
+        dbtune_log error "$(dbtune_printf core_uint_range "$name" "$minimum" "$maximum")"
         return 64
     fi
 }
@@ -596,7 +596,7 @@ dbtune_json_emit() {
     local key value
 
     if (($# % 2 != 0)); then
-        dbtune_log error "JSON emitter ocakava dvojice kluc hodnota"
+        dbtune_log error "$(dbtune_msg core_json_pairs_required)"
         return 64
     fi
     while (($#)); do
@@ -767,7 +767,7 @@ dbtune_sha256_file() {
     elif command -v shasum >/dev/null 2>&1; then
         shasum -a 256 "$file" | awk '{print $1}'
     else
-        dbtune_log error "Chyba sha256sum aj shasum"
+        dbtune_log error "$(dbtune_msg core_hash_tool_missing)"
         return 69
     fi
 }
@@ -778,7 +778,7 @@ dbtune_sha256_stream() {
     elif command -v shasum >/dev/null 2>&1; then
         shasum -a 256 | awk '{print $1}'
     else
-        dbtune_log error "Chyba sha256sum aj shasum"
+        dbtune_log error "$(dbtune_msg core_hash_tool_missing)"
         return 69
     fi
 }
@@ -979,7 +979,7 @@ dbtune_provenance_validate_audit() {
     apps=$(dbtune_path apps.tsv) || return
     databases=$(dbtune_path databases.tsv) || return
     [[ -r $manifest ]] || {
-        dbtune_log error "Chyba audit provenance manifest: $manifest"
+        dbtune_log error "$(dbtune_printf core_audit_manifest_missing "$manifest")"
         return 66
     }
     run_id=$(dbtune_manifest_value "$manifest" run_id) || return 65
@@ -988,7 +988,7 @@ dbtune_provenance_validate_audit() {
         actual=$(dbtune_manifest_value "$manifest" "$expected") || return 65
         [[ $actual =~ ^[0-9a-f]{64}$ && -r $DBTUNE_STATE_DIR/$expected ]] || return 65
         if [[ $(dbtune_sha256_file "$DBTUNE_STATE_DIR/$expected") != "$actual" ]]; then
-            dbtune_log error "Audit artefakt $expected nezodpoveda runu $run_id"
+            dbtune_log error "$(dbtune_printf core_audit_artifact_mismatch "$expected" "$run_id")"
             return 65
         fi
     done
@@ -998,7 +998,7 @@ dbtune_provenance_validate_audit() {
     audit_hash=$(dbtune_provenance_audit_hash "$audit_file_hash" "$apps_hash" "$databases_hash") || return
     expected=$(dbtune_manifest_value "$manifest" audit_hash) || return 65
     if [[ $expected != "$audit_hash" ]]; then
-        dbtune_log error "Audit hash nezodpoveda artefaktom runu $run_id"
+        dbtune_log error "$(dbtune_printf core_audit_hash_mismatch "$run_id")"
         return 65
     fi
 }
@@ -1138,20 +1138,20 @@ dbtune_provenance_validate_analysis() {
     dbsize=$(dbtune_path dbsize.tsv) || return
     analysis=$(dbtune_path analysis.tsv) || return
     [[ -r $analysis_manifest && -r $samples && -r $dbsize && -r $analysis ]] || {
-        dbtune_log error "Chyba analysis provenance alebo jeho vstup"
+        dbtune_log error "$(dbtune_msg core_analysis_input_missing)"
         return 66
     }
     for key in run_id audit_hash; do
         audit_value=$(dbtune_manifest_value "$audit_manifest" "$key") || return 65
         analysis_value=$(dbtune_manifest_value "$analysis_manifest" "$key") || return 65
         if [[ $analysis_value != "$audit_value" ]]; then
-            dbtune_log error "Analysis patri inemu audit runu ($key)"
+            dbtune_log error "$(dbtune_printf core_analysis_other_run "$key")"
             return 65
         fi
     done
     dbsize_input=$(dbtune_manifest_value "$analysis_manifest" dbsize_input) || return 65
     [[ $dbsize_input == "$dbsize" ]] || {
-        dbtune_log error "Analysis pouzila iny dbsize vstup"
+        dbtune_log error "$(dbtune_msg core_analysis_other_dbsize)"
         return 65
     }
     for key in samples_hash dbsize_hash analysis_hash; do
@@ -1165,7 +1165,7 @@ dbtune_provenance_validate_analysis() {
             actual=$(dbtune_sha256_file "$analysis") || return
         fi
         if [[ $actual != "$analysis_value" ]]; then
-            dbtune_log error "Stale alebo zmeneny analysis vstup: $key"
+            dbtune_log error "$(dbtune_printf core_analysis_stale_input "$key")"
             return 65
         fi
     done
@@ -1176,7 +1176,7 @@ dbtune_provenance_validate_analysis() {
     actual=$(awk -F '\t' '$1 ~ /^dbsize_selected_row\.[0-9][0-9][0-9][0-9][0-9][0-9]$/ {sub(/^[^\t]*\t/, ""); print}' \
         "$analysis_manifest" | dbtune_sha256_stream) || return
     [[ $actual == "$selected_hash" ]] || {
-        dbtune_log error "Analysis dbsize baseline riadky nezodpovedaju vstupu"
+        dbtune_log error "$(dbtune_msg core_analysis_dbsize_rows_mismatch)"
         return 65
     }
     selected_count=$(dbtune_manifest_value "$analysis_manifest" dbsize_selected_rows) || return 65
@@ -1193,7 +1193,7 @@ dbtune_provenance_validate_analysis() {
         "$(dbtune_manifest_value "$analysis_manifest" analysis_hash)") || return
     analysis_value=$(dbtune_manifest_value "$analysis_manifest" analysis_fingerprint) || return 65
     [[ $analysis_value =~ ^[0-9a-f]{64}$ && $analysis_value == "$analysis_fingerprint" ]] || {
-        dbtune_log error "Analysis fingerprint nezodpoveda provenance"
+        dbtune_log error "$(dbtune_msg core_analysis_fingerprint_mismatch)"
         return 65
     }
 }
@@ -1249,20 +1249,20 @@ dbtune_lifecycle_lock_file() {
 
 dbtune_validate_state_lock_path() {
     local lock_file=${1:-}
-    local label=${2:-State lock}
+    local label=${2:-$(dbtune_msg core_label_state_lock)}
     local directory base
 
     directory=${lock_file%/*}
     base=${lock_file##*/}
     if [[ $directory != "$DBTUNE_STATE_DIR" || ! $base =~ ^[A-Za-z0-9.][A-Za-z0-9._-]*[.]lock$ ]]; then
-        dbtune_log error "$label musi byt priamy .lock subor v state adresari: $lock_file"
+        dbtune_log error "$(dbtune_printf core_lock_path_invalid "$label" "$lock_file")"
         return 65
     fi
 }
 
 dbtune_validate_state_lock() {
     local lock_file=${1:-}
-    local label=${2:-State lock}
+    local label=${2:-$(dbtune_msg core_label_state_lock)}
     local expected_identity=${3:-}
     local expected_links=${4:-1}
     local uid gid mode links identity expected_uid
@@ -1271,18 +1271,18 @@ dbtune_validate_state_lock() {
     dbtune_validate_state_lock_path "$lock_file" "$label" || return
     expected_uid=$(dbtune_state_expected_uid) || return 1
     if [[ -L $lock_file || ! -f $lock_file ]]; then
-        dbtune_log error "$label nie je bezpecny regularny subor: $lock_file"
+        dbtune_log error "$(dbtune_printf core_unsafe_regular_file "$label" "$lock_file")"
         return 65
     fi
     read -r uid gid mode < <(dbtune_file_stat "$lock_file") || return 1
     links=$(dbtune_file_links "$lock_file") || return 1
     identity=$(dbtune_file_identity "$lock_file") || return 1
     if [[ $uid != "$expected_uid" || $mode != 600 || $links != "$expected_links" ]]; then
-        dbtune_log error "$label ma neocakavane vlastnictvo, mode alebo topologiu: $lock_file ($uid:$gid $mode links=$links, ocakavane=$expected_links)"
+        dbtune_log error "$(dbtune_printf core_lock_metadata_invalid "$label" "$lock_file" "$uid" "$gid" "$mode" "$links" "$expected_links")"
         return 65
     fi
     if [[ -n $expected_identity && $identity != "$expected_identity" ]]; then
-        dbtune_log error "$label bol pocas otvorenia vymeneny: $lock_file"
+        dbtune_log error "$(dbtune_printf core_lock_replaced "$label" "$lock_file")"
         return 65
     fi
     DBTUNE_STATE_LOCK_IDENTITY=$identity
@@ -1291,7 +1291,7 @@ dbtune_validate_state_lock() {
 dbtune_open_state_lock() {
     local output_variable=${1:-}
     local lock_file=${2:-}
-    local label=${3:-State lock}
+    local label=${3:-$(dbtune_msg core_label_state_lock)}
     local temporary identity inode fd_inode opened_fd status
 
     [[ $output_variable =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || return 64
@@ -1314,7 +1314,7 @@ dbtune_open_state_lock() {
         if ! command ln -P "$lock_file" "$temporary" 2>/dev/null || [[ -L $temporary || ! -f $temporary ]] ||
             [[ $(dbtune_file_identity "$temporary") != "$identity" ]]; then
             rm -f "$temporary"
-            dbtune_log error "$label sa nepodarilo otvorit bez nasledovania symlinkov: $lock_file"
+            dbtune_log error "$(dbtune_printf core_lock_open_failed "$label" "$lock_file")"
             return 65
         fi
     fi
@@ -1336,7 +1336,7 @@ dbtune_open_state_lock() {
     rm -f "$temporary"
     if [[ $fd_inode != "$inode" ]] || ! dbtune_validate_state_lock "$lock_file" "$label" "$identity"; then
         exec {opened_fd}>&-
-        dbtune_log error "Otvoreny $label nema ocakavanu identitu"
+        dbtune_log error "$(dbtune_printf core_open_lock_identity_invalid "$label")"
         return 65
     fi
     printf -v "$output_variable" '%s' "$opened_fd"
@@ -1350,13 +1350,16 @@ dbtune_with_lifecycle_lock() {
     shift 3 || true
 
     dbtune_init_state_dir || return
+    if [[ $operation == _tick ]] && declare -F dbtune_collect_restore_language >/dev/null 2>&1; then
+        dbtune_collect_restore_language || return
+    fi
     if ! command -v "$flock_command" >/dev/null 2>&1; then
-        dbtune_log error "Lifecycle lock vyzaduje flock"
+        dbtune_log error "$(dbtune_msg core_lifecycle_flock_required)"
         [[ $mode == skip ]] && return 75
         return 69
     fi
     lock_file=$(dbtune_lifecycle_lock_file) || return
-    dbtune_open_state_lock lock_fd "$lock_file" "Lifecycle lock" || return
+    dbtune_open_state_lock lock_fd "$lock_file" "$(dbtune_msg core_label_lifecycle_lock)" || return
     lock_identity=$DBTUNE_STATE_LOCK_IDENTITY
     if [[ $mode == skip ]]; then
         if ! "$flock_command" -n "$lock_fd"; then
@@ -1365,10 +1368,10 @@ dbtune_with_lifecycle_lock() {
         fi
     elif ! "$flock_command" -x "$lock_fd"; then
         exec {lock_fd}>&-
-        dbtune_log error "Nepodarilo sa ziskat lifecycle lock pre $operation"
+        dbtune_log error "$(dbtune_printf core_lifecycle_lock_failed "$operation")"
         return 1
     fi
-    if ! dbtune_validate_state_lock "$lock_file" "Lifecycle lock" "$lock_identity"; then
+    if ! dbtune_validate_state_lock "$lock_file" "$(dbtune_msg core_label_lifecycle_lock)" "$lock_identity"; then
         "$flock_command" -u "$lock_fd" >/dev/null 2>&1 || true
         exec {lock_fd}>&-
         return 65
@@ -1391,12 +1394,12 @@ dbtune_event() {
     local -a fields
 
     [[ -n $event_type ]] || {
-        dbtune_log error "Event vyzaduje typ"
+        dbtune_log error "$(dbtune_msg core_event_type_required)"
         return 64
     }
     shift
     if (($# % 2 != 0)); then
-        dbtune_log error "Event ocakava dvojice kluc hodnota"
+        dbtune_log error "$(dbtune_msg core_event_pairs_required)"
         return 64
     fi
     dbtune_init_state_dir || return 1
@@ -1407,7 +1410,7 @@ dbtune_event() {
     done
     line=$(dbtune_json_emit "${fields[@]}") || return
     lock_file="$DBTUNE_STATE_DIR/.events.lock"
-    dbtune_open_state_lock lock_fd "$lock_file" "Event lock" || return
+    dbtune_open_state_lock lock_fd "$lock_file" "$(dbtune_msg core_label_event_lock)" || return
     lock_identity=$DBTUNE_STATE_LOCK_IDENTITY
     if command -v "$flock_command" >/dev/null 2>&1; then
         if ! "$flock_command" -x "$lock_fd"; then
@@ -1416,7 +1419,7 @@ dbtune_event() {
         fi
         locked=1
     fi
-    dbtune_validate_state_lock "$lock_file" "Event lock" "$lock_identity" || status=$?
+    dbtune_validate_state_lock "$lock_file" "$(dbtune_msg core_label_event_lock)" "$lock_identity" || status=$?
     ((status != 0)) || printf '%s\n' "$line" >>"$(dbtune_events_file)" || status=$?
     ((locked == 0)) || "$flock_command" -u "$lock_fd" >/dev/null 2>&1 || true
     exec {lock_fd}>&-
@@ -1439,10 +1442,10 @@ dbtune_state_read() {
         printf 'idle\n'
         return 0
     fi
-    dbtune_validate_single_link_file "$file" "State subor" || return
+    dbtune_validate_single_link_file "$file" "$(dbtune_msg core_label_state_file)" || return
     IFS= read -r state <"$file" || true
     if ! dbtune_state_is_valid "$state"; then
-        dbtune_log error "State subor obsahuje neplatny stav: ${state:-<prazdny>}"
+        dbtune_log error "$(dbtune_printf core_state_file_invalid "${state:-$(dbtune_msg core_value_empty)}")"
         return 65
     fi
     printf '%s\n' "$state"
@@ -1453,16 +1456,16 @@ dbtune_state_write() {
     local file
 
     if ! dbtune_state_is_valid "$state"; then
-        dbtune_log error "Nie je mozne zapisat neplatny stav: ${state:-<prazdny>}"
+        dbtune_log error "$(dbtune_printf core_state_write_invalid "${state:-$(dbtune_msg core_value_empty)}")"
         return 64
     fi
     dbtune_init_state_dir || return 1
     file=$(dbtune_state_file)
     if [[ -e $file || -L $file ]]; then
-        dbtune_validate_single_link_file "$file" "State subor" || return
+        dbtune_validate_single_link_file "$file" "$(dbtune_msg core_label_state_file)" || return
     fi
     printf '%s\n' "$state" | dbtune_atomic_write "$file" 600 || return
-    dbtune_validate_single_link_file "$file" "Publikovany state subor"
+    dbtune_validate_single_link_file "$file" "$(dbtune_msg core_label_published_state_file)"
 }
 
 dbtune_state_can_transition() {
@@ -1482,7 +1485,7 @@ dbtune_state_transition() {
 
     current=$(dbtune_state_read) || return
     if ! dbtune_state_can_transition "$current" "$target"; then
-        dbtune_log error "Neplatny prechod stavu: $current -> ${target:-<prazdny>}"
+        dbtune_log error "$(dbtune_printf core_state_transition_invalid "$current" "${target:-$(dbtune_msg core_value_empty)}")"
         return 65
     fi
     dbtune_state_write "$target" || return
@@ -1528,7 +1531,7 @@ dbtune_require_state() {
 
     state=$(dbtune_state_read) || return
     if ! dbtune_state_guard "$operation" "$state"; then
-        dbtune_log error "Prikaz '$operation' nie je povoleny v stave '$state'"
+        dbtune_log error "$(dbtune_printf core_command_state_disallowed "$operation" "$state")"
         return 65
     fi
 }
@@ -1539,7 +1542,7 @@ dbtune_sql_client() {
     elif command -v mysql >/dev/null 2>&1; then
         command -v mysql
     else
-        dbtune_log error "Nenasiel sa klient mariadb ani mysql"
+        dbtune_log error "$(dbtune_msg core_sql_client_missing)"
         return 69
     fi
 }
@@ -1596,7 +1599,7 @@ dbtune_sql_probe() {
         dbtune_event sql_auth method defaults file "$DBTUNE_ROOT_CNF" || true
         return 0
     fi
-    dbtune_log error "MariaDB root auth zlyhal cez unix_socket aj defaults-extra-file"
+    dbtune_log error "$(dbtune_msg core_sql_auth_failed)"
     return 77
 }
 
@@ -1614,16 +1617,16 @@ dbtune_sql() {
     local -a options=()
 
     [[ -n $query ]] || {
-        dbtune_log error "SQL wrapper vyzaduje query"
+        dbtune_log error "$(dbtune_msg core_sql_query_required)"
         return 64
     }
     if [[ ! $connect_timeout =~ ^[1-9][0-9]*$ || ! $statement_timeout =~ ^[1-9][0-9]*([.][0-9]+)?$ ]]; then
-        dbtune_log error "SQL timeout musi byt kladne cislo"
+        dbtune_log error "$(dbtune_msg core_sql_timeout_positive)"
         return 64
     fi
     if ! command awk -v connect="$connect_timeout" -v statement="$statement_timeout" \
         'BEGIN { exit !(connect <= 30 && statement <= 60) }'; then
-        dbtune_log error "SQL connect timeout moze byt najviac 30s a statement timeout 60s"
+        dbtune_log error "$(dbtune_msg core_sql_timeout_max)"
         return 64
     fi
     dbtune_sql_ensure_auth || return
@@ -1641,7 +1644,7 @@ $query"
             options=(--defaults-extra-file="$DBTUNE_SQL_DEFAULTS_FILE" --connect-timeout="$connect_timeout" --protocol=socket --batch --skip-column-names)
             ;;
         *)
-            dbtune_log error "Neznamy SQL auth kontrakt"
+            dbtune_log error "$(dbtune_msg core_sql_auth_unknown)"
             return 70
             ;;
     esac

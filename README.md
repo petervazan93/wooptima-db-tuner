@@ -1,13 +1,105 @@
-# dbtune
+<div align="center">
+  <h1>dbtune</h1>
+  <p><strong>Evidence-based MariaDB tuning for RunCloud-hosted WordPress and WooCommerce.</strong></p>
+  <p>
+    <a href="#overview">Overview</a> &middot;
+    <a href="#lifecycle">Lifecycle</a> &middot;
+    <a href="#read-only-quickstart">Quickstart</a> &middot;
+    <a href="#safety-model">Safety</a> &middot;
+    <a href="#supported-environment">Support</a> &middot;
+    <a href="#pinned-attested-installation">Install</a> &middot;
+    <a href="#documentation">Docs</a>
+  </p>
+  <p>
+    <a href="https://github.com/petervazan93/wooptima-db-tuner/actions/workflows/ci.yml"><img alt="CI workflow status" src="https://github.com/petervazan93/wooptima-db-tuner/actions/workflows/ci.yml/badge.svg?branch=main"></a>
+    <a href="https://github.com/petervazan93/wooptima-db-tuner/releases/tag/v0.4.0"><img alt="Prepared release target: v0.4.0" src="https://img.shields.io/badge/release%20target-v0.4.0-0969da"></a>
+    <img alt="Runtime: Bash 4 or newer" src="https://img.shields.io/badge/runtime-Bash%204%2B-4EAA25">
+    <img alt="Supported MariaDB families: 10.6, 10.11, and 11.x" src="https://img.shields.io/badge/MariaDB-10.6%20%7C%2010.11%20%7C%2011.x-003545">
+  </p>
+</div>
 
-`dbtune` je samostatny Bash nastroj na audit, meranie a bezpecne ladenie MariaDB pre RunCloud servery s WordPress/WooCommerce. Zdroj je rozdeleny na moduly, ale nasadzuje sa jediny artefakt `dist/dbtune`.
+![Sanitized current-source dbtune audit summary from a deterministic fixture. It shows FINDINGS, all four required sections complete, no missing or conflicting MariaDB evidence, and aggregate fixture sizing and finding counts.](assets/dbtune-audit.svg)
 
-## Instalacia
+<p align="center"><sub>Current-source English output captured from a deterministic test fixture and sanitized to exclude server identity, addresses, paths, database names, credentials, and production evidence.</sub></p>
 
-Odporucany auditovatelny postup pouziva pripnuty release. Najprv stiahnite a overte povod samotneho installera, potom ho precitajte a az nasledne spustite ako root:
+## Overview
+
+`dbtune` is a single-artifact Bash tool that audits a RunCloud host, measures its MariaDB workload, and turns the collected evidence into reviewable server and application recommendations.
+
+- **Audit the whole decision context.** Inspect effective MariaDB variables, hardware and storage, WordPress/WooCommerce applications, database inventory, grants, and listener exposure.
+- **Measure before proposing.** Collect workload samples for 7 days by default, reject degraded or restart-affected intervals, and keep unknown evidence out of active changes.
+- **Review every result.** Generate a Markdown report, flat JSON, a proposed MariaDB CNF, and provenance manifests that bind the proposal to one audit and measurement cycle.
+- **Keep mutation operator-controlled.** Audit and proposal generation do not apply configuration. Apply, restart, verification, and rollback are separate explicit steps.
+
+> [!IMPORTANT]
+> Release preparation is pinned to `v0.4.0`, with immutable artifact version `0.4.0`. This release defaults to English, selects Slovak explicitly with `DBTUNE_UI_LANG=sk`, and uses the `fleet-v3` report contract. The installation target below becomes available when the prepared tag and release are published.
+
+## Lifecycle
+
+```text
+audit -> collect -> analyze -> report -> propose -> apply -> verify
+                                                   |        |
+                                                   +-> rollback
+```
+
+| Phase | What happens |
+| --- | --- |
+| `audit` | Reads MariaDB, host, application, and security evidence; starts a new measurement cycle. |
+| `collect` | Samples workload behavior for 7 days by default and preserves the selected interface language for unattended completion. |
+| `analyze` | Evaluates valid samples and current values against the versioned tuning rules. |
+| `report` / `propose` | Produces operator-reviewable findings, read-only diagnostic actions, and a hash-bound CNF proposal. |
+| `apply` | Runs pre-publication live-value, provenance, backup, target, and topology checks; atomically publishes the candidate, then runs daemon configuration validation. A validation failure restores the exact prior target or absent topology, or enters recovery if restoration cannot complete. |
+| `verify` / `rollback` | Checks the deployed snapshot after restart or restores the prior filesystem state without requiring SQL. |
+
+Every successful audit creates a new `run_id`, archives the previous active cycle, and invalidates its downstream measurement and proposal artifacts. Existing apply and recovery history remains available.
+
+## Read-only quickstart
+
+After installation, start with the terminal summary or machine-readable audit:
 
 ```bash
-release=v0.3.0
+sudo dbtune audit
+sudo dbtune audit --json
+```
+
+Audit is read-only with respect to MariaDB and system configuration. It creates root-owned state artifacts under `/var/lib/dbtune` and starts a new measurement cycle; it does not apply tuning, restart MariaDB, or execute application actions.
+
+An authoritative audit requires complete `mariadb`, `hardware`, `applications`, and `security` sections. Classified results use exit status `0` for `PASS` or `FINDINGS`, `2` for `UNKNOWN`, and `1` for `ERROR`. Usage, dependency, and validation errors may use statuses `64` and above.
+
+## Safety model
+
+- **Fail closed on incomplete evidence.** Missing, malformed, conflicting, unsupported, or unknown required current values cannot become active server changes.
+- **Bind recommendations to evidence.** Audit, sample, analysis, and proposal hashes prevent mixing artifacts across runs or changing a reviewed proposal before normal apply.
+- **Require measurements for normal apply.** The normal path expects state `proposed`, at least 288 valid samples, and a matching proposal manifest.
+- **Treat backup status independently.** Fresh authoritative backup evidence is checked at apply time. Confirmed missing, stale, future, or malformed evidence blocks apply; only an absent artifact or a valid `unknown` artifact can enter a separate exact TTY confirmation path.
+- **Keep hard stops in force mode.** `--force` can bypass the measurement/analysis-manifest requirement and the local time window, but not live-value validation, Galera, mydumper, backup, target, configuration-validation, or rollback guards.
+- **Publish atomically, then validate and recover.** Before publication, apply checks ownership, modes, links, parent identity, target topology, live values, provenance, and backup evidence. It atomically publishes the complete candidate with Linux rename primitives, then runs daemon configuration validation. A validation failure uses the same guarded atomic path to restore the exact prior target or absent topology; if restoration or bookkeeping cannot complete, durable intent and recovery state preserve the recovery path.
+- **Make restart explicit.** Apply does not restart MariaDB unless `--restart` is supplied. The normal RunCloud workflow uses a manual panel restart followed by `verify --post` and later `verify --24h`.
+
+Read the full operational contract in the [rollout runbook](docs/RUNBOOK.md) before using `apply`.
+
+## Supported environment
+
+| Area | Contract |
+| --- | --- |
+| MariaDB families accepted by the rules engine | 10.6, 10.11, and 11.x |
+| MariaDB lifecycle integration coverage | 10.6 and 11.4 |
+| Target deployment | Linux RunCloud host with systemd |
+| CI operating system | Ubuntu 24.04 |
+| Applications | RunCloud-hosted WordPress and WooCommerce; WP-CLI is optional for eligible diagnostic actions |
+| Runtime | Bash 4+, standard GNU/Linux tools, `flock`, and a MariaDB/MySQL client |
+| Authoritative host evidence | `findmnt`, `lsblk`, `ss`, `free`, and `pgrep` for the corresponding audit domains |
+| Apply, rollback, and recovery | Python 3 with `dir_fd`, Linux `renameat2`, systemd, and a MariaDB daemon validation command |
+| Database authentication | Root socket authentication or a defaults file; credentials are not placed in command arguments or logs |
+
+CI coverage does not imply that every Ubuntu release or every MariaDB 11.x minor version has been integration-tested. Galera/wsrep nodes are detected and blocked from apply.
+
+## Pinned, attested installation
+
+The production-oriented path pins the prepared `v0.4.0` release target, verifies the installer against its offline GitHub artifact-attestation bundle, lets you inspect it, and only then executes it with privileges. Run it after the tag and release assets are published. It never pipes remote code into a root shell.
+
+```bash
+release=v0.4.0
 curl --proto '=https' --tlsv1.2 -fsSLo install.sh \
   "https://github.com/petervazan93/wooptima-db-tuner/releases/download/$release/install.sh"
 curl --proto '=https' --tlsv1.2 -fsSLo dbtune-attestation.jsonl \
@@ -22,53 +114,17 @@ less install.sh
 sudo sh install.sh --version "$release"
 ```
 
-Installer vyzaduje `gh` CLI, stiahne zvoleny GitHub Release aj offline `dbtune-attestation.jsonl`, overi SHA-256, GitHub keyless artifact attestation pre `dbtune` voci explicitnemu repozitaru a jeho vlastnikovi, signer workflowu a release tagu a Bash syntax. Overenie bundle nevyzaduje `gh auth login` ani API token. Az potom artefakt atomicky nainstaluje do `/usr/local/bin/dbtune`. Nespusta audit ani nemeni MariaDB. Runtime `apply`, rollback a crash recovery vyzaduju `python3` s podporou `dir_fd` a Linux `renameat2`, ktoru poskytuju podporovane Ubuntu/RunCloud systemy. Download selector je `--version vX.Y.Z` alebo `DBTUNE_RELEASE=vX.Y.Z`; nema vplyv na immutable verziu vlozenu do artefaktu pri builde.
+This pinned procedure targets the prepared `v0.4.0` release and works after its tag and assets are published. Bundle verification does not require `gh auth login` or an API token. The installer then verifies the selected `dbtune` artifact's SHA-256 checksum, GitHub attestation, fixed upstream repository and owner, signer workflow, exact release source ref, and Bash syntax before atomically publishing `/usr/local/bin/dbtune`. It does not run an audit or change MariaDB.
 
-Pre produkciu je odporucany pripnuty `vX.Y.Z` release. Predvolene `latest` je pohyblivy selector: installer ho najprv cez GitHub release metadata prelozi na konkretny semver tag a potom overi artefakt voci presnemu `refs/tags/vX.Y.Z`. Hodnota verzie moze byt zadana s `v` aj bez neho.
-
-GitHub Releases je predvoleny transport. Interny `DBTUNE_DOWNLOAD_BASE` moze ukazat na kontrolovany HTTPS mirror; `file://` je urceny iba pre testy. Transport override nemeni upstream repository, vlastnika, signer workflow ani exact source-ref politiku a nemoze autorizovat vlastny fork build. `DBTUNE_REPOSITORY` nie je podporovane.
-
-Prvy read-only krok po instalacii:
-
-```bash
-sudo dbtune audit --json
-```
-
-## Podpora a zavislosti
-
-| Oblast | Kontrakt |
-| --- | --- |
-| Akceptovane MariaDB rodiny | 10.6, 10.11 a 11.x |
-| Integracne testovane MariaDB | 10.6 a 11.4 |
-| CI operacny system | Ubuntu 24.04 |
-| Cielove nasadenie | Linux RunCloud host so systemd |
-
-- Installer: POSIX `sh`, Linux, `curl`, `gh`, Bash 4+, `install`, `stat`, SHA-256 nastroj a `sudo` pri privilegovanom cieli.
-- Runtime: Bash 4+, standardne GNU/Linux nastroje a `flock`.
-- Databaza: MariaDB/MySQL klient a podporovana root socket alebo defaults-file autentizacia.
-- Apply, rollback a recovery: Python 3 s `dir_fd`, Linux `renameat2`, systemd a validacny prikaz MariaDB daemonu.
-- Autoritativny hardware/security audit: `findmnt`, `lsblk`, `ss`, `free` a `pgrep` pre prislusne evidence domeny.
-- WordPress actions: WP-CLI je volitelne; bez overeneho non-root vlastnika a kanonickeho webrootu ostane action `not-executable`.
-- Vyvoj: Bats, ShellCheck, Docker a Docker Compose.
-
-CI pokrytie netvrdi, ze kazdy Ubuntu release alebo kazdy MariaDB 11.x minor bol integracne testovany.
-
-## Build a testy
-
-```bash
-make build
-make check
-make test
-make integration
-```
-
-Build zoradi `lib/*.sh`, vlozi subory z `templates/*` a `systemd/*` do funkcii `dbtune_embedded_list` a `dbtune_embedded_get`, vykona `bash -n`, volitelne `shellcheck` a vytvori `dist/dbtune.sha256`. Ak `bats` nie je nainstalovany, `make test` to oznaci ako `SKIP`. Docker integration moze lokalne bez Dockera alebo Compose skoncit ako `SKIP`; pri `CI=1` alebo `DBTUNE_REQUIRE_INTEGRATION=1` je nedostupnost chyba.
+The installer requires POSIX `sh`, Linux, `curl`, `gh`, Bash 4+, `install`, `stat`, a SHA-256 tool, and `sudo` for a privileged destination. See [Security](SECURITY.md#installation) for mirror and trust-policy details.
 
 ## CLI
 
+The current source interface is:
+
 ```text
 dbtune audit [--json]
-dbtune collect start [--days N]
+dbtune collect start [--days N] [--long-query-time SECONDS]
 dbtune collect status | stop
 dbtune analyze [--min-samples N]
 dbtune report | propose
@@ -79,49 +135,27 @@ dbtune status | version
 dbtune _tick
 ```
 
-Dispatcher vola funkcie `cmd_audit`, `cmd_collect`, `cmd_analyze`, `cmd_report`, `cmd_propose`, `cmd_apply`, `cmd_verify`, `cmd_rollback`, `cmd_status` a `cmd_tick`, ktore dodaju dalsie moduly. `status` a `version` su povolene kedykolvek; novy audit nie je povoleny pocas aktivneho collectu. Bezny `apply` vyzaduje stav `proposed`, minimalny pocet validnych vzoriek a SHA-256 manifest viazuci proposal na aktualny audit, samples a analysis. Interaktivny `--force` moze pouzit rucne pripraveny proposal v stave `audited`, `analyzed` alebo `proposed`, ale neobchadza live validaciu, Galera ani samostatny backup guard.
+The v0.4.0 executable and installer default to English. Slovak is selected explicitly with `DBTUNE_UI_LANG=sk`; only `en` and `sk` are accepted. Commands, options, paths, keys, enums, booleans, schema versions, and exit statuses are never localized.
 
-Kazdy uspesny `audit` je stale read-only voci MariaDB a systemovej konfiguracii, ale zacina novy immutable meraci cyklus. Dostane jedinecny `run_id`; `audit_hash` pokryva `audit.tsv`, `apps.tsv` aj `databases.tsv`. Predchadzajuci cyklus sa skopiruje do `$DBTUNE_STATE_DIR/runs/<run_id>/`, jeho collect/analysis/report/proposal subory sa z aktivneho priestoru odstrania a stav sa nastavi na `audited`. `apply/` a `apply/current` sa nearchivuju ani nemazu, preto zostava dostupny rollback predchadzajuceho apply. Explicitny `audit --new-run` nie je potrebny.
+## Documentation
 
-Autoritativny audit vyzaduje styri sekcie: `mariadb` (serverove premenne, status a databazovy inventar), `hardware` (CPU, RAM a trieda datadir uloziska), `applications` (uplne discovery a per-app audit statusy) a `security` (granty a stav listenera na porte 3306). `audit.overall_status` ma presnu semantiku: `PASS` znamena uplne povinne sekcie bez nalezov, `FINDINGS` uplne povinne sekcie s aspon jednym nalezom, `UNKNOWN` aspon jednu `partial` alebo `failed` sekciu pri zachovani casti povinnych dokazov a `ERROR` zlyhanie vsetkych povinnych sekcii. `audit --json`, textovy summary aj report publikuju `audit.required_sections`, `audit.failed_sections`, `audit.partial_sections`, `audit.affected_domains` a stav kazdej sekcie. Klasifikovany audit vracia `0` pre `PASS`/`FINDINGS`, `2` pre `UNKNOWN` a `1` pre `ERROR`. Usage, validacne, dependency a ine technicke zlyhania mozu pouzit existujuce exit kody `64+`; automatizacia ich nesmie interpretovat ako auditnu klasifikaciu. Artefakty sa pri klasifikovanom `UNKNOWN`/`ERROR` zachovaju pre diagnostiku, ale automatizacia musi ne-nulovy status povazovat za neautoritativny vysledok.
+- [Rollout runbook](docs/RUNBOOK.md): lifecycle, safety gates, pilot, apply, verification, rollback, recovery, and artifact contracts.
+- [Read-only pilot audit](docs/PILOT-AUDIT.md): bounded one-time audit procedure and stop conditions.
+- [Tuning methodology](mariadb-runcloud-preset.md): rules, formulas, evidence requirements, and operational rationale.
+- [Security policy](SECURITY.md): install provenance, trust boundaries, and private vulnerability reporting.
+- [Architecture and behavior plan](PLAN.md): source structure, stable machine contracts, and detailed implementation behavior.
 
-MariaDB sekcia pouziva jedinu verziovanu evidence schemu pre vsetky proposal current hodnoty a MariaDB vstupy serverovych pravidiel. Schema urcuje kanonicky kluc, validator (`uint`, kladne cislo, decimal, percento, bool/enum, cesta alebo text), verziovy gate a rolu `proposal|input`; z rovnakej tabulky sa generuje GLOBAL_VARIABLES query aj rules proposal kontrakt. Chybajuci, `unknown`, malformed, konfliktny alebo nepodporovany povinny kluc nastavi sekciu na `partial` a audit na `UNKNOWN`. Bezpecne diagnostiky `audit.section.mariadb.{missing,invalid,conflicting,optional}_evidence` obsahuju iba nazvy klucov a dovody, nie hodnoty. `innodb_flush_method` je povinny na 10.6/10.11 a explicitne volitelny ako deprecated vstup na 11.x; ostatne podporovane proposal current hodnoty su povinne.
+## Development
 
-`analysis-manifest.tsv` nesie povodny `run_id`, `audit_hash`, presny `samples_hash`, identitu a hash `dbsize.tsv`, vybrane denne baseline riadky, `analysis_hash` a spolocny `analysis_fingerprint`. Report tieto hodnoty publikuje, proposal manifest fingerprint prebera a doplna `proposal_hash`; apply history ich zaznamena spolu s hashom skutocne nasadeneho snapshotu. Ak sa ktorykolvek vstup zmeni alebo zmiesa s inym runom, `report`, `propose` a bezny `apply` ho odmietnu. `verify` navyse vyzaduje regularny nesymlinkovy target `root:root 0644`, ktoreho hash presne sedi s immutable `apply/<run>/proposed.cnf`.
+```bash
+make build
+make check
+make test
+make integration
+```
 
-Audit cita efektivne hodnoty vsetkych MariaDB premennych, ktore rules engine moze navrhnut. Bez znamenej aktualnej hodnoty bezne pravidlo emituje `UNKNOWN` bez proposal; explicitne durability pravidlo je v evidencii oznacene `durability_exception=explicit`, ale pri chybajucej current hodnote je rovnako fail-closed. Report ani proposal preto nikdy nepublikuju aktivnu zmenu s `current=unknown`.
+`make check` validates shell syntax and uses ShellCheck when available. `make test` builds the single `dist/dbtune` artifact and runs the Bats unit suite when Bats is installed. Docker integration exercises the real artifact against MariaDB 10.6 and 11.4; unavailable Docker is a failure when integration is required by CI.
 
-Serverove proposal records sa pri `report` a `propose` validuju a kanonizuju (`-` na `_`, lowercase) do jedneho streamu. Unsafe hodnota, app-scope proposal, chybajuca current hodnota alebo kanonicky duplicitny kluc zastavia prikaz. Markdown diff, flat JSON `proposal.*`, CNF a `proposal-manifest.tsv` pouzivaju rovnake poradie zmien; manifest nesie aj `proposal_count` a `proposal_records_hash`, ktore apply znovu porovna s analysis a CNF.
+## Security
 
-Backup sa z lokalneho cronu neodvodzuje. Autoritativna integracia moze atomicky vytvorit root-owned mode `0600` subor `$DBTUNE_STATE_DIR/backup-evidence.tsv` s piatimi jedinecnymi TSV klucmi: `schema=1`, `status=verified|missing|unknown`, `source`, UTC `checked_at` a `last_success`. `verified` vyzaduje platny UTC timestamp posledneho uspesneho behu, ktory nie je v buducnosti ani starsi ako `DBTUNE_MAX_BACKUP_AGE_SECONDS` (predvolene 86400 sekund); presna hranica je akceptovana. Existujuci neplatny, buduci alebo expirovany artefakt blokuje apply bez interaktivneho fallbacku a audit/report zobrazuje vyhodnoteny vek aj politiku. `missing` vyzaduje `last_success=none`; iba chybajuci alebo platny `unknown` artefakt vyzaduje samostatne TTY potvrdenie `POTVRDZUJEM OBNOVITELNU ZALOHU`. Potvrdene `missing` apply vzdy blokuje. Audit artefakt iba cita a nikdy ho nevytvara ani rucne nedoplna `audit.tsv`.
-
-## Spolocne kontrakty
-
-- Cesty sa odvodzuju od `DBTUNE_STATE_DIR` (default `/var/lib/dbtune`) cez `dbtune_state_file`, `dbtune_events_file`, `dbtune_auth_method_file` a `dbtune_path`. State cesta musi byt kanonicka absolutna cesta bez symlink parent komponentov; existujuci adresar musi uz pri prvom otvoreni vlastnit efektivne privilegovane UID a mat presne mode `700`, inak sa jeho obsah odmietne bez automatickeho `chmod`. Stabilny state subor aj lifecycle, event a collector locky musia mat presne jeden hardlink; kazdy lock je regularny mode `0600` subor rovnakeho vlastnika, otvara sa cez docasny overeny hardlink bez nasledovania symlinkov a po otvoreni sa znovu vyzaduje jediny link na stabilnej ceste. Config target musi byt priamy `.cnf` subor v explicitnom `DBTUNE_CONFIG_ALLOWED_DIR` (default `/etc/mysql/mariadb.conf.d`); apply, verify a rollback odmietaju symlink alebo dangling target, target s viac ako jednym hardlinkom, symlink parent komponent, vymeneny parent inode a existujuci target mimo ocakavaneho `root:root 0644` kontraktu. Apply, rollback aj recovery publikuju cez spolocnu `dir_fd` primitivu viazanu na ulozene identity celeho parent retazca. Existujuci target a pripraveny subor vymeni jednym `renameat2(RENAME_EXCHANGE)` commitom; absent target publikuje cez `RENAME_NOREPLACE`. Crash preto ponecha bud povodny, alebo kompletne novy target s jedinym hardlinkom.
-- `dbtune_state_read`, `dbtune_state_write`, `dbtune_state_transition`, `dbtune_state_guard` a `dbtune_require_state` implementuju lifecycle `idle -> audited -> collecting -> collected -> analyzed -> proposed -> applied -> verified`, vratane `rolled_back`, `recovery_required` a `rollback_failed`. Novy audit zacina novy cyklus v stave `audited`; pocas recovery stavov je blokovany a existujuca apply recovery historia ostava dostupna. Event log je best-effort a jeho zlyhanie nerusi uz atomicky commitnuty state.
-- Audit, collect start/stop, analyze, report, propose, apply, verify a rollback su cez dispatcher serializovane spolocnym exkluzivnym `flock`. Bezny prikaz na lock caka; timerovy `_tick` cakanie nerobi a pri contention bezpecne preskoci tick. Collector si ponechava vlastny interny lock, ktory dispatcher nenahradza.
-- `dbtune_atomic_write CESTA [MODE]` cita obsah zo stdin a publikuje ho cez docasny subor v rovnakom adresari.
-- `dbtune_is_uint HODNOTA` a `dbtune_require_uint NAZOV HODNOTA [MIN] [MAX]` validuju integer argumenty bez implicitnych Bash konverzii.
-- `dbtune_json_escape TEXT` a `dbtune_json_emit KLUC HODNOTA ...` su jediny podporovany sposob tvorby flat JSON. Vsetky emitovane hodnoty su JSON stringy.
-- `dbtune_tsv_percentile` je spolocny nearest-rank percentile algoritmus pre rules aj report. Pri 20 hodnotach je p95 devatnasta zoradena hodnota.
-- `dbtune_event TYP [KLUC HODNOTA ...]` zapisuje redigovany JSONL do `events.log`; `dbtune_log_*` zapisuje redigovane spravy na stderr. Hesla ani cele credential subory sa nesmu posielat loggeru.
-- `dbtune_sql QUERY [DATABASE]` cita query cez stdin klienta. Najprv skusi root `unix_socket`, potom `DBTUNE_ROOT_CNF` (default `/etc/mysql/conf.d/root.cnf`) cez `--defaults-extra-file`. Heslo nikdy nie je na CLI ani v logu a uspesna metoda sa ulozi do state.
-- Embedded asset sa cita cez `dbtune_embedded_get templates/tuning.cnf.tmpl`; zoznam poskytne `dbtune_embedded_list`.
-
-### Kontrakt `samples.tsv`
-
-Novy collector zapisuje append-only hlavicku `timestamp, uptime, bp_hit_pct, bp_misses_s, data_read_s, rnd_next_s, tmp_disk_pct, threads_running, threads_connected, qcache_hit_pct, log_waits_delta, wait_free_delta, cpu_pct, mem_available_kb, swap_used_kb, load1, restart_flag, qcache_queries_delta, interval_seconds, sample_status` oddelenu tabulatormi. Prvych 17 stlpcov zostava v povodnom poradi; posledne tri su rozsirujuci kontrakt.
-
-- `qcache_queries_delta` je denominator `Qcache_hits delta + Com_select delta`. Hodnota `0` znamena idle okno a `R-QCACHE` ho nezahrnie do hit-rate percentilu. Pravidlo vyzaduje aspon tolko aktivnych okien, kolko urcuje `--min-samples`; inak emituje `UNKNOWN` bez proposal.
-- `interval_seconds` je skutocny monotónny cas medzi dvojicou status/CPU snapshotov, vratane sleepu, scheduler delay a druheho SQL snapshotu. Rates a CPU pouzivaju tento interval, nie nakonfigurovany sleep.
-- `sample_status` je `ok` alebo `degraded_interval`. Nečíselny, nerastuci alebo prilis dlhy interval je degraded; predvoleny limit je dvojnasobok `DBTUNE_SAMPLE_SECONDS` a da sa explicitne nastavit cez `DBTUNE_MAX_SAMPLE_INTERVAL_SECONDS`. Degraded a restart riadky sa nepouziju v rules/report metrikach ani v minimalnom pocte validnych vzoriek.
-- Kazdy riadok musi mat presne 20 poli: skutocny gregoriansky UTC timestamp vratane spravnych dni v mesiaci a priestupnych rokov, nezaporne numericke metriky, celočíselné countery, `restart_flag` 0/1, kladny `interval_seconds` pre `sample_status=ok` a znamy status. Skratene, rozsirené, nečíselné a inak neplatné riadky sa odmietnu pred readiness, percentilmi a apply gate; ich pocty a dovody zobrazuje `collect status` aj report.
-- Legacy 17-stlpcove subory ostavaju kompatibilne pre ostatne pravidla. Kedze neuchovavaju query-cache denominator, `R-QCACHE` pri nich bezpecne vrati `UNKNOWN` bez proposal. Ak upgrade zastihne aktivny legacy collect, prvy novy append atomicky rozsiri jeho hlavicku a stare riadky; povodne metriky ostanu validne a novy denominator v starych riadkoch ostane prazdny.
-
-### Report action kontrakt
-
-Kazdy emitovany per-app rule dostane v Markdown aj JSON rovnake action metadata: `rule_id`, app scope, typ, safety, ciel, prikaz, `destructive=false`, connect/statement timeout, timeout capability a varovanie. Ak je dostupne bezpecne mapovanie, read-only SQL je scopeovane cez `--database` a validovany WordPress prefix. SQL prikaz ma connect timeout 5 sekund a serverovy statement timeout 30 sekund: MariaDB pouziva `max_statement_time`, MySQL `max_execution_time` v milisekundach. Klient pouziva lokalny socket bez hesla v argv; report nevypisuje credential argumenty ani credential subory. Ak rodinu/verziu servera a timeout capability nie je mozne bezpecne urcit, SQL action je `not-executable` a prikaz sa nevygeneruje. wp-cli pouziva kanonicky auditovany `--path` a overeneho nenuloveho vlastnika. Ak WordPress webroot alebo vlastnika nie je mozne bezpecne overit, report nevygeneruje prikaz a action oznaci ako `not-executable`; nepouziva root ani `--allow-root` fallback. Prikazy su navrhy na rucne spustenie: dbtune ich nevykonava a negeneruje automaticky `DELETE`, `DROP` ani `UPDATE`.
-
-Report publikuje nazvy a velkosti zozbieranych top-20 autoload poloziek, nikdy ich hodnoty; citlive nazvy su nahradene `[REDACTED]`. Najhorsie measurement okna obsahuju backup korelaciu s autoritativnym statusom, zdrojom, `last_success`, casovym rozdielom, casom kontroly, poctom planov a process snapshotom z auditu. Korelacia je evidencia, nie dokaz priciny.
-
-Projekt globalne pouziva `set -u`, nie `set -e`. Kniznicove moduly obsahuju iba deklaracie a funkcie; vykonanie programu zabezpecuje jediny guard na konci `lib/90-main.sh`.
+Review [SECURITY.md](SECURITY.md) before deployment. Report vulnerabilities privately through [GitHub Private Vulnerability Reporting](https://github.com/petervazan93/wooptima-db-tuner/security/advisories/new), and never include production credentials or unredacted audit artifacts in a public issue.

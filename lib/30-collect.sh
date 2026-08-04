@@ -1,10 +1,5 @@
 dbtune_collect_usage() {
-    cat <<'USAGE'
-Pouzitie:
-  dbtune collect start [--days N] [--long-query-time SEKUNDY]
-  dbtune collect status
-  dbtune collect stop
-USAGE
+    dbtune_msg collect_usage
 }
 
 dbtune_collect_config_file() {
@@ -60,11 +55,11 @@ dbtune_collect_validate_long_query_time() {
     local value=${1:-}
 
     [[ $value =~ ^[0-9]+([.][0-9]+)?$ ]] || {
-        dbtune_log error "--long-query-time musi byt nezaporne cislo"
+        dbtune_log error "$(dbtune_msg collect_long_query_nonnegative)"
         return 64
     }
     awk -v value="$value" 'BEGIN { exit !(value >= 0 && value <= 3600) }' || {
-        dbtune_log error "--long-query-time musi byt v rozsahu 0 az 3600"
+        dbtune_log error "$(dbtune_msg collect_long_query_range)"
         return 64
     }
 }
@@ -79,8 +74,15 @@ dbtune_collect_write_config() {
     local original_file=$7
     local original_long=$8
     local original_verbosity=$9
+    local ui_lang=$DBTUNE_I18N_LANGUAGE
+
+    case $ui_lang in
+        en|sk) ;;
+        *) return 64 ;;
+    esac
 
     {
+        printf 'ui_lang\t%s\n' "$ui_lang"
         printf 'days\t%s\n' "$days"
         printf 'long_query_time\t%s\n' "$long_query_time"
         printf 'slow_log_file\t%s\n' "$slow_log"
@@ -119,7 +121,7 @@ dbtune_collect_asset() {
     local asset=$1
 
     if ! declare -F dbtune_embedded_get >/dev/null 2>&1; then
-        dbtune_log error "Build neobsahuje embedded systemd assety"
+        dbtune_log error "$(dbtune_msg collect_assets_missing)"
         return 69
     fi
     dbtune_embedded_get "$asset"
@@ -135,7 +137,7 @@ dbtune_collect_install_units() {
     program_path=${DBTUNE_PROGRAM_PATH:-/usr/local/bin/dbtune}
     systemctl_command=${DBTUNE_SYSTEMCTL:-systemctl}
     if [[ $program_path != /* || $program_path =~ [[:space:]] ]]; then
-        dbtune_log error "DBTUNE_PROGRAM_PATH musi byt absolutna cesta bez medzier"
+        dbtune_log error "$(dbtune_msg collect_program_path_invalid)"
         return 64
     fi
 
@@ -163,19 +165,19 @@ dbtune_collect_start() {
     while (($#)); do
         case $1 in
             --days)
-                (($# >= 2)) || { dbtune_log error "--days vyzaduje hodnotu"; return 64; }
+                (($# >= 2)) || { dbtune_log error "$(dbtune_msg collect_days_value_required)"; return 64; }
                 days=$2
                 shift 2
                 ;;
             --days=*) days=${1#*=}; shift ;;
             --long-query-time)
-                (($# >= 2)) || { dbtune_log error "--long-query-time vyzaduje hodnotu"; return 64; }
+                (($# >= 2)) || { dbtune_log error "$(dbtune_msg collect_long_query_value_required)"; return 64; }
                 long_query_time=$2
                 shift 2
                 ;;
             --long-query-time=*) long_query_time=${1#*=}; shift ;;
             -h|--help) dbtune_collect_usage; return 0 ;;
-            *) dbtune_log error "Neznama collect start volba: $1"; return 64 ;;
+            *) dbtune_log error "$(dbtune_printf collect_unknown_start_option "$1")"; return 64 ;;
         esac
     done
     dbtune_require_uint "--days" "$days" 1 3650 || return
@@ -186,11 +188,11 @@ dbtune_collect_start() {
     originals=$(dbtune_sql 'SELECT @@GLOBAL.slow_query_log, @@GLOBAL.slow_query_log_file, @@GLOBAL.long_query_time, @@GLOBAL.log_slow_verbosity;') || return
     IFS=$'\t' read -r original_slow original_file original_long original_verbosity <<<"$originals"
     [[ $original_slow == 0 || $original_slow == 1 ]] || {
-        dbtune_log error "MariaDB vratila neplatny povodny stav slow logu"
+        dbtune_log error "$(dbtune_msg collect_original_slow_invalid)"
         return 65
     }
     [[ -n $original_file && -n $original_long ]] || {
-        dbtune_log error "MariaDB nevratila povodne slow-log hodnoty"
+        dbtune_log error "$(dbtune_msg collect_original_slow_missing)"
         return 65
     }
 
@@ -200,13 +202,13 @@ dbtune_collect_start() {
         "${DBTUNE_INSTALL:-install}" -d -o "${DBTUNE_MYSQL_USER:-mysql}" -g "${DBTUNE_MYSQL_GROUP:-mysql}" -m 750 "$slow_dir" || return 1
     fi
     started_epoch=$(dbtune_collect_epoch) || return
-    dbtune_require_uint "aktualny epoch" "$started_epoch" 1 2147483647 || return
+    dbtune_require_uint "$(dbtune_msg collect_current_epoch_label)" "$started_epoch" 1 2147483647 || return
     deadline_epoch=$(awk -v start="$started_epoch" -v days="$days" 'BEGIN { printf "%.0f\n", start + days * 86400 }')
     dbtune_collect_write_config "$days" "$long_query_time" "$slow_log" "$started_epoch" "$deadline_epoch" \
         "$original_slow" "$original_file" "$original_long" "$original_verbosity" || return
 
     if ! dbtune_collect_install_units || ! dbtune_collect_set_slow_log "$slow_log" "$long_query_time"; then
-        dbtune_log error "Spustenie collect zlyhalo pred aktivaciou timeru"
+        dbtune_log error "$(dbtune_msg collect_start_failed)"
         dbtune_collect_restore_slow_log >/dev/null 2>&1 || true
         rm -f "$(dbtune_collect_config_file)"
         return 1
@@ -227,7 +229,7 @@ dbtune_collect_start() {
         return 1
     fi
     dbtune_event collect_started days "$days" deadline_epoch "$deadline_epoch" long_query_time "$long_query_time" || true
-    printf 'Zber spusteny na %s dni (deadline epoch %s).\n' "$days" "$deadline_epoch"
+    dbtune_printf collect_started "$days" "$deadline_epoch"
 }
 
 dbtune_collect_status() {
@@ -309,7 +311,7 @@ dbtune_collect_finish_locked() {
     local restore_result=0 transition_result=0 restore_label=ok
 
     if ! dbtune_collect_restore_slow_log; then
-        dbtune_log error "Nepodarilo sa obnovit povodne runtime slow-log hodnoty"
+        dbtune_log error "$(dbtune_msg collect_restore_failed)"
         restore_result=1
     fi
     if ((restore_result == 0)) && [[ $(dbtune_state_read) == collecting ]]; then
@@ -337,7 +339,7 @@ dbtune_collect_stop() {
         timer_result=failed
     fi
     lock_file=$(dbtune_collect_lock_file)
-    dbtune_open_state_lock lock_fd "$lock_file" "Collector lock" || {
+    dbtune_open_state_lock lock_fd "$lock_file" "$(dbtune_msg collect_label_collector_lock)" || {
         lock_status=$?
         dbtune_collect_health error stop_lock_open || true
         return "$lock_status"
@@ -348,7 +350,7 @@ dbtune_collect_stop() {
         exec {lock_fd}>&-
         return 1
     fi
-    if ! dbtune_validate_state_lock "$lock_file" "Collector lock" "$lock_identity"; then
+    if ! dbtune_validate_state_lock "$lock_file" "$(dbtune_msg collect_label_collector_lock)" "$lock_identity"; then
         "${DBTUNE_FLOCK:-flock}" -u "$lock_fd" >/dev/null 2>&1 || true
         exec {lock_fd}>&-
         return 65
@@ -358,7 +360,7 @@ dbtune_collect_stop() {
     exec {lock_fd}>&-
     dbtune_event collect_stopped || true
     ((result == 0)) || return 1
-    printf 'Zber zastaveny.\n'
+    dbtune_printf collect_stopped
 }
 
 cmd_collect() {
@@ -413,7 +415,7 @@ dbtune_collect_guard_stop() {
     dbtune_collect_disable_timer || timer_result=failed
     dbtune_event collect_guard reason "$reason" detail "$detail" timer "$timer_result" || true
     dbtune_collect_finish_locked guard "reason=$reason $detail timer=$timer_result" || true
-    dbtune_log warn "Collect watchdog ukoncil zber: $reason"
+    dbtune_log warn "$(dbtune_printf collect_watchdog_stopped "$reason")"
     return 1
 }
 
@@ -672,7 +674,7 @@ dbtune_collect_append_sample() {
             awk 'NR == 1 { print $0 "\tqcache_queries_delta\tinterval_seconds\tsample_status"; next } { print $0 "\t\t\tok" }' "$file" |
                 dbtune_atomic_write "$file" 600 || return 1
         elif [[ $header != "$expected" ]]; then
-            dbtune_log error "samples.tsv ma nepodporovanu hlavicku"
+            dbtune_log error "$(dbtune_msg collect_sample_header_unsupported)"
             return 65
         fi
     fi
@@ -716,24 +718,31 @@ dbtune_collect_finalize() {
 
     dbtune_collect_disable_timer || timer_result=failed
     if ! dbtune_collect_finish_locked complete "reason=deadline samples=$samples timer=$timer_result"; then
-        dbtune_log error "Automaticke zastavenie collect zlyhalo"
+        dbtune_log error "$(dbtune_msg collect_auto_stop_failed)"
         dbtune_event collect_finalize_failed step stop || true
         return 0
     fi
-    # Automaticke dokoncenie zamerne pouziva default argumenty.
+    # Automatic completion intentionally uses default arguments.
     # shellcheck disable=SC2119
     if ! declare -F cmd_analyze >/dev/null 2>&1 || ! cmd_analyze; then
-        dbtune_log error "Automaticka analyze faza zlyhala alebo nie je dostupna"
+        dbtune_log error "$(dbtune_msg collect_auto_analyze_failed)"
         dbtune_event collect_finalize_failed step analyze || true
         return 0
     fi
-    # Report nema pri automatickom dokonceni argumenty.
+    # Automatic report generation takes no arguments.
     # shellcheck disable=SC2119
     if ! declare -F cmd_report >/dev/null 2>&1 || ! cmd_report; then
-        dbtune_log error "Automaticka report faza zlyhala alebo nie je dostupna"
+        dbtune_log error "$(dbtune_msg collect_auto_report_failed)"
         dbtune_event collect_finalize_failed step report || true
     fi
     return 0
+}
+
+dbtune_collect_restore_language() {
+    local ui_lang
+
+    ui_lang=$(dbtune_collect_value ui_lang 2>/dev/null) || ui_lang=en
+    dbtune_i18n_set "$ui_lang"
 }
 
 dbtune_collect_tick_body() {
@@ -834,11 +843,11 @@ cmd_tick() {
     local lock_file lock_identity lock_fd
 
     if (($#)); then
-        dbtune_log warn "_tick ignoruje argumenty"
+        dbtune_log warn "$(dbtune_msg collect_tick_arguments_ignored)"
     fi
     dbtune_init_state_dir || return 0
     lock_file=$(dbtune_collect_lock_file)
-    dbtune_open_state_lock lock_fd "$lock_file" "Collector lock" || {
+    dbtune_open_state_lock lock_fd "$lock_file" "$(dbtune_msg collect_label_collector_lock)" || {
         dbtune_collect_health error lock_open || true
         return 0
     }
@@ -848,7 +857,7 @@ cmd_tick() {
         exec {lock_fd}>&-
         return 0
     fi
-    if ! dbtune_validate_state_lock "$lock_file" "Collector lock" "$lock_identity"; then
+    if ! dbtune_validate_state_lock "$lock_file" "$(dbtune_msg collect_label_collector_lock)" "$lock_identity"; then
         "${DBTUNE_FLOCK:-flock}" -u "$lock_fd" >/dev/null 2>&1 || true
         exec {lock_fd}>&-
         return 0

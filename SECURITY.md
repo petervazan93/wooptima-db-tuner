@@ -1,15 +1,15 @@
 # Security
 
-## Instalacia
+## Installation
 
-GitHub Releases je predvoleny transport. Interny `DBTUNE_DOWNLOAD_BASE` moze ukazat na kontrolovany HTTPS mirror; `file://` je urceny iba pre testy. Transport override nemeni upstream repository, vlastnika, signer workflow ani exact source-ref politiku a nemoze autorizovat vlastny fork build. `DBTUNE_REPOSITORY` nie je podporovane.
+GitHub Releases is the default transport. The internal `DBTUNE_DOWNLOAD_BASE` may point to a controlled HTTPS mirror; `file://` is intended for tests only. A transport override does not change the upstream repository, owner, signer workflow, or exact source-ref policy and cannot authorize a custom fork build. `DBTUNE_REPOSITORY` is not supported.
 
-`DBTUNE_REPOSITORY` nie je podporovane. Upstream repository, ocakavany vlastnik, signer workflow a source ref tvoria jednu nemennu trust policy; operator nemoze prepisat iba download repository a ponechat nejasny povod. Distribucny mirror je bezpecny iba pre bajtovo identicke upstream artefakty s upstream atestaciou. Fork alebo mirror s vlastnym buildom moze ovladat svoj release, workflow aj bundle, preto musi udrziavat vlastny installer s kompletne explicitnou alternativnou politikou. Upstream installer takyto build odmietne namiesto automatickeho oslabenia alebo preladenia dovery.
+`DBTUNE_REPOSITORY` is not supported. The upstream repository, expected owner, signer workflow, and source ref form one immutable trust policy; an operator cannot override only the download repository and leave provenance ambiguous. A distribution mirror is safe only for byte-identical upstream artifacts with upstream attestation. A fork or mirror with its own build can control its release, workflow, and bundle, so it must maintain its own installer with a completely explicit alternative policy. The upstream installer rejects such a build instead of automatically weakening or retargeting trust.
 
-Primarny postup nepouziva pipe do root shellu. Pripnite release, overte atestaciu installera, skontrolujte jeho obsah a az potom ho spustite:
+The primary procedure does not pipe code into a root shell. Pin the release, verify the installer attestation, inspect its contents, and only then run it:
 
 ```bash
-release=v0.3.0
+release=v0.4.0
 curl --proto '=https' --tlsv1.2 -fsSLo install.sh \
   "https://github.com/petervazan93/wooptima-db-tuner/releases/download/$release/install.sh"
 curl --proto '=https' --tlsv1.2 -fsSLo dbtune-attestation.jsonl \
@@ -24,10 +24,16 @@ less install.sh
 sudo sh install.sh --version "$release"
 ```
 
-Release je mozne pripnut cez `--version vX.Y.Z` alebo `DBTUNE_RELEASE=vX.Y.Z`. `DBTUNE_VERSION` ani ina runtime premenna neprepisuje internu verziu artefaktu. Installer pri version checku odstrani version/program override premenne a nikdy automaticky nespusta audit, zber, apply ani restart.
+The release can be pinned with `--version vX.Y.Z` or `DBTUNE_RELEASE=vX.Y.Z`. Neither `DBTUNE_VERSION` nor another runtime variable overrides the artifact's internal version. During its version check, the installer removes version/program override variables and never automatically runs audit, collection, apply, or restart. Release preparation is pinned to `v0.4.0`, and its immutable artifact version is `0.4.0`.
 
-Release workflow vytvori jednu SLSA provenance statement s tromi subjects: `dbtune`, `dbtune.sha256` a `install.sh`. `dbtune-attestation.jsonl` je publikovany offline bundle, nie subject. `dbtune.sha256` obsahuje digest `dbtune`. Manualny preflight overuje subject `install.sh`; installer kontroluje checksum a overuje subject `dbtune` voci upstream repository, vlastnikovi, signer workflowu, presnemu tagu a GitHub-hosted runner politike.
+The commands above target the prepared v0.4.0 artifact and work after its tag and release assets are published. That artifact includes the `DBTUNE_UI_LANG` selector and the `fleet-v3` report schema.
 
-## Hlasenie problemov
+The release workflow creates one SLSA provenance statement with three subjects: `dbtune`, `dbtune.sha256`, and `install.sh`. `dbtune-attestation.jsonl` is a published offline bundle, not a subject. `dbtune.sha256` contains the digest of `dbtune`. The manual preflight verifies the `install.sh` subject; the installer checks the checksum and verifies the `dbtune` subject against the upstream repository, owner, signer workflow, exact tag, and GitHub-hosted runner policy.
 
-Bezpecnostny problem nahlaste sukromne cez [GitHub Private Vulnerability Reporting](https://github.com/petervazan93/wooptima-db-tuner/security/advisories/new). Do verejneho issue ani reportu nevkladajte produkcne credentialy, `root.cnf`, `wp-config.php` ani neupravene auditne artefakty.
+### v0.4.0 interface contract
+
+The v0.4.0 installer and executable default to English. Set `DBTUNE_UI_LANG=sk` explicitly for the Slovak executable interface. Only `en` and `sk` are accepted; an unsupported non-empty value is rejected with exit status 64 before command dispatch or installer trust checks. The selected language never changes repository, provenance, checksum, publication, or runtime safety validation.
+
+## Reporting issues
+
+Report a security issue privately through [GitHub Private Vulnerability Reporting](https://github.com/petervazan93/wooptima-db-tuner/security/advisories/new). Do not put production credentials, `root.cnf`, `wp-config.php`, or unredacted audit artifacts in a public issue or report.

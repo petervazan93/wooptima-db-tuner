@@ -1488,6 +1488,7 @@ dbtune_audit_summary() {
     local version cpu ram dataset storage app_count db_count critical warning
     local overall required failed partial affected finding_count
     local mariadb_missing mariadb_invalid mariadb_conflicting mariadb_optional
+    local not_detected not_detected_feminine not_detected_masculine not_available_feminine
 
     version=$(command awk -F '\t' '$1=="mariadb.version" { print $2; exit }' "$audit")
     cpu=$(command awk -F '\t' '$1=="hw.cpu_count" { print $2; exit }' "$audit")
@@ -1513,21 +1514,28 @@ dbtune_audit_summary() {
     mariadb_conflicting=$(command awk -F '\t' '$1=="audit.section.mariadb.conflicting_evidence" {print $2; exit}' "$audit")
     mariadb_optional=$(command awk -F '\t' '$1=="audit.section.mariadb.optional_evidence" {print $2; exit}' "$audit")
 
-    printf 'DBTune audit status: %s.\n' "$(dbtune_redact "${overall:-ERROR}")"
-    printf 'Povinne sekcie: %s. Zlyhane: %s. Ciastocne: %s.\n' \
-        "$(dbtune_redact "${required:-nezistene}")" "$(dbtune_redact "${failed:-nezistene}")" "$(dbtune_redact "${partial:-nezistene}")"
-    printf 'Ovplyvnene domeny odporucani: %s.\n' "$(dbtune_redact "${affected:-nezistene}")"
-    printf 'MariaDB dokazy: chybajuce=%s; neplatne=%s; konfliktne=%s; volitelne=%s.\n' \
-        "$(dbtune_redact "${mariadb_missing:-nezistene}")" "$(dbtune_redact "${mariadb_invalid:-nezistene}")" \
-        "$(dbtune_redact "${mariadb_conflicting:-nezistene}")" "$(dbtune_redact "${mariadb_optional:-nezistene}")"
-    printf 'Server: %s CPU, %s RAM, ulozisko %s.\n' \
-        "$(dbtune_redact "${cpu:-nezistene}")" "$(dbtune_redact "${ram:-nezistena}")" "$(dbtune_redact "${storage:-nezistene}")"
-    printf 'MariaDB: %s, dataset %s, databazy %s.\n' \
-        "$(dbtune_redact "${version:-nedostupna}")" "$(dbtune_redact "${dataset:-nezisteny}")" "$(dbtune_redact "${db_count:-0}")"
-    printf 'Aplikacie: %s. Nalezy spolu: %s, kriticke: %s, varovania: %s.\n' \
+    not_detected=$(dbtune_msg audit_value_not_detected) || return
+    not_detected_feminine=$(dbtune_msg audit_value_not_detected_feminine) || return
+    not_detected_masculine=$(dbtune_msg audit_value_not_detected_masculine) || return
+    not_available_feminine=$(dbtune_msg audit_value_not_available_feminine) || return
+    dbtune_printf audit_summary_status "$(dbtune_redact "${overall:-ERROR}")"
+    dbtune_printf audit_summary_sections \
+        "$(dbtune_redact "${required:-$not_detected}")" "$(dbtune_redact "${failed:-$not_detected}")" \
+        "$(dbtune_redact "${partial:-$not_detected}")"
+    dbtune_printf audit_summary_domains "$(dbtune_redact "${affected:-$not_detected}")"
+    dbtune_printf audit_summary_evidence \
+        "$(dbtune_redact "${mariadb_missing:-$not_detected}")" "$(dbtune_redact "${mariadb_invalid:-$not_detected}")" \
+        "$(dbtune_redact "${mariadb_conflicting:-$not_detected}")" "$(dbtune_redact "${mariadb_optional:-$not_detected}")"
+    dbtune_printf audit_summary_server \
+        "$(dbtune_redact "${cpu:-$not_detected}")" "$(dbtune_redact "${ram:-$not_detected_feminine}")" \
+        "$(dbtune_redact "${storage:-$not_detected}")"
+    dbtune_printf audit_summary_mariadb \
+        "$(dbtune_redact "${version:-$not_available_feminine}")" "$(dbtune_redact "${dataset:-$not_detected_masculine}")" \
+        "$(dbtune_redact "${db_count:-0}")"
+    dbtune_printf audit_summary_applications \
         "$(dbtune_redact "${app_count:-0}")" "$(dbtune_redact "${finding_count:-0}")" \
         "$(dbtune_redact "$critical")" "$(dbtune_redact "$warning")"
-    printf 'Data: %s/{audit,apps,databases}.tsv\n' "$(dbtune_redact "$DBTUNE_STATE_DIR")"
+    dbtune_printf audit_summary_data "$(dbtune_redact "$DBTUNE_STATE_DIR")"
 }
 
 cmd_audit() {
@@ -1538,7 +1546,7 @@ cmd_audit() {
         case $argument in
             --json) json=1 ;;
             *)
-                dbtune_log error "Neznama volba audit: $argument"
+                dbtune_log error "$(dbtune_printf audit_invalid_option "$argument")"
                 return 64
                 ;;
         esac
@@ -1574,30 +1582,30 @@ cmd_audit() {
     dbtune_audit_collect_apps "$audit" "$apps" "$databases"
     if ! dbtune_audit_quarantine_mariadb_conflicts "$audit"; then
         rm -rf "$scratch"
-        dbtune_log error "Konfliktne MariaDB auditne dokazy sa nepodarilo bezpecne izolovat"
+        dbtune_log error "$(dbtune_msg audit_evidence_isolation_failed)"
         return 65
     fi
     if ! dbtune_audit_normalize_in_place "$audit"; then
         rm -rf "$scratch"
-        dbtune_log error "Audit obsahuje konfliktne aliasy alebo duplicitne hodnoty"
+        dbtune_log error "$(dbtune_msg audit_conflicting_values)"
         return 65
     fi
     version=$(command awk -F '\t' '$1=="mariadb.version" { print $2; exit }' "$audit")
     dbtune_audit_add_findings "$audit" "${version:-0}"
     dbtune_audit_finalize_status "$audit" "$apps" "$databases" || {
         rm -rf "$scratch"
-        dbtune_log error "Celkovy stav auditu sa nepodarilo vyhodnotit"
+        dbtune_log error "$(dbtune_msg audit_status_failed)"
         return 1
     }
     if ! dbtune_audit_normalize_in_place "$audit"; then
         rm -rf "$scratch"
-        dbtune_log error "Audit obsahuje konfliktne aliasy alebo duplicitne hodnoty"
+        dbtune_log error "$(dbtune_msg audit_conflicting_values)"
         return 65
     fi
 
     dbtune_provenance_write_audit_manifest "$manifest" "$run_id" "$audit" "$apps" "$databases" || {
         rm -rf "$scratch"
-        dbtune_log error "Audit provenance sa nepodarilo vytvorit"
+        dbtune_log error "$(dbtune_msg audit_manifest_failed)"
         return 1
     }
     current_manifest=$(dbtune_audit_manifest_file) || {
@@ -1607,7 +1615,7 @@ cmd_audit() {
     old_run_id=$(dbtune_manifest_value "$current_manifest" run_id 2>/dev/null || printf 'legacy-%s' "$$")
     archive=$(dbtune_cycle_archive "$old_run_id") || {
         rm -rf "$scratch"
-        dbtune_log error "Predchadzajuci meraci cyklus sa nepodarilo archivovat"
+        dbtune_log error "$(dbtune_msg audit_cycle_archive_failed)"
         return 1
     }
 
@@ -1616,7 +1624,7 @@ cmd_audit() {
         ! dbtune_atomic_write "$DBTUNE_STATE_DIR/databases.tsv" 600 <"$databases" ||
         ! dbtune_atomic_write "$current_manifest" 600 <"$manifest"; then
         rm -rf "$scratch"
-        dbtune_log error "Audit data sa nepodarilo atomicky zapisat"
+        dbtune_log error "$(dbtune_msg audit_write_failed)"
         return 1
     fi
     rm -rf "$scratch"

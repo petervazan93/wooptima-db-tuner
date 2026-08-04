@@ -17,5 +17,13 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y bats shellcheck python3
       - name: Static and unit tests
         run: make check && make test
-      - name: MariaDB lifecycle integration
+      - name: MariaDB lifecycle integration (English)
+        env:
+          DBTUNE_REQUIRE_INTEGRATION: 1
+          DBTUNE_UI_LANG: en
+        run: make integration
+      - name: MariaDB lifecycle integration (Slovak)
+        env:
+          DBTUNE_REQUIRE_INTEGRATION: 1
+          DBTUNE_UI_LANG: sk
         run: make integration

@@ -45,7 +45,7 @@ append_embedded_files() {
                 printf "        '%s') printf '%%s' '%s' | dbtune_base64_decode ;;\n" "$relative" "$encoded"
             done
         done
-        printf "        *) printf 'Neznamy embedded asset: %%s\\n' \"\${1:-}\" >&2; return 64 ;;\n"
+        printf "        *) printf 'Unknown embedded asset: %%s\\n' \"\${1:-}\" >&2; return 64 ;;\n"
         printf '    esac\n}\n'
     } >>"$output"
 }
@@ -54,28 +54,28 @@ build() {
     local temporary module
     local -a modules
 
-    [[ -d $LIB_DIR ]] || fail "chyba adresar lib"
-    mkdir -p "$DIST_DIR" || fail "neda sa vytvorit dist"
-    temporary=$(mktemp "$DIST_DIR/.dbtune.tmp.XXXXXX") || fail "mktemp zlyhal"
+    [[ -d $LIB_DIR ]] || fail "lib directory is missing"
+    mkdir -p "$DIST_DIR" || fail "cannot create dist directory"
+    temporary=$(mktemp "$DIST_DIR/.dbtune.tmp.XXXXXX") || fail "mktemp failed"
     trap 'rm -f "$temporary"' EXIT
 
     mapfile -t modules < <(find "$LIB_DIR" -maxdepth 1 -type f -name '*.sh' -print | LC_ALL=C sort)
-    ((${#modules[@]})) || fail "nenasli sa lib moduly"
-    [[ ${modules[0]} == "$LIB_DIR/00-header.sh" ]] || fail "prvy modul musi byt lib/00-header.sh"
-    [[ ${modules[${#modules[@]} - 1]} == "$LIB_DIR/90-main.sh" ]] || fail "posledny modul musi byt lib/90-main.sh"
+    ((${#modules[@]})) || fail "no lib modules found"
+    [[ ${modules[0]} == "$LIB_DIR/00-header.sh" ]] || fail "first module must be lib/00-header.sh"
+    [[ ${modules[${#modules[@]} - 1]} == "$LIB_DIR/90-main.sh" ]] || fail "last module must be lib/90-main.sh"
 
-    command cat "${modules[0]}" >"$temporary" || fail "zapis headera zlyhal"
-    append_embedded_files "$temporary" || fail "embed assetov zlyhal"
+    command cat "${modules[0]}" >"$temporary" || fail "failed to write header"
+    append_embedded_files "$temporary" || fail "failed to embed assets"
     for module in "${modules[@]:1}"; do
         printf '\n' >>"$temporary"
-        command cat "$module" >>"$temporary" || fail "zapis $module zlyhal"
+        command cat "$module" >>"$temporary" || fail "failed to write $module"
     done
-    chmod 755 "$temporary" || fail "chmod zlyhal"
-    bash -n "$temporary" || fail "bash -n zlyhal"
+    chmod 755 "$temporary" || fail "chmod failed"
+    bash -n "$temporary" || fail "bash -n failed"
     if command -v shellcheck >/dev/null 2>&1; then
-        shellcheck -s bash "$temporary" || fail "shellcheck zlyhal"
+        shellcheck -s bash "$temporary" || fail "shellcheck failed"
     else
-        printf 'build: shellcheck nie je dostupny, preskakujem\n' >&2
+        printf 'build: shellcheck is not available, skipping\n' >&2
     fi
     bash -c '
         source "$1"
@@ -85,16 +85,16 @@ build() {
         for asset in templates/tuning.cnf.tmpl systemd/dbtune-collect.service systemd/dbtune-collect.timer; do
             dbtune_embedded_get "$asset" >/dev/null || exit 1
         done
-    ' _ "$temporary" || fail "artefakt nema kompletne prikazy alebo embedded assety"
-    mv -f "$temporary" "$OUTPUT" || fail "publikovanie artefaktu zlyhalo"
+    ' _ "$temporary" || fail "artifact does not contain all commands and embedded assets"
+    mv -f "$temporary" "$OUTPUT" || fail "failed to publish artifact"
     trap - EXIT
 
     if command -v sha256sum >/dev/null 2>&1; then
-        (cd "$DIST_DIR" && sha256sum dbtune >dbtune.sha256) || fail "sha256sum zlyhal"
+        (cd "$DIST_DIR" && sha256sum dbtune >dbtune.sha256) || fail "sha256sum failed"
     elif command -v shasum >/dev/null 2>&1; then
-        (cd "$DIST_DIR" && shasum -a 256 dbtune >dbtune.sha256) || fail "shasum zlyhal"
+        (cd "$DIST_DIR" && shasum -a 256 dbtune >dbtune.sha256) || fail "shasum failed"
     else
-        fail "chyba sha256sum aj shasum"
+        fail "neither sha256sum nor shasum is available"
     fi
     printf 'build: %s\n' "$OUTPUT"
     printf 'build: %s\n' "$CHECKSUM"

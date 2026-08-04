@@ -1,50 +1,52 @@
-# Tuning preset pre WooCommerce na RunCloud
+# WooCommerce tuning preset for RunCloud
 
-Kompletný postup ladenia výkonu: **aplikačná vrstva → MariaDB config → monitoring**.
-Overené na MariaDB 11.4.12 / Ubuntu 24.04 (noble) / RunCloud agent.
+A complete performance-tuning workflow: **application layer -> MariaDB configuration -> monitoring**.
+Verified on MariaDB 11.4.12 / Ubuntu 24.04 (noble) / RunCloud agent.
 
-Postavené na reálnej analýze produkčného eshopu (3,5 GB dataset, 6M riadkov `postmeta`).
-Referenčné merania sú v prílohe na konci.
-
----
-
-## Poradie práce — a prečo práve takto
-
-**Aplikačná vrstva ide prvá.** Object cache dotazy *odstráni*, buffer pool ich len
-*zlacní*. Ak najprv naladíš DB, schováš si problém pod RAM a nikdy sa nedozvieš,
-že polovica dotazov tam vôbec nemusela byť.
-
-```
-ČASŤ I    Aplikačná vrstva     ← object cache, autoload, HPOS, odpad v tabuľkách
-ČASŤ II   MariaDB config       ← meranie, výpočet, nasadenie
-ČASŤ III  RunCloud špecifiká   ← pasce, ktoré budú na každom ich serveri
-ČASŤ IV   Monitoring
-ČASŤ V    Diagnostika
-ČASŤ VI   Čo NEROBIŤ           ← rozšírené anti-patterny z internetu
-```
-
-Typický profil, na ktorý je preset stavaný: RunCloud server, MariaDB 10.6+, WooCommerce,
-jedna hlavná DB od ~1 GB vyššie, RAM aspoň 8 GB, symptóm = MariaDB žerie CPU.
-
-**Nepoužívaj bez merania.** Veľkostné hodnoty sa musia počítať z reálnych čísel
-daného servera. Preset bez merania je hádanie.
+Based on a real production-store analysis (3.5 GB dataset, 6M `postmeta` rows).
+Reference measurements are included in the appendix.
 
 ---
 
-# ČASŤ I — Aplikačná vrstva
+## Order of work and why it matters
 
-## Krok A — Object cache (najväčší pákový efekt)
+**The application layer comes first.** Object cache *eliminates* queries; the buffer
+pool only makes them *cheaper*. If you tune the database first, you hide the problem
+under RAM and never learn that half of the queries did not need to exist.
 
-Bez object cache **každý request**:
-- načíta celý `wp_options` autoload z DB
-- pošle každý `get_option()` a `get_transient()` do MariaDB
-- zapisuje transienty do `wp_options` → ďalšie zápisy
+```text
+PART I     Application layer     <- object cache, autoload, HPOS, table waste
+PART II    MariaDB configuration <- measurement, calculation, deployment
+PART III   RunCloud specifics    <- traps present on every RunCloud server
+PART IV    Monitoring
+PART V     Diagnostics
+PART VI    What NOT to do        <- common internet anti-patterns
+```
 
-Prejaví sa to ako **stovky rýchlych dotazov na request**, ktoré slow log nikdy
-nezachytí (žiaden neprekročí prah), ale v súčte tvoria podstatnú časť CPU.
-Typický ukazovateľ: `Handler_read_rnd_next` v desiatkach tisíc riadkov/s aj v kľude.
+The preset targets a typical RunCloud server with MariaDB 10.6, 10.11, or 11.x,
+WooCommerce, one main database of approximately 1 GB or more, at least 8 GB RAM,
+and a symptom of MariaDB consuming CPU.
 
-### Kontrola
+**Do not use it without measurement.** Sizing values must be calculated from the
+actual numbers for the server. A preset without measurement is guesswork.
+
+---
+
+# PART I - Application layer
+
+## Step A - Object cache (the highest-leverage change)
+
+Without object cache, **every request**:
+- loads the entire `wp_options` autoload set from the database,
+- sends every `get_option()` and `get_transient()` to MariaDB,
+- writes transients to `wp_options`, causing more writes.
+
+This appears as **hundreds of fast queries per request** that the slow log never
+captures because none crosses the threshold, but together they consume a substantial
+share of CPU. A typical indicator is `Handler_read_rnd_next` at tens of thousands of
+rows per second even while idle.
+
+### Check
 
 ```bash
 systemctl is-active redis redis-server
@@ -54,89 +56,93 @@ grep -iE "WP_REDIS|WP_CACHE" /path/to/webroot/wp-config.php
 ls -d /path/to/webroot/wp-content/plugins/*redis*
 ```
 
-**`object-cache.php` musí existovať.** Je to drop-in, ktorý plugin nainštaluje —
-bez neho WordPress žiadny persistent object cache nepoužíva, aj keby Redis bežal.
+**`object-cache.php` must exist.** It is the drop-in installed by the plugin. Without
+it, WordPress does not use persistent object cache even when Redis is running.
 
-### Pozor na zámenu
+### Do not confuse these caches
 
-| | Čo rieši | Čo NErieši |
+| | What it handles | What it does NOT handle |
 |---|---|---|
-| **Page cache** (WP Rocket, nginx fastcgi_cache) | anonymná návštevnosť | prihlásení, košík, checkout, admin, AJAX |
-| **Object cache** (Redis) | `get_option`, transienty, WP_Query cache — **pre všetkých** | HTML rendering |
+| **Page cache** (WP Rocket, nginx fastcgi_cache) | anonymous traffic | logged-in users, cart, checkout, admin, AJAX |
+| **Object cache** (Redis) | `get_option`, transients, WP_Query cache - **for everyone** | HTML rendering |
 
-`WP_CACHE = true` v `wp-config.php` znamená page cache, **nie** object cache.
-Tie dve sa nezastupujú.
+`WP_CACHE = true` in `wp-config.php` means page cache, **not** object cache.
+The two are not substitutes.
 
-### Redis konfigurácia pre eshop
+### Redis configuration for a store
 
-```
+```text
 maxmemory-policy volatile-lru
 ```
 
-Zabráni tomu, aby sa pri tlaku na pamäť vyhodili session dáta (= stratené košíky).
-Kontrola evikcií:
+This prevents session data from being evicted under memory pressure, which would
+cause lost carts. Check evictions:
 
 ```bash
 redis-cli INFO stats | grep evicted_keys
 redis-cli INFO memory | grep used_memory_human
 ```
 
-Dimenzovanie: alokuj aspoň **2× typický `used_memory`**. Orientačne — `wp_alloptions`
-0,5–2 MB, WooCommerce session 2–5 KB each, 5 000 produktov ~50 MB.
+Sizing: allocate at least **2x typical `used_memory`**. As a guide, `wp_alloptions`
+uses 0.5-2 MB, each WooCommerce session uses 2-5 KB, and 5,000 products use about 50 MB.
 
 ---
 
-## Krok B — Autoload audit
+## Step B - Autoload audit
 
-Autoloadované options sa načítajú **pri každom page loade**. Nad ~1 MB to začne byť cítiť,
-a bez object cache to ide priamo z DB zakaždým.
+Autoloaded options are loaded **on every page load**. Above approximately 1 MB, this
+becomes noticeable, and without object cache it comes directly from the database each time.
 
 ```sql
--- celkova velkost
+-- total size
 SELECT ROUND(SUM(LENGTH(option_value))/1024/1024,2) AS autoload_mb, COUNT(*) AS cnt
 FROM wp_options WHERE autoload IN ('yes','on','auto');
 
--- top offenderi
+-- top offenders
 SELECT option_name, ROUND(LENGTH(option_value)/1024,1) AS kb
 FROM wp_options WHERE autoload IN ('yes','on','auto')
 ORDER BY LENGTH(option_value) DESC LIMIT 20;
 ```
 
-> **Pozn.:** WordPress 6.6+ používa hodnoty `yes`/`no`/`on`/`off`/`auto`.
-> Starší dotaz s `autoload='yes'` časť dát minie.
+> **Note:** WordPress 6.6+ uses `yes`/`no`/`on`/`off`/`auto` values.
+> An older query using `autoload='yes'` misses part of the data.
 
-| Autoload | Verdikt |
+| Autoload | Verdict |
 |---|---|
 | < 1 MB | OK |
-| 1–3 MB | prejdi top 20, vypni čo netreba |
-| > 3 MB | rieš prioritne |
+| 1-3 MB | review the top 20 and disable what is unnecessary |
+| > 3 MB | address as a priority |
 
-Typickí vinníci: XML feed cache (Heureka, Glami, Google), prekladové cache (Weglot,
-WPML), staré `_transient_*` bez expirácie, options po odinštalovaných pluginoch.
+Typical culprits are XML feed caches (Heureka, Glami, Google), translation caches
+(Weglot, WPML), old `_transient_*` entries without expiration, and options left by
+uninstalled plugins.
 
-Vypnutie autoloadu pre konkrétnu option:
+Disable autoload for a specific option:
+
 ```sql
-UPDATE wp_options SET autoload = 'no' WHERE option_name = 'nazov_option';
+UPDATE wp_options SET autoload = 'no' WHERE option_name = 'option_name';
 ```
-*(Over najprv, či ju plugin nečíta na každom requeste — vtedy by to uškodilo.)*
 
-### Skryté zápisy do wp_options
+*(First verify that the plugin does not read it on every request; otherwise this hurts performance.)*
 
-`update_option()` na **akúkoľvek** autoloadovanú option invaliduje celý `alloptions`
-cache. Plugin, ktorý zapisuje pri každom requeste, ti tak zabije object cache.
+### Hidden writes to wp_options
 
-Hľadanie cez `SAVEQUERIES` v `wp-config.php` (len dočasne, na staging):
+`update_option()` on **any** autoloaded option invalidates the entire `alloptions`
+cache. A plugin that writes on every request can therefore defeat object cache.
+
+Search with `SAVEQUERIES` in `wp-config.php` (temporarily, on staging only):
+
 ```php
 define('SAVEQUERIES', true);
-// potom v päte: grep cez $wpdb->queries na UPDATE.*wp_options
+// Then, in the footer, inspect $wpdb->queries for UPDATE.*wp_options.
 ```
 
-Časté zdroje: analytické pluginy, rate limitery, `woocommerce_tracker_last_send`,
-`_transient_wc_count_comments`.
+Common sources include analytics plugins, rate limiters, `woocommerce_tracker_last_send`,
+and `_transient_wc_count_comments`.
 
 ---
 
-## Krok C — HPOS (High-Performance Order Storage)
+## Step C - HPOS (High-Performance Order Storage)
 
 ```sql
 SELECT option_name, option_value FROM wp_options WHERE option_name IN (
@@ -144,25 +150,25 @@ SELECT option_name, option_value FROM wp_options WHERE option_name IN (
   'woocommerce_custom_orders_table_data_sync_enabled',
   'woocommerce_feature_custom_order_tables_enabled');
 
-SELECT COUNT(*) FROM wp_wc_orders;          -- HPOS tabulka
+SELECT COUNT(*) FROM wp_wc_orders;          -- HPOS table
 SELECT post_type, COUNT(*) FROM wp_posts WHERE post_type LIKE 'shop_order%' GROUP BY post_type;
 ```
 
-| Stav | Akcia |
+| State | Action |
 |---|---|
-| `enabled = no`, objednávky v `wp_posts`/`wp_postmeta` | **Migrácia na HPOS** = najväčšia štrukturálna úspora. Samostatný projekt, nie súčasť tuningu. |
-| `enabled = yes`, `data_sync = yes` | **Vypni sync** po overení — inak sa každá objednávka zapisuje dvakrát (WooCommerce → Settings → Advanced → Features) |
+| `enabled = no`, orders in `wp_posts`/`wp_postmeta` | **Migrate to HPOS** for the largest structural saving. This is a separate project, not part of tuning. |
+| `enabled = yes`, `data_sync = yes` | **Disable sync** after verification; otherwise every order is written twice (WooCommerce -> Settings -> Advanced -> Features). |
 | `enabled = yes`, `data_sync = no` | OK |
 
-Pri vypnutom HPOS tvoria objednávky drvivú väčšinu `postmeta`. Na referenčnom shope:
-92 288 `shop_order` postov → 6,08M riadkov `postmeta` (1 443 MB).
+With HPOS disabled, orders make up the overwhelming majority of `postmeta`. On the
+reference store, 92,288 `shop_order` posts produced 6.08M `postmeta` rows (1,443 MB).
 
 ---
 
-## Krok D — Odpad v tabuľkách
+## Step D - Table waste
 
 ```sql
--- Sessions (problem az od ~500K riadkov)
+-- Sessions (a problem from approximately 500K rows)
 SELECT COUNT(*) FROM wp_woocommerce_sessions;
 
 -- Action Scheduler
@@ -170,11 +176,11 @@ SELECT status, COUNT(*) FROM wp_actionscheduler_actions GROUP BY status;
 SELECT hook, status, COUNT(*) c FROM wp_actionscheduler_actions
   GROUP BY hook, status ORDER BY c DESC LIMIT 20;
 
--- Transienty v DB (bez object cache tam zostavaju)
+-- Database transients (they remain without object cache)
 SELECT COUNT(*) cnt, ROUND(SUM(LENGTH(option_value))/1024/1024,2) mb
 FROM wp_options WHERE option_name LIKE '_transient%';
 
--- Log tabulky pluginov — casto najvacsi jednotlivy zrut
+-- Plugin log tables, often the largest single consumer
 SELECT TABLE_NAME, TABLE_ROWS, ROUND((data_length+index_length)/1024/1024,1) mb,
        ROUND((data_length+index_length)/NULLIF(TABLE_ROWS,0)/1024,1) kb_per_row
 FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE()
@@ -182,14 +188,15 @@ FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE()
 ORDER BY (data_length+index_length) DESC;
 ```
 
-**`kb_per_row` je dobrý detektor.** Bežná tabuľka má jednotky KB/riadok. Ak vidíš
-20+ KB/riadok, je to log s plnými telami (emaily, requesty, response payloady) —
-kandidát na purge.
+**`kb_per_row` is an effective detector.** A normal table uses a few KB per row. If
+you see more than 20 KB per row, it is probably a log containing full bodies (emails,
+requests, or response payloads) and is a purge candidate.
 
 ### Action Scheduler retention
 
-Default drží dokončené akcie 30 dní. Skrátenie pomôže, ale **1 deň (častá rada
-z internetu) je príliš** — prídeš o možnosť debugovať zlyhané akcie.
+The default keeps completed actions for 30 days. Shortening it helps, but **1 day, a
+common internet recommendation, is too short** because it removes the ability to debug
+failed actions.
 
 ```php
 add_filter('action_scheduler_retention_period', function() {
@@ -197,42 +204,42 @@ add_filter('action_scheduler_retention_period', function() {
 });
 ```
 
-Zlyhané akcie (`status = failed`) sa retention neriadi — tie treba riešiť zvlášť,
-väčšinou ide o plugin, ktorý už nefunguje alebo bol odinštalovaný.
+Failed actions (`status = failed`) are not governed by retention. Address them separately;
+they usually indicate a plugin that no longer works or was uninstalled.
 
 ---
 
-# ČASŤ II — MariaDB config
+# PART II - MariaDB configuration
 
-## Krok 0 — Meranie pred nasadením
+## Step 0 - Measurement before deployment
 
-Read-only, bezpečné na produkcii. Spusti ako `root`.
+Read-only and safe in production. Run as `root`.
 
 ```bash
 #!/bin/bash
-# preset-measure.sh — read-only audit pred nasadenim
+# preset-measure.sh - read-only audit before deployment
 set -u
-hr(){ printf '\n═══ %s ═══\n' "$1"; }
+hr(){ printf '\n=== %s ===\n' "$1"; }
 
 hr "SERVER"
 echo "hostname: $(hostname)"
 echo "MariaDB:  $(mariadb -Nse 'SELECT VERSION()')"
-echo "uptime DB: $(mariadb -Nse "SELECT ROUND(variable_value/3600,1) FROM information_schema.global_status WHERE variable_name='UPTIME'") h"
+echo "DB uptime: $(mariadb -Nse "SELECT ROUND(variable_value/3600,1) FROM information_schema.global_status WHERE variable_name='UPTIME'") h"
 
-hr "APLIKACNA VRSTVA"
+hr "APPLICATION LAYER"
 echo "redis:            $(systemctl is-active redis redis-server 2>/dev/null | tr '\n' ' ')"
-echo "object-cache.php: $(ls /home/*/webapps/*/wp-content/object-cache.php 2>/dev/null || echo 'CHYBA -> ziadny persistent object cache')"
+echo "object-cache.php: $(ls /home/*/webapps/*/wp-content/object-cache.php 2>/dev/null || echo 'ERROR -> no persistent object cache')"
 
 hr "DATASET"
 mariadb -Nse "SELECT CONCAT(
-  'celkom: ', ROUND(SUM(data_length+index_length)/1024/1024/1024,2),' GB',
+  'total: ', ROUND(SUM(data_length+index_length)/1024/1024/1024,2),' GB',
   '   (data ', ROUND(SUM(data_length)/1024/1024/1024,2),
   ' / index ', ROUND(SUM(index_length)/1024/1024/1024,2),')',
-  '   tabuliek: ', COUNT(*))
+  '   tables: ', COUNT(*))
   FROM information_schema.TABLES
   WHERE TABLE_SCHEMA NOT IN ('information_schema','mysql','performance_schema','sys');"
 
-echo "-- TOP 10 tabuliek --"
+echo "-- TOP 10 tables --"
 mariadb -e "SELECT TABLE_SCHEMA db, TABLE_NAME, TABLE_ROWS,
   ROUND((data_length+index_length)/1024/1024,1) total_mb,
   ROUND(index_length/1024/1024,1) idx_mb,
@@ -243,7 +250,7 @@ mariadb -e "SELECT TABLE_SCHEMA db, TABLE_NAME, TABLE_ROWS,
 
 hr "RAM"
 free -g | awk '/^Mem:/{print "total: "$2" GB   used: "$3" GB   available: "$7" GB"}'
-echo "POZOR: sucet RSS php-fpm je nafuknuty (zdielana pamat). Ver 'used' z free."
+echo "WARNING: summed php-fpm RSS is inflated by shared memory. Trust 'used' from free."
 
 hr "STORAGE"
 lsblk -dno NAME,ROTA,MODEL | grep -vE '^loop'
@@ -251,193 +258,196 @@ echo "ROTA=0 -> SSD/NVMe   ROTA=1 -> HDD"
 
 hr "PHP-FPM"
 CH=$(grep -rhE '^\s*pm\.max_children' /etc/php*rc/fpm.d/ 2>/dev/null | awk -F= '{s+=$2} END{print s+0}')
-echo "sucet pm.max_children: ${CH:-0}"
-echo "beziacich workerov:    $(pgrep -fc 'php-fpm: pool' || echo 0)"
+echo "sum of pm.max_children: ${CH:-0}"
+echo "running workers:        $(pgrep -fc 'php-fpm: pool' || echo 0)"
 
-hr "ZAPISOVA ZATAZ"
+hr "WRITE LOAD"
 mariadb -Nse "SELECT CONCAT('redo write: ', ROUND(
   (SELECT variable_value FROM information_schema.global_status WHERE variable_name='INNODB_OS_LOG_WRITTEN')/
   (SELECT variable_value FROM information_schema.global_status WHERE variable_name='UPTIME')/1024,1),' KB/s');"
 
-hr "ROZHODNUTIA"
+hr "DECISIONS"
 mariadb -Nse "SELECT CONCAT('MyISAM: ', IF((SELECT variable_value FROM information_schema.global_status
-  WHERE variable_name='KEY_READ_REQUESTS')>0,'POUZIVA SA -> nechaj key_buffer','NEPOUZIVA -> key_buffer 32M'));"
+  WHERE variable_name='KEY_READ_REQUESTS')>0,'IN USE -> keep key_buffer','NOT IN USE -> key_buffer 32M'));"
 
 mariadb -Nse "SELECT CONCAT('query cache hit rate: ', ROUND(100*qh/NULLIF(qh+cs,0),1),'%  -> ',
-  IF(100*qh/NULLIF(qh+cs,0) < 20,'VYPNI','NECHAJ ZAPNUTU'))
+  IF(100*qh/NULLIF(qh+cs,0) < 20,'DISABLE','KEEP ENABLED'))
   FROM (SELECT
    (SELECT variable_value FROM information_schema.global_status WHERE variable_name='QCACHE_HITS') qh,
    (SELECT variable_value FROM information_schema.global_status WHERE variable_name='COM_SELECT') cs) x;"
 
-mariadb -Nse "SELECT CONCAT('peak spojeni: ', variable_value)
+mariadb -Nse "SELECT CONCAT('peak connections: ', variable_value)
   FROM information_schema.global_status WHERE variable_name='MAX_USED_CONNECTIONS';"
 
-mariadb -Nse "SELECT CONCAT('binlog: ', IF(@@log_bin=0,'VYPNUTY -> ziadne PITR, trxcommit=1 je povinny','zapnuty'));"
+mariadb -Nse "SELECT CONCAT('binlog: ', IF(@@log_bin=0,'DISABLED -> no PITR, trxcommit=1 is mandatory','enabled'));"
 
-hr "ODPORUCANY POOL"
+hr "RECOMMENDED POOL"
 DS=$(mariadb -Nse "SELECT CEIL(SUM(data_length+index_length)/1024/1024/1024*1.3)
   FROM information_schema.TABLES WHERE TABLE_SCHEMA NOT IN
   ('information_schema','mysql','performance_schema','sys');")
 RAM=$(free -g | awk '/^Mem:/{print int($2/2)}')
-echo "dataset × 1,3 = ${DS} GB"
+echo "dataset x 1.3 = ${DS} GB"
 echo "RAM / 2       = ${RAM} GB"
-echo "-> POUZI:       $(( DS < RAM ? DS : RAM )) GB"
+echo "-> USE:         $(( DS < RAM ? DS : RAM )) GB"
 ```
 
-Ulož výstup — budeš ho potrebovať na porovnanie po nasadení.
+Save the output; you will need it for comparison after deployment.
 
 ---
 
-## Krok 1 — Výpočet per-shop hodnôt
+## Step 1 - Calculate per-store values
 
-| Premenná | Vzorec | Poznámka |
+| Variable | Formula | Note |
 |---|---|---|
-| `innodb_buffer_pool_size` | `min(dataset × 1,3 ; RAM × 0,5)` | Nikdy viac než dataset + rezerva. Pool nepojme viac dát než existuje. |
-| `innodb_log_file_size` | `512M` default, `1G` ak dataset > 10 GB | Väčší = dlhší crash recovery. |
-| `innodb_log_buffer_size` | `32M` | Na `64M` len ak `Innodb_log_waits` rastie. |
-| `max_connections` | `suma pm.max_children × 1,25 + 20` | Minimum 100. RunCloud dáva 4096 = OOM mína. |
-| `innodb_io_capacity` | NVMe `2000` / SATA SSD `1000` / HDD `200` | Podľa `ROTA` z `lsblk`. |
+| `innodb_buffer_pool_size` | `min(dataset x 1.3; RAM x 0.5)` | Never more than dataset plus reserve. A pool cannot hold more data than exists. |
+| `innodb_log_file_size` | `512M` default, `1G` if dataset > 10 GB | Larger means longer crash recovery. |
+| `innodb_log_buffer_size` | `32M` | Use `64M` only if `Innodb_log_waits` grows. |
+| `max_connections` | `sum(pm.max_children) x 1.25 + 20` | Minimum 100. RunCloud uses 4096, an OOM hazard. |
+| `innodb_io_capacity` | NVMe `2000` / SATA SSD `1000` / HDD `200` | Based on `ROTA` from `lsblk`. |
 | `innodb_io_capacity_max` | NVMe `6000` / SATA SSD `2000` / HDD `400` | |
-| `innodb_read_io_threads`<br>`innodb_write_io_threads` | NVMe `8` / inak `4` | |
+| `innodb_read_io_threads`<br>`innodb_write_io_threads` | NVMe `8` / otherwise `4` | |
 
-**Buffer pool:** rast je online a lacný, **zmenšovanie je tá rušivá operácia**
-(relokácia stránok, môže blokovať). Nezačínaj vysoko s tým, že „potom zmenším".
+**Buffer pool:** growth is online and cheap; **shrinking is the disruptive operation**
+(page relocation can block). Do not start high with the assumption that you can shrink later.
 
-Kontrola po 24 h: ak `Innodb_buffer_pool_pages_free` zostáva trvale nad 25 %
-z `pages_total` aj po backupoch a špičkách, pool je zbytočne veľký — zníž ho.
+Check after 24 hours: if `Innodb_buffer_pool_pages_free` remains consistently above
+25% of `pages_total` even after backups and peaks, the pool is unnecessarily large;
+reduce it.
 
-**max_connections:** `pm.max_children` prečítaj vždy, nehádaj. Ak je `max_connections`
-nižší než reálny počet PHP workerov, dostaneš `Too many connections` = 500-ky na shope.
+**max_connections:** always read `pm.max_children`; do not guess. If `max_connections`
+is below the real number of PHP workers, `Too many connections` produces HTTP 500 errors.
 
 ---
 
-## Krok 2 — Config súbor
+## Step 2 - Configuration file
 
-Cesta je kritická: **`/etc/mysql/mariadb.conf.d/99-zz-tuning.cnf`**
+The path is critical: **`/etc/mysql/mariadb.conf.d/99-zz-tuning.cnf`**
 
-- `mariadb.cnf` má `!includedir conf.d/` **a až potom** `!includedir mariadb.conf.d/`
-- RunCloud píše do `conf.d/runcloud.cnf` → náš súbor sa načíta neskôr a prebije ho
-- prefix `99-zz-` sortuje za balíkové `50-*.cnf` aj za RunCloudové `99-server.cnf`
-- vlastný názov = dpkg ho nevlastní → `apt upgrade` sa ho nedotkne
+- `mariadb.cnf` has `!includedir conf.d/` **followed by** `!includedir mariadb.conf.d/`.
+- RunCloud writes to `conf.d/runcloud.cnf`, so this file loads later and overrides it.
+- Prefix `99-zz-` sorts after package `50-*.cnf` files and RunCloud's `99-server.cnf`.
+- A custom name is not owned by dpkg, so `apt upgrade` does not touch it.
 
 ```ini
 # /etc/mysql/mariadb.conf.d/99-zz-tuning.cnf
-# WooCommerce tuning preset. Nacita sa PO /etc/mysql/conf.d/runcloud.cnf.
-# Rollback = mv tento subor prec + restart MariaDB.
+# WooCommerce tuning preset. Loaded AFTER /etc/mysql/conf.d/runcloud.cnf.
+# Rollback = move this file away and restart MariaDB.
 
 [mysqld]
 
-# ═══ PER-SHOP — vypln z merania ═══════════════════════════════════
-innodb_buffer_pool_size        = 4G        # min(dataset×1,3 ; RAM×0,5)
+# === PER STORE - fill from measurements ==================================
+innodb_buffer_pool_size        = 4G        # min(dataset x 1.3; RAM x 0.5)
 innodb_log_file_size           = 1G        # 512M / 1G
 innodb_log_buffer_size         = 32M
-max_connections                = 300       # pm.max_children × 1,25 + 20
+max_connections                = 300       # pm.max_children x 1.25 + 20
 innodb_io_capacity             = 2000      # NVMe
 innodb_io_capacity_max         = 6000      # NVMe
 innodb_read_io_threads         = 8         # NVMe
 innodb_write_io_threads        = 8         # NVMe
 
-# ═══ PRENOSNE — rovnake na kazdom RunCloud WooCommerce boxe ═══════
+# === PORTABLE - same on every RunCloud WooCommerce server ================
 
-# ── Durabilita ────────────────────────────────────────────────────
-# RunCloud nastavuje skip-log-bin => ZIADNE point-in-time recovery.
-# Redo log je jedina ochrana potvrdenych objednavok.
+# -- Durability ------------------------------------------------------------
+# RunCloud sets skip-log-bin, so there is NO point-in-time recovery.
+# The redo log is the only protection for committed orders.
 innodb_flush_log_at_trx_commit = 1
 innodb_doublewrite             = 1
 
-# ── Pripnute defaulty ─────────────────────────────────────────────
-# Zhodne s compiled-in defaultmi MariaDB 11.4. Pripnute preto, ze
-# unattended-upgrades ma povoleny origin "MariaDB:" a novsia verzia
-# by mohla default zmenit bez upozornenia.
+# -- Pinned defaults -------------------------------------------------------
+# These match MariaDB 11.4 compiled-in defaults. They are pinned because
+# unattended-upgrades permits the "MariaDB:" origin and a newer version
+# could change a default without warning.
 innodb_flush_method                 = O_DIRECT
 innodb_buffer_pool_dump_at_shutdown = 1
 innodb_buffer_pool_load_at_startup  = 1
 
-# ── Flush ─────────────────────────────────────────────────────────
+# -- Flush -----------------------------------------------------------------
 innodb_flush_neighbors         = 0
 innodb_max_dirty_pages_pct     = 60
-innodb_max_dirty_pages_pct_lwm = 10      # default 0 = flush caka do poslednej chvile
+innodb_max_dirty_pages_pct_lwm = 10      # default 0 waits until the last moment
 
-# ── Connections ───────────────────────────────────────────────────
-innodb_lock_wait_timeout       = 30      # RunCloud dava 200 = blokuje FPM workerov
-skip_name_resolve              = 1       # vsetko chodi z 127.0.0.1
+# -- Connections -----------------------------------------------------------
+innodb_lock_wait_timeout       = 30      # RunCloud uses 200, blocking FPM workers
+skip_name_resolve              = 1       # all traffic comes from 127.0.0.1
 thread_cache_size              = 64
 
-# ── Temp tables ───────────────────────────────────────────────────
-# POZOR: WP/Woo pouziva LONGTEXT (meta_value, post_content, option_value)
-# a MEMORY engine BLOB/TEXT neuchova -> ~33 % temp tabuliek ide na disk
-# BEZ OHLADU na tuto hodnotu. Viz CAST VI.
+# -- Temporary tables ------------------------------------------------------
+# WARNING: WordPress/WooCommerce uses LONGTEXT (meta_value, post_content,
+# option_value), and the MEMORY engine cannot hold BLOB/TEXT. Approximately
+# 33% of temporary tables therefore go to disk REGARDLESS of this value.
+# See PART VI.
 tmp_table_size                 = 64M
-max_heap_table_size            = 64M     # musi sedet s tmp_table_size
+max_heap_table_size            = 64M     # must match tmp_table_size
 
-# ── MyISAM sa v modernom WP nepouziva ─────────────────────────────
+# -- MyISAM is not used by modern WordPress --------------------------------
 key_buffer_size                = 32M
 table_definition_cache         = 2000
 
-# ── Slow log (trvale, early warning) ──────────────────────────────
+# -- Slow log (permanent early warning) ------------------------------------
 slow_query_log                 = 1
 slow_query_log_file            = /var/log/mysql/slow.log
 long_query_time                = 2
 log_slow_verbosity             = query_plan
 
-# ── Query cache: ZAMERNE NENASTAVENA ──────────────────────────────
-# Rozhodni podla merania (Krok 0). Vypni LEN ak:
-#   hit rate < 20 %  ALEBO  Threads_running bezne > 8
+# -- Query cache: INTENTIONALLY NOT SET ------------------------------------
+# Decide from measurement (Step 0). Disable ONLY if:
+#   hit rate < 20%  OR  Threads_running p95 > 8
 # query_cache_type = 0
 # query_cache_size = 0
 ```
 
-### Nastavenia počas vyšetrovania
+### Settings during investigation
 
 ```ini
 long_query_time    = 0.5
 log_slow_verbosity = query_plan,explain
 ```
 
-**Pozor:** `explain` rozbije `mariadb-dumpslow` (`Died at line 185`). S `explain`
-analyzuj cez `pt-query-digest` (`apt install percona-toolkit`) alebo čítaj log priamo.
-Po vyšetrovaní vráť na `2` a `query_plan`.
+**Warning:** `explain` breaks `mariadb-dumpslow` (`Died at line 185`). With `explain`,
+analyze through `pt-query-digest` (`apt install percona-toolkit`) or read the log directly.
+After the investigation, restore `2` and `query_plan`.
 
 ---
 
-## Krok 3 — Nasadenie
+## Step 3 - Deployment
 
 ```bash
-# 1. Adresar pre slow log (idempotentne)
+# 1. Slow-log directory (idempotent)
 sudo install -d -o mysql -g mysql -m 750 /var/log/mysql
 
-# 2. Config subor
+# 2. Configuration file
 sudo tee /etc/mysql/mariadb.conf.d/99-zz-tuning.cnf > /dev/null <<'EOF'
-...obsah z Kroku 2...
+...contents from Step 2...
 EOF
 
-# 3. Kontrola
+# 3. Check
 sudo cat /etc/mysql/mariadb.conf.d/99-zz-tuning.cnf
-sudo ls -la /etc/mysql/mariadb.conf.d/99-zz-tuning.cnf   # ocakavane: -rw-r--r-- root root
+sudo ls -la /etc/mysql/mariadb.conf.d/99-zz-tuning.cnf   # expected: -rw-r--r-- root root
 ```
 
-Apostrofy okolo `'EOF'` sú povinné — bez nich bash interpretuje obsah.
+The quotes around `'EOF'` are mandatory; without them, Bash interprets the contents.
 
-### Prečo `/var/log/mysql/slow.log` a nie `/var/lib/mysql/`
+### Why `/var/log/mysql/slow.log`, not `/var/lib/mysql/`
 
-Balíkový logrotate (`/etc/logrotate.d/mariadb`) pokrýva:
+The package logrotate configuration (`/etc/logrotate.d/mariadb`) covers:
 
-```
+```text
 /var/lib/mysql/mysqld.log  /var/lib/mysql/mariadb.log  /var/log/mysql/*.log
 ```
 
-`/var/lib/mysql/slow.log` tam **nespadá** — vzor matchuje len tie dva konkrétne názvy.
-Rástol by donekonečna bez rotácie.
+`/var/lib/mysql/slow.log` is **not included** because the pattern matches only the two
+specific names. It would grow indefinitely without rotation.
 
-V `/var/log/mysql/` ho logrotate rieši sám: monthly, `maxsize 500M`, 6 kópií, compress,
-a `postrotate` volá `flush-slow-log`, takže MariaDB súbor korektne znovuotvorí.
+Under `/var/log/mysql/`, logrotate handles it automatically: monthly, `maxsize 500M`,
+6 copies, compression, and a `postrotate` call to `flush-slow-log`, so MariaDB reopens
+the file correctly.
 
 ---
 
-## Krok 4 — Validácia PRED reštartom
+## Step 4 - Validation BEFORE restart
 
-**Nepreskakuj.** Neznáma premenná alebo neplatná hodnota zastaví štart servera
-= shop je dole, kým to neopravíš.
+**Do not skip this.** An unknown variable or invalid value prevents the server from
+starting, leaving the store down until it is corrected.
 
 ```bash
 sudo install -d -o mysql -g mysql /tmp/mdb-validate
@@ -446,50 +456,50 @@ sudo mariadbd --validate-config --user=mysql --datadir=/tmp/mdb-validate 2>&1 \
 sudo rm -rf /tmp/mdb-validate
 ```
 
-### Ako čítať výstup
+### Reading the output
 
-Chyby o zámkoch **ignoruj** — pochádzajú od bežiaceho servera, nie z configu:
+**Ignore** lock errors; they come from the running server, not the configuration:
 
-```
+```text
 [ERROR] Can't lock aria control file ... error: 11
 [ERROR] InnoDB: Unable to lock ./ibdata1 error: 11
 [ERROR] Plugin 'Aria' registration as a STORAGE ENGINE failed.
 [ERROR] Failed to initialize plugins.  /  Aborting
 ```
 
-Toto je **dobrý** výstup — config sa prečítal a InnoDB ho prijal:
+This is **good** output: the configuration was read and accepted by InnoDB:
 
-```
-[Note] InnoDB: innodb_buffer_pool_size=4096m      <- tvoja hodnota
+```text
+[Note] InnoDB: innodb_buffer_pool_size=4096m      <- your value
 [Note] InnoDB: Completed initialization of buffer pool
 ```
 
-Toto je **zlý** výstup, nereštartuj:
+This is **bad** output; do not restart:
 
-```
+```text
 [ERROR] mariadbd: unknown variable 'xyz=abc'
 [ERROR] mariadbd: Error while setting value 'xyz' to 'abc'
 ```
 
-### Doplnková kontrola názvov (nulové riziko)
+### Additional variable-name check (zero risk)
 
 ```bash
 grep -oP '^\s*\K[a-z_]+(?=\s*=)' /etc/mysql/mariadb.conf.d/99-zz-tuning.cnf | while read v; do
   n=$(sudo mariadb -Nse "SELECT COUNT(*) FROM information_schema.GLOBAL_VARIABLES WHERE VARIABLE_NAME='${v//-/_}'")
-  [ "$n" = "0" ] && echo "NEZNAMA PREMENNA: $v"
+  [ "$n" = "0" ] && echo "UNKNOWN VARIABLE: $v"
 done
-echo "kontrola nazvov hotova"
+echo "variable-name check complete"
 ```
 
 ---
 
-## Krok 5 — Reštart a overenie
+## Step 5 - Restart and verification
 
-Reštartuj **z RunCloud panela**: *Services → MariaDB → Restart*.
-(Nie cez `systemctl`, nech si agent udrží konzistentný stav služby.)
+Restart **from the RunCloud panel**: *Services -> MariaDB -> Restart*.
+(Do not use `systemctl`; let the agent maintain consistent service state.)
 
-Prvý štart potrvá dlhšie, ak si menil `innodb_log_file_size` — MariaDB redo log prerába.
-Je to automatické a bezpečné.
+The first start takes longer after changing `innodb_log_file_size` because MariaDB
+rebuilds the redo log. This is automatic and safe.
 
 ```bash
 sudo mariadb -e "SELECT
@@ -501,7 +511,7 @@ sudo mariadb -e "SELECT
   @@long_query_time AS lqt, @@slow_query_log_file AS slowfile\G"
 ```
 
-Zdravotná kontrola ~5 minút po reštarte:
+Health check approximately 5 minutes after restart:
 
 ```bash
 sudo mariadb -e "SHOW GLOBAL STATUS WHERE Variable_name IN
@@ -510,14 +520,15 @@ sudo mariadb -e "SHOW GLOBAL STATUS WHERE Variable_name IN
 free -m
 ```
 
-| Metrika | Očakávané |
+| Metric | Expected |
 |---|---|
 | `Innodb_buffer_pool_wait_free` | 0 |
 | `Innodb_log_waits` | 0 |
 | `Aborted_connects` | 0 |
-| `swap used` | nehýbe sa |
+| `swap used` | does not move |
 
-**Zvýšené `Innodb_buffer_pool_reads` prvých 30–60 min je warm-up**, nie regresia.
+**Increased `Innodb_buffer_pool_reads` during the first 30-60 minutes is warm-up,**
+not a regression.
 
 ---
 
@@ -525,40 +536,46 @@ free -m
 
 ```bash
 sudo mv /etc/mysql/mariadb.conf.d/99-zz-tuning.cnf /root/
-sudo systemctl start mariadb     # ak nenastartovala
+sudo systemctl start mariadb     # only if MariaDB is inactive
 ```
 
-Preto samostatný súbor namiesto editovania `conf.d/runcloud.cnf` — rollback je
-jeden `mv`, bez rekonštrukcie pôvodných hodnôt.
+If MariaDB is already running, restart it through the RunCloud panel at
+*Services -> MariaDB -> Restart*. `systemctl start` is then a no-op, and the deployed
+runtime values remain effective until that restart. If MariaDB is inactive, the
+`systemctl start mariadb` command above starts it with the restored configuration.
+
+This is why the configuration uses a separate file rather than editing
+`conf.d/runcloud.cnf`: rollback is one `mv`, without reconstructing original values.
 
 ---
 
-# ČASŤ III — RunCloud špecifiká
+# PART III - RunCloud specifics
 
-Veci, na ktoré narazíš na **každom** ich serveri.
+These are conditions you encounter on **every** RunCloud server.
 
-### 1. Poradie načítania configu
+### 1. Configuration load order
 
-```
+```text
 /etc/mysql/mariadb.cnf
   !includedir /etc/mysql/conf.d/           <- 1. root.cnf, runcloud.cnf
   !includedir /etc/mysql/mariadb.conf.d/   <- 2. 50-*.cnf, 60-galera.cnf, 99-server.cnf
 ```
 
-`!includedir` číta `*.cnf` abecedne, adresáre v uvedenom poradí, **posledná hodnota vyhráva**.
+`!includedir` reads `*.cnf` alphabetically, directories in the listed order, and
+**the last value wins**.
 
-### 2. unattended-upgrades reštartuje MariaDB bez ohlásenia
+### 2. unattended-upgrades restarts MariaDB without notice
 
-```
+```text
 /etc/apt/apt.conf.d/50unattended-upgrades:
     Unattended-Upgrade::Allowed-Origins { ... "MariaDB:"; ... }
-    Unattended-Upgrade::Package-Blacklist { };   <- prazdny
+    Unattended-Upgrade::Package-Blacklist { };   <- empty
 ```
 
-`apt-daily-upgrade.timer` beží denne ~06:10 + náhodné oneskorenie.
-**Akékoľvek runtime `SET GLOBAL` nastavenie sa tým zmaže.** Preto config vždy do súboru.
+`apt-daily-upgrade.timer` runs daily at approximately 06:10 plus random delay.
+**Any runtime `SET GLOBAL` setting is erased.** Always put configuration in a file.
 
-Ak nechceš neohlásené reštarty DB (odporúčané pre eshop):
+If you do not want unannounced database restarts, which is recommended for a store:
 
 ```bash
 sudo tee /etc/apt/apt.conf.d/52-mariadb-blacklist > /dev/null <<'EOF'
@@ -569,71 +586,74 @@ EOF
 sudo unattended-upgrade --dry-run --debug 2>&1 | grep -i mariadb
 ```
 
-Cena: MariaDB bezpečnostné updaty aplikuješ ručne.
+The cost is applying MariaDB security updates manually.
 
-### 3. ACL na `/etc/mysql`
+### 3. ACL on `/etc/mysql`
 
-```
+```text
 group:users-rc:---
 ```
 
-Web užívateľ tam nevidí ani na čítanie. Všetko cez `root` alebo `runcloud`
-(jediný účet v skupine `sudo`).
+The web user cannot even read the directory. Perform all work through `root` or
+`runcloud`, the only account in the `sudo` group.
 
-### 4. `open_files_limit` z runcloud.cnf je fikcia
+### 4. `open_files_limit` from runcloud.cnf is fictional
 
-```
+```text
 runcloud.cnf:   open_files_limit = 100000
 systemd unit:   LimitNOFILE = 32768
-efektivne:      @@open_files_limit = 32768        <- ticho zrezane
+effective:      @@open_files_limit = 32768        <- silently capped
 ```
 
-Ak naozaj potrebuješ viac, je to systemd drop-in, nie `.cnf`.
+If you actually need more, use a systemd drop-in, not `.cnf`.
 
-### 5. `skip-log-bin` → žiadne PITR
+### 5. `skip-log-bin` means no PITR
 
-RunCloud vypína binárny log. **Jediná ochrana potvrdených transakcií je redo log.**
-Preto `innodb_flush_log_at_trx_commit = 1` v prenosnej časti povinný, nie voliteľný.
-(RunCloud default je 2 = pri výpadku stratíš ~1 s potvrdených objednávok.)
+RunCloud disables the binary log. **The redo log is the only protection for committed
+transactions.** Therefore `innodb_flush_log_at_trx_commit = 1` is mandatory in the
+portable section, not optional. RunCloud defaults to 2, which can lose approximately
+1 second of committed orders during an outage.
 
-`expire_logs_days` v `50-server.cnf` je pri tom mŕtvy config.
+`expire_logs_days` in `50-server.cnf` is dead configuration in this setup.
 
-### 6. Backup = mydumper, robí full scany
+### 6. Backup uses mydumper and performs full scans
 
-Podpis v slow logu:
+Slow-log signature:
+
+```sql
+SELECT /*!40001 SQL_NO_CACHE */ `col1`,`col2`,... FROM `table`     root[root]@localhost
 ```
-SELECT /*!40001 SQL_NO_CACHE */ `col1`,`col2`,... FROM `tabulka`     root[root]@localhost
-```
-(Explicitný zoznam stĺpcov = mydumper. `mysqldump` by použil `SELECT *`.)
 
-Číta kompletne najväčšie tabuľky pri každom behu. Pool nadimenzovaný na celý dataset
-spraví backup lacným. Skontroluj frekvenciu v paneli — pre 3–5 GB DB je backup
-každé 3 hodiny zbytočne časté.
+(The explicit column list indicates mydumper. `mysqldump` would use `SELECT *`.)
 
-### 7. Query cache — nediktuj presetom
+Every run reads the largest tables completely. A pool sized for the entire dataset
+makes the backup cheap. Check frequency in the panel; for a 3-5 GB database, a backup
+every 3 hours is unnecessarily frequent.
 
-RunCloud zapína `query_cache_size=128M`, `query_cache_type=1`.
+### 7. Query cache - do not dictate it through a preset
 
-| Hit rate | Threads_running | Verdikt |
+RunCloud enables `query_cache_size=128M`, `query_cache_type=1`.
+
+| Hit rate | Threads_running p95 | Verdict |
 |---|---|---|
-| < 20 % | ktokoľvek | vypni |
-| > 20 % | bežne < 8 | nechaj zapnutú |
-| > 20 % | bežne > 8 | vypni — mutex je väčšia brzda než prínos |
+| < 20% | any | disable |
+| >= 20% | <= 8 | keep enabled |
+| >= 20% | > 8 | disable; the mutex costs more than the benefit |
 
-**Pozor:** `query_cache_type = 0` **pri štarte** znamená, že sa už za behu nedá zapnúť.
-Návrat vyžaduje reštart.
+**Warning:** `query_cache_type = 0` **at startup** means it cannot be enabled at runtime.
+Returning to it requires a restart.
 
 ### 8. wp-cron
 
-RunCloud typicky nastaví `DISABLE_WP_CRON = true` + systémový cron cez `wget`.
-Over v `/etc/cron.d/runcloud-runcloud`. Ak tam wp-cron nie je a `DISABLE_WP_CRON`
-je `true`, **cron vôbec nebeží** — objednávky sa nespracujú.
+RunCloud typically sets `DISABLE_WP_CRON = true` plus a system cron using `wget`.
+Check `/etc/cron.d/runcloud-runcloud`. If wp-cron is absent there while
+`DISABLE_WP_CRON` is `true`, **cron does not run at all** and orders are not processed.
 
 ---
 
-# ČASŤ IV — Monitoring po nasadení
+# PART IV - Monitoring after deployment
 
-Odlož si výstup z Kroku 0 a po 24 hodinách porovnaj:
+Save the output from Step 0 and compare it after 24 hours:
 
 ```bash
 sudo mariadb -e "SHOW GLOBAL STATUS WHERE Variable_name IN
@@ -648,19 +668,19 @@ ps -o rss,etimes,times --no-headers -p $(pgrep -x mariadbd | head -1)
 sudo ls -lh /var/log/mysql/slow.log
 ```
 
-| Metrika | Cieľ | Ak nie |
+| Metric | Target | If not |
 |---|---|---|
-| BP hit ratio `1 - reads/read_requests` | > 99 % aj v 60 s okne | pool je malý |
-| `Innodb_data_read` delta | < 2 MB/s | pool je malý |
-| `pages_free` po špičkách | 5–25 % z `pages_total` | > 25 % = pool je zbytočne veľký |
-| `Innodb_buffer_pool_wait_free` | 0 | zvýš `io_capacity` |
-| `Innodb_log_waits` | 0 | zvýš `innodb_log_buffer_size` |
-| `Max_used_connections` | < 80 % `max_connections` | zvýš `max_connections` |
+| BP hit ratio `1 - reads/read_requests` | > 99% even in a 60-second window | pool is too small |
+| `Innodb_data_read` delta | < 2 MB/s | pool is too small |
+| `pages_free` after peaks | 5-25% of `pages_total` | > 25% means the pool is unnecessarily large |
+| `Innodb_buffer_pool_wait_free` | 0 | increase `io_capacity` |
+| `Innodb_log_waits` | 0 | increase `innodb_log_buffer_size` |
+| `Max_used_connections` | < 80% of `max_connections` | increase `max_connections` |
 
-### Pozor na priemery
+### Beware of averages
 
-Lifetime hit ratio je **zavádzajúce**. Server môže mať 99,8 % za 57 hodín a pritom
-v burste 28 %. Vždy meraj deltu v krátkom okne:
+The lifetime hit ratio is **misleading**. A server can report 99.8% over 57 hours
+while dropping to 28% during a burst. Always measure a delta over a short window:
 
 ```bash
 sudo mariadb -Nse "SELECT variable_value FROM information_schema.global_status
@@ -668,37 +688,36 @@ sudo mariadb -Nse "SELECT variable_value FROM information_schema.global_status
 sleep 60
 sudo mariadb -Nse "SELECT variable_value FROM information_schema.global_status
   WHERE variable_name IN ('INNODB_BUFFER_POOL_READS','INNODB_BUFFER_POOL_READ_REQUESTS')" > /tmp/s2
-paste /tmp/s1 /tmp/s2 | awk '{d[NR]=$2-$1} END{printf "hit ratio za 60s: %.2f%%  (%.0f missov/s)\n", 100*(1-d[1]/d[2]), d[1]/60}'
+paste /tmp/s1 /tmp/s2 | awk '{d[NR]=$2-$1} END{printf "60s hit ratio: %.2f%%  (%.0f misses/s)\n", 100*(1-d[1]/d[2]), d[1]/60}'
 ```
 
-### CPU meranie
+### CPU measurement
 
-`ps` ukazuje **lifetime priemer**, nie aktuálnu spotrebu:
+`ps` reports a **lifetime average**, not current consumption:
 
 ```bash
 P=$(pgrep -x mariadbd | head -1)
 T1=$(awk '{print $14+$15}' /proc/$P/stat); sleep 60
 T2=$(awk '{print $14+$15}' /proc/$P/stat)
-echo "$(( T2-T1 ))" | awk '{printf "%.1f%% jadra = %.2f h CPU/den\n", $1/60, $1/100/60*24}'
+echo "$(( T2-T1 ))" | awk '{printf "%.1f%% of a core = %.2f h CPU/day\n", $1/60, $1/100/60*24}'
 ```
 
 ---
 
-# ČASŤ V — Diagnostika
+# PART V - Diagnostics
 
-## Keď CPU žerie niečo neviditeľné
+## When CPU consumption is invisible
 
-**Slow log štrukturálne nevidí death-by-a-thousand-cuts.** Ak `Handler_read_rnd_next`
-ukazuje desaťtisíce riadkov/s, ale slow log je skoro prázdny, znamená to stovky
-rýchlych dotazov skenujúcich tisíce riadkov každý.
+**The slow log structurally cannot see death by a thousand cuts.** If
+`Handler_read_rnd_next` shows tens of thousands of rows per second while the slow log
+is nearly empty, hundreds of fast queries are each scanning thousands of rows.
 
-Prvá vec na kontrolu: **object cache** (Časť I, Krok A). Bez neho je to najčastejšia
-príčina.
+Check **object cache** first (Part I, Step A). Its absence is the most common cause.
 
-Ak object cache beží a problém trvá, jediný nástroj je `performance_schema` —
-ktorý RunCloud vypína.
+If object cache is running and the problem persists, the only tool is
+`performance_schema`, which RunCloud disables.
 
-Dočasný diagnostický blok (po vyšetrovaní zakomentovať a reštartovať):
+Temporary diagnostic block (comment out and restart after the investigation):
 
 ```ini
 performance_schema = ON
@@ -706,7 +725,7 @@ performance-schema-instrument = 'statement/%=ON'
 performance-schema-consumer-statements-digest = ON
 ```
 
-Cena: ~200–400 MB RAM a jednotky % CPU.
+The cost is approximately 200-400 MB RAM and a few percent CPU.
 
 ```sql
 SELECT LEFT(DIGEST_TEXT,100) AS query,
@@ -718,46 +737,49 @@ FROM performance_schema.events_statements_summary_by_digest
 ORDER BY SUM_TIMER_WAIT DESC LIMIT 25;
 ```
 
-Zoradenie podľa `SUM_TIMER_WAIT` dá presne to, čo slow log nedokáže: agregovaný čas
-naprieč všetkými volaniami, vrátane rýchlych.
+Sorting by `SUM_TIMER_WAIT` provides exactly what the slow log cannot: aggregate time
+across every call, including fast calls.
 
-## Slow log analýza
+## Slow-log analysis
 
 ```bash
 sudo mariadb-dumpslow -s t -t 25 /var/log/mysql/slow.log
 ```
 
-Ak spadne (`Died at line 185`), máš zapnutý `log_slow_verbosity` s `explain`.
-Použi `pt-query-digest` alebo čítaj log priamo.
+If it fails with `Died at line 185`, `log_slow_verbosity` includes `explain`.
+Use `pt-query-digest` or read the log directly.
 
 ---
 
-# ČASŤ VI — Čo NEROBIŤ
+# PART VI - What NOT to do
 
-Anti-patterny, ktoré kolujú po internete. Všetky vyzerajú rozumne a všetky sú
-v tomto kontexte zlé.
+These anti-patterns circulate online. They all appear reasonable and are all wrong
+in this context.
 
-## ❌ Index na `wp_postmeta.meta_value`
+## Do not add an index on `wp_postmeta.meta_value`
 
 ```sql
--- NEROB TOTO
+-- DO NOT DO THIS
 ALTER TABLE wp_postmeta ADD INDEX idx_meta_value(meta_value(191));
 ```
 
-1. **WP dotazy majú tvar `WHERE meta_key='X' AND meta_value='Y'`.** Potrebný je
-   **kompozitný** index `(meta_key(N), meta_value(N))`. Samostatný index na `meta_value`
-   má mizernú selektivitu a optimizer ho väčšinou nezvolí.
-2. **Veľkosť:** `191 × 4 B` (utf8mb4) = 764 B na položku. Pri 6M riadkoch rádovo
-   **1–3 GB nového indexu** — a rozbije ti to sizing buffer poolu.
-3. `postmeta` už typicky má viac indexov než dát (na referenčnom shope 931 MB
-   indexov vs 512 MB dát).
-4. **Write amplification** — WooCommerce zapisuje do `postmeta` pri každej objednávke.
+1. **WordPress queries use `WHERE meta_key='X' AND meta_value='Y'`.** They need a
+   **composite** index `(meta_key(N), meta_value(N))`. A standalone `meta_value` index
+   has poor selectivity and the optimizer usually does not choose it.
+2. **Size:** `191 x 4 B` (utf8mb4) = 764 B per entry. At 6M rows, that is roughly
+   **1-3 GB of new index**, invalidating buffer-pool sizing.
+3. `postmeta` typically already has more index than data (931 MB of indexes versus
+   512 MB of data on the reference store).
+4. **Write amplification:** WooCommerce writes to `postmeta` for every order.
 
-Ak už kompozitný index potrebuješ, tak v tomto tvare (a s krátkym prefixom):
+If a composite index is required, use this form with short prefixes:
+
 ```sql
 ALTER TABLE wp_postmeta ADD INDEX idx_mk_mv (meta_key(50), meta_value(15));
 ```
-Overenie, či niečo také už nemáš (pluginy ako WP All Import ich pridávajú samé):
+
+Check whether one already exists; plugins such as WP All Import add them themselves:
+
 ```sql
 SELECT INDEX_NAME, GROUP_CONCAT(CONCAT(COLUMN_NAME,IFNULL(CONCAT('(',SUB_PART,')'),''))
        ORDER BY SEQ_IN_INDEX) cols
@@ -765,139 +787,144 @@ FROM information_schema.STATISTICS
 WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='wp_postmeta' GROUP BY INDEX_NAME;
 ```
 
-## ❌ `innodb_buffer_pool_size` na 70–80 % RAM
+## Do not set `innodb_buffer_pool_size` to 70-80% of RAM
 
-Klasická polovica pravidla. **Pool nikdy nepojme viac dát, než existuje.**
-70 % zo 64 GB = 45 GB pre 3,5 GB dataset = 41 GB navždy nevyužitých.
+This is a classic rule of thumb. **The pool cannot hold more data than exists.**
+70% of 64 GB is 45 GB for a 3.5 GB dataset, leaving 41 GB permanently unused.
 
-Správne: `min(dataset × 1,3 ; RAM × 0,5)`.
+Correct: `min(dataset x 1.3; RAM x 0.5)`.
 
-Súvisiaci mýtus: *„nastav vysoko a potom zmenš podľa `pages_free`"*. Rast poolu je
-online a lacný, **zmenšovanie je tá rušivá operácia.**
+A related myth is to set it high and then shrink according to `pages_free`. Pool
+growth is online and cheap; **shrinking is the disruptive operation**.
 
-## ❌ Plošné „vypni query cache, veď ju MySQL 8 odstránil"
+## Do not blanket-disable query cache because MySQL 8 removed it
 
-Pravda **o MySQL**. MariaDB query cache nikdy neodstránila a v 11.4 ju stále udržiava.
-Argument sa na MariaDB nevzťahuje.
+That statement is true **for MySQL**. MariaDB never removed query cache and still
+maintains it in 11.4. The argument does not apply to MariaDB.
 
-Mutex problém je reálny, ale závisí od súbežnosti. Rozhodni meraním (Časť III, bod 7),
-nie citátom o MySQL.
+The mutex problem is real but depends on concurrency. Decide from measurement
+(Part III, item 7), not from a statement about MySQL.
 
-## ❌ Očakávať, že `tmp_table_size` odstráni disk temp tabuľky
+## Do not expect `tmp_table_size` to eliminate disk temporary tables
 
-MEMORY engine **nevie držať BLOB/TEXT**. WordPress používa LONGTEXT prakticky všade
-(`postmeta.meta_value`, `posts.post_content`, `options.option_value`), takže tie
-temp tabuľky idú na disk do Arie **bez ohľadu na `tmp_table_size`**.
+The MEMORY engine **cannot hold BLOB/TEXT**. WordPress uses LONGTEXT almost everywhere
+(`postmeta.meta_value`, `posts.post_content`, and `options.option_value`), so those
+temporary tables go to Aria on disk **regardless of `tmp_table_size`**.
 
-Namerané na referenčnom shope:
+Measured on the reference store:
 
-| `tmp_table_size` | disk temp tables |
+| `tmp_table_size` | disk temporary tables |
 |---|---|
-| 16M | 36,6 % |
-| **64M** | **33,3 %** |
+| 16M | 36.6% |
+| **64M** | **33.3%** |
 
-Nastav `64M` (pokryje dotazy bez TEXT), ale **nečakaj od toho zlepšenie**.
-MySQL 8 to vyriešil TempTable enginom, MariaDB nie. Opraviť sa to dá len prepisom
-dotazov na aplikačnej strane.
+Set `64M` to cover queries without TEXT, but **do not expect it to solve the problem**.
+MySQL 8 addressed this with the TempTable engine; MariaDB did not. The only fix is to
+rewrite the queries in the application layer.
 
-## ❌ Merať pamäť php-fpm cez súčet RSS
+## Do not measure php-fpm memory by summing RSS
 
 ```bash
-# ZLE — zdielana pamat (opcache) sa rata viacnasobne
+# WRONG - shared memory (opcache) is counted repeatedly
 ps --no-headers -o rss -C php-fpm | awk '{sum+=$1} END {print sum/1024" MB"}'
 ```
 
-Na referenčnom shope to dalo **18 GB**, kým `free` ukázal **8,4 GB pre celý stroj**.
-Ver `free -m` → `used`, nie súčtu RSS. To isté platí pre priemer (`sum/NR`).
+On the reference store, this reported **18 GB** while `free` showed **8.4 GB for the
+entire machine**. Trust `free -m` -> `used`, not summed RSS. The same applies to an
+average (`sum/NR`).
 
-## ❌ Action Scheduler retention na 1 deň
+## Do not set Action Scheduler retention to 1 day
 
-Prídeš o možnosť debugovať zlyhané akcie. **7 dní** je rozumný kompromis.
+You lose the ability to debug failed actions. **7 days** is a reasonable compromise.
 
-## ❌ Ladiť DB pred kontrolou object cache
+## Do not tune the database before checking object cache
 
-Buffer pool dotazy **zlacní**, object cache ich **odstráni**. Poradie má význam —
-inak si problém schováš pod RAM.
+The buffer pool makes queries **cheaper**; object cache **eliminates** them. Order
+matters, otherwise the problem is hidden under RAM.
 
 ---
 
-# Bezpečnostná kontrola
+# Security check
 
-Nesúvisí s výkonom, ale na RunCloud serveroch to stojí za pohľad pri prvom nasadení.
+This is unrelated to performance, but it is worth checking during the first deployment
+on a RunCloud server.
 
 ```bash
-# 1. Na com MariaDB posluchne
+# 1. Addresses on which MariaDB listens
 sudo mariadb -e "SELECT @@bind_address"
 ss -lntp | grep 3306
 
-# 2. Granty s wildcard hostom
+# 2. Grants with wildcard hosts
 sudo mariadb -e "SELECT user, host FROM mysql.user WHERE host NOT IN ('localhost','127.0.0.1')"
 
 # 3. Firewall
 sudo firewall-cmd --list-all
 ```
 
-Časté nálezy:
+Common findings:
 
-- **`/etc/mysql/mariadb.conf.d/99-server.cnf` obsahuje `bind-address=0.0.0.0`**
-  a prebíja `50-server.cnf` s `127.0.0.1`. Ak nemáš externý DB klient, patrí to späť.
-- **App user má `@'%'`** namiesto `@localhost`. WordPress sa pripája na `127.0.0.1`.
-- **`/etc/mysql/conf.d/root.cnf` obsahuje root heslo v plaintexte.** RunCloud agent ho
-  používa na správu databáz z panela — pri rotácii treba zmeniť heslo **aj v DB aj
-  v tom súbore naraz**, inak sa rozbije sekcia Database v paneli.
-- **`wp-config.php` obsahuje ďalšie tajomstvá** (`RCWP_REDIS_PASSWORD`, DB heslo,
-  salty). Pri zdieľaní configov to pozor.
+- **`/etc/mysql/mariadb.conf.d/99-server.cnf` contains `bind-address=0.0.0.0`** and
+  overrides `50-server.cnf` with `127.0.0.1`. If no external database client is
+  required, restore the local binding.
+- **The application user has `@'%'`** instead of `@localhost`. WordPress connects to
+  `127.0.0.1`.
+- **`/etc/mysql/conf.d/root.cnf` contains the root password in plaintext.** The RunCloud
+  agent uses it to manage databases from the panel. During rotation, change the password
+  **both in MariaDB and in that file at the same time**, or the panel's Database section breaks.
+- **`wp-config.php` contains other secrets** (`RCWP_REDIS_PASSWORD`, database password,
+  and salts). Take care when sharing configurations.
 
 ---
 
-# Príloha: referenčné merania
+# Appendix: reference measurements
 
-Prvý shop, na ktorom bol preset odvodený. Slúži ako mierka „ako to vyzerá v praxi".
+The first store from which the preset was derived. It serves as a scale reference for
+what production data looks like.
 
 ### Server
 
-```
+```text
 MariaDB 11.4.12  /  Ubuntu 24.04 noble  /  RunCloud
-CPU 12 jadier, RAM 64 GB
-2× Samsung MZVL2512HCJQ NVMe v RAID1 (md2, 436 GB)
+12 CPU cores, 64 GB RAM
+2x Samsung MZVL2512HCJQ NVMe in RAID1 (md2, 436 GB)
 ```
 
 ### Dataset
 
-```
-SUM(data_length + index_length)  =  3 499 MB  (3,42 GB)
-  data_length   1 826 MB
-  index_length  1 673 MB      <- ratio 0,92 : 1
-237 InnoDB tabuliek
+```text
+SUM(data_length + index_length)  =  3,499 MB  (3.42 GB)
+  data_length   1,826 MB
+  index_length  1,673 MB      <- ratio 0.92 : 1
+237 InnoDB tables
 ```
 
-| Tabuľka | Riadky | Total | Poznámka |
+| Table | Rows | Total | Note |
 |---|---|---|---|
-| `postmeta` | 6 077 309 | 1 443 MB | 931 MB indexy — 2 extra non-WP indexy z WP All Import |
-| `woocommerce_order_itemmeta` | 4 301 208 | 594 MB | |
-| `email_log` | 15 814 | 403 MB | **~26 KB/riadok** — plné telá emailov |
-| `comments` | 620 469 | 321 MB | |
-| `posts` | 106 862 | 131 MB | 92 288 z toho `shop_order` — HPOS vypnuté |
+| `postmeta` | 6,077,309 | 1,443 MB | 931 MB indexes; 2 extra non-WordPress indexes from WP All Import |
+| `woocommerce_order_itemmeta` | 4,301,208 | 594 MB | |
+| `email_log` | 15,814 | 403 MB | **approximately 26 KB per row**, full email bodies |
+| `comments` | 620,469 | 321 MB | |
+| `posts` | 106,862 | 131 MB | 92,288 are `shop_order`; HPOS disabled |
 
-### Aplikačná vrstva
+### Application layer
 
-```
-object cache:        ŽIADNY (Redis inactive, object-cache.php neexistuje)
+```text
+object cache:        NONE (Redis inactive, object-cache.php absent)
 page cache:          WP Rocket (WP_CACHE = true)
-autoload:            2,14 MB / 2 865 riadkov     <- 2× nad prahom
+autoload:            2.14 MB / 2,865 rows     <- 2x above threshold
   wpify_woo_heureka_xml_categories      566 KB
-  wpify_woo_heureka_xml_categories_sk   499 KB   <- 1,06 MB v dvoch options
-transienty v DB:     618 riadkov / 1,50 MB
-HPOS:                VYPNUTÝ — 92 288 objednávok v postmeta
-sessions:            16 568 riadkov (v poriadku)
-Action Scheduler:    25 280 akcií, z toho 7 467 failed image-optimization
-aktívnych pluginov:  50
+  wpify_woo_heureka_xml_categories_sk   499 KB   <- 1.06 MB in two options
+database transients: 618 rows / 1.50 MB
+HPOS:                DISABLED; 92,288 orders in postmeta
+sessions:            16,568 rows (acceptable)
+Action Scheduler:    25,280 actions, including 7,467 failed image-optimization actions
+active plugins:      50
 ```
 
-### Pôvodný MariaDB config (RunCloud default)
+### Original MariaDB configuration (RunCloud default)
 
-```
-innodb_buffer_pool_size = 128M      <- compiled-in default, nikto to nikdy neladil
+```text
+innodb_buffer_pool_size = 128M      <- compiled-in default, never tuned
 query_cache_size = 128M, type = ON  <- runcloud.cnf
 max_connections = 4096              <- runcloud.cnf
 innodb_lock_wait_timeout = 200      <- runcloud.cnf
@@ -907,55 +934,57 @@ performance_schema = OFF
 slow_query_log = OFF
 ```
 
-### Namerané pred zmenou
+### Measured before the change
 
+```text
+mariadbd CPU:  5.85 h / 57.4 h uptime  =  10.2% of a core
+lifetime BP hit ratio:  99.80%         <- MISLEADING
+
+burst (60-second window):  28% hit ratio, 2,414 misses/s, 39.6 MB/s from disk
+burst (148-second window): 53% hit ratio, 1,466 misses/s, 24.0 MB/s
+idle window (49 minutes):  96.7% hit ratio, 57 misses/s, 0.89 MB/s
+
+Handler_read_rnd_next:  12,782 rows/s while idle, 134,000/s during a burst
+disk temporary tables: 36.6%
+query cache hit rate:   30-32% (measured independently 3 times)
 ```
-CPU mariadbd:  5,85 h / 57,4 h uptime  =  10,2 % jadra
-lifetime BP hit ratio:  99,80 %        <- ZAVADZAJUCE
 
-burst (60 s okno):     hit ratio 28 %,  2 414 missov/s,  39,6 MB/s z disku
-burst (148 s okno):    hit ratio 53 %,  1 466 missov/s,  24,0 MB/s
-kludne okno (49 min):  hit ratio 96,7 %,   57 missov/s,   0,89 MB/s
+The pool held 3.7% of the dataset. The idle working set was only approximately 123 MB;
+the entire value of a larger pool comes from **absorbing bursts**, not idle operation.
 
-Handler_read_rnd_next:  12 782 riadkov/s v kludu,  134 000/s v burste
-disk temp tables:       36,6 %
-query cache hit rate:   30–32 %  (merane 3× nezavisle)
-```
+### What caused the bursts
 
-Pool držal 3,7 % datasetu. Kľudná pracovná množina bola len ~123 MB — celá hodnota
-väčšieho poolu je v **absorbovaní burstov**, nie v kľudnej prevádzke.
+The slow log over 14 hours at a 0.5-second threshold identified **mydumper backups**
+as the largest individual IO consumers: 4 runs in 14 hours, each reading all of
+`postmeta` (6.08M rows), `order_itemmeta` (4.16M), and `comments` (612K).
 
-### Čo bolo príčinou burstov
+**However,** the entire 14-hour slow log contained only **approximately 38 seconds** of
+queries above 0.5 seconds. That does not explain 4 hours of CPU per day. The rest is
+the volume of fast queries, most likely caused by **missing object cache**.
 
-Slow log (14 h, prah 0,5 s) ukázal ako najväčších jednotlivých žrútov IO
-**mydumper backupy** — 4 behy za 14 h, každý číta kompletne `postmeta` (6,08M riadkov),
-`order_itemmeta` (4,16M), `comments` (612k).
-
-**Ale:** celý 14-hodinový slow log obsahoval len **~38 sekúnd** dotazov nad 0,5 s.
-To nevysvetľuje 4 h CPU/deň. Zvyšok je objem rýchlych dotazov — a najpravdepodobnejší
-dôvod je **chýbajúci object cache**.
-
-### Nasadené hodnoty
+### Deployed values
 
 ```ini
-innodb_buffer_pool_size = 4G      # dataset 3,5 GB × 1,3 = 4,5 -> 4G stacilo
+innodb_buffer_pool_size = 4G      # dataset 3.5 GB x 1.3 = 4.5; 4G was sufficient
 innodb_log_file_size    = 1G
-max_connections         = 300     # peak bol 91, 86 php-fpm workerov
+max_connections         = 300     # peak was 91, with 86 php-fpm workers
 innodb_io_capacity      = 2000    # NVMe
 innodb_io_capacity_max  = 6000
 ```
 
-### Poučenia
+### Lessons
 
-1. **Runtime `SET GLOBAL` sa nedá použiť** — unattended-upgrades to zmazal
-   po 14 hodinách. Config vždy do súboru, hneď.
-2. **Lifetime countery klamú.** 99,8 % hit ratio pri poole, ktorý drží 3,7 % datasetu.
-   Vždy meraj krátke okná.
-3. **Súčet RSS php-fpm klame.** 18 GB podľa `ps`, ale 8,4 GB podľa `free` pre celý stroj.
-4. **Buffer pool nerastie okamžite.** Linux alokuje lazy — po zmene na 4G narástol
-   RSS len o 84 MB, zvyšok pribúdal postupne.
-5. **Väčší pool vytvára nové riziko.** Pri 128 MB bolo max špinavých stránok 115 MB,
-   pri 4G je to 2,4 GB. Preto `io_capacity` a `max_dirty_pages_pct_lwm` patria
-   do rovnakej zmeny, nie neskôr.
-6. **Slow log nevidí to hlavné.** 38 s pomalých dotazov za 14 h pri 4 h CPU/deň
-   znamená, že problém je inde — v objeme rýchlych dotazov, čiže v object cache.
+1. **Runtime `SET GLOBAL` cannot be used** because unattended-upgrades erased it after
+   14 hours. Always put configuration in a file immediately.
+2. **Lifetime counters lie.** A 99.8% hit ratio was reported for a pool holding 3.7%
+   of the dataset. Always measure short windows.
+3. **Summed php-fpm RSS lies.** `ps` reported 18 GB while `free` reported 8.4 GB for
+   the entire machine.
+4. **The buffer pool does not grow immediately.** Linux allocates lazily; after changing
+   to 4G, RSS grew by only 84 MB and the rest increased gradually.
+5. **A larger pool creates a new risk.** At 128 MB, the maximum dirty pages were 115 MB;
+   at 4G, they are 2.4 GB. Therefore `io_capacity` and `max_dirty_pages_pct_lwm` belong
+   in the same change, not a later one.
+6. **The slow log misses the main problem.** Thirty-eight seconds of slow queries over
+   14 hours with 4 hours of CPU per day means the problem lies elsewhere: in the volume
+   of fast queries, and therefore in object cache.
