@@ -12,7 +12,7 @@
   </p>
   <p>
     <a href="https://github.com/petervazan93/wooptima-db-tuner/actions/workflows/ci.yml"><img alt="CI workflow status" src="https://github.com/petervazan93/wooptima-db-tuner/actions/workflows/ci.yml/badge.svg?branch=main"></a>
-    <a href="https://github.com/petervazan93/wooptima-db-tuner/releases/tag/v0.3.0"><img alt="Latest published release: v0.3.0" src="https://img.shields.io/badge/release-v0.3.0-0969da"></a>
+    <a href="https://github.com/petervazan93/wooptima-db-tuner/releases/tag/v0.4.0"><img alt="Prepared release target: v0.4.0" src="https://img.shields.io/badge/release%20target-v0.4.0-0969da"></a>
     <img alt="Runtime: Bash 4 or newer" src="https://img.shields.io/badge/runtime-Bash%204%2B-4EAA25">
     <img alt="Supported MariaDB families: 10.6, 10.11, and 11.x" src="https://img.shields.io/badge/MariaDB-10.6%20%7C%2010.11%20%7C%2011.x-003545">
   </p>
@@ -32,7 +32,7 @@
 - **Keep mutation operator-controlled.** Audit and proposal generation do not apply configuration. Apply, restart, verification, and rollback are separate explicit steps.
 
 > [!IMPORTANT]
-> The latest published release is `v0.3.0`, with immutable artifact version `0.3.0`. The current source branch is preparing v0.4.0 with an English default, explicit `DBTUNE_UI_LANG=sk`, and the `fleet-v3` report contract. The pinned installation below installs published v0.3.0 and does not include those v0.4.0 localization or report features.
+> Release preparation is pinned to `v0.4.0`, with immutable artifact version `0.4.0`. This release defaults to English, selects Slovak explicitly with `DBTUNE_UI_LANG=sk`, and uses the `fleet-v3` report contract. The installation target below becomes available when the prepared tag and release are published.
 
 ## Lifecycle
 
@@ -96,10 +96,10 @@ CI coverage does not imply that every Ubuntu release or every MariaDB 11.x minor
 
 ## Pinned, attested installation
 
-The production-oriented path pins a published release, verifies the installer against its offline GitHub artifact-attestation bundle, lets you inspect it, and only then executes it with privileges. It never pipes remote code into a root shell.
+The production-oriented path pins the prepared `v0.4.0` release target, verifies the installer against its offline GitHub artifact-attestation bundle, lets you inspect it, and only then executes it with privileges. Run it after the tag and release assets are published. It never pipes remote code into a root shell.
 
 ```bash
-release=v0.3.0
+release=v0.4.0
 curl --proto '=https' --tlsv1.2 -fsSLo install.sh \
   "https://github.com/petervazan93/wooptima-db-tuner/releases/download/$release/install.sh"
 curl --proto '=https' --tlsv1.2 -fsSLo dbtune-attestation.jsonl \
@@ -114,7 +114,7 @@ less install.sh
 sudo sh install.sh --version "$release"
 ```
 
-This pinned procedure currently installs `v0.3.0`; it does not install the upcoming v0.4.0 interface. Bundle verification does not require `gh auth login` or an API token. The installer then verifies the selected `dbtune` artifact's SHA-256 checksum, GitHub attestation, fixed upstream repository and owner, signer workflow, exact release source ref, and Bash syntax before atomically publishing `/usr/local/bin/dbtune`. It does not run an audit or change MariaDB.
+This pinned procedure targets the prepared `v0.4.0` release and works after its tag and assets are published. Bundle verification does not require `gh auth login` or an API token. The installer then verifies the selected `dbtune` artifact's SHA-256 checksum, GitHub attestation, fixed upstream repository and owner, signer workflow, exact release source ref, and Bash syntax before atomically publishing `/usr/local/bin/dbtune`. It does not run an audit or change MariaDB.
 
 The installer requires POSIX `sh`, Linux, `curl`, `gh`, Bash 4+, `install`, `stat`, a SHA-256 tool, and `sudo` for a privileged destination. See [Security](SECURITY.md#installation) for mirror and trust-policy details.
 
@@ -135,7 +135,7 @@ dbtune status | version
 dbtune _tick
 ```
 
-The upcoming v0.4.0 source defaults to English. Slovak is selected explicitly for the executable and installer with `DBTUNE_UI_LANG=sk`; only `en` and `sk` are accepted. Commands, options, paths, keys, enums, booleans, schema versions, and exit statuses are never localized. Published v0.3.0 does not implement this selector.
+The v0.4.0 executable and installer default to English. Slovak is selected explicitly with `DBTUNE_UI_LANG=sk`; only `en` and `sk` are accepted. Commands, options, paths, keys, enums, booleans, schema versions, and exit statuses are never localized.
 
 ## Documentation
 

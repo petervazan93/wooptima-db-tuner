@@ -17,7 +17,17 @@ jobs:
       - name: Install test tools
         run: sudo apt-get update && sudo apt-get install -y bats shellcheck python3
       - name: Verify, test and build
-        run: make check && make test && make integration && make build
+        run: make check && make test && make build
+      - name: MariaDB lifecycle integration (English)
+        env:
+          DBTUNE_REQUIRE_INTEGRATION: 1
+          DBTUNE_UI_LANG: en
+        run: make integration
+      - name: MariaDB lifecycle integration (Slovak)
+        env:
+          DBTUNE_REQUIRE_INTEGRATION: 1
+          DBTUNE_UI_LANG: sk
+        run: make integration
       - name: Verify tag matches artifact version
         run: test "v$(dist/dbtune version | awk '{print $2}')" = "$GITHUB_REF_NAME"
       - name: Attest release artifacts

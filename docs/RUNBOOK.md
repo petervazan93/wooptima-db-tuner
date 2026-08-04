@@ -15,7 +15,7 @@
 - `collect start` stores the validated language as `ui_lang` in root-owned `collect.tsv`. The systemd `_tick` path restores it before lifecycle diagnostics and before automatic analyze/report completion, so unattended output keeps the language selected at collection start.
 - The flat JSON report schema is `fleet-v3`. It includes `report.language`, stable reason and warning IDs, and localized display text. Consumers must use stable IDs and machine keys rather than parse localized prose.
 - v0.4.0 `analysis.tsv` keeps eight columns but ends in `reason_id`. Report, propose, and apply reject the old `reason_sk` header without translating, rehashing, or mutating it. Start a new v0.4.0 audit and measurement cycle. Existing apply history and rollback recovery remain available.
-- The currently published release is `v0.3.0`, and the immutable artifact version is still `0.3.0`; v0.4.0 is a new feature-release cycle built on that release.
+- Release preparation is pinned to `v0.4.0`, and the immutable artifact version is `0.4.0`; publishing the tag and release assets remains a separate release action.
 
 ## Pilot
 
