@@ -12,6 +12,7 @@ setup() {
     export REAL_CURL
     export REAL_ID
     export REAL_STAT
+    export STAGING_METADATA_COUNT="$BATS_TEST_TMPDIR/staging-metadata-count"
     REAL_CURL=$(command -v curl)
     REAL_ID=$(command -v id)
     REAL_STAT=$(command -v stat)
@@ -61,19 +62,31 @@ cat >"$STUB_BIN/stat" <<'STUB'
 #!/bin/sh
 case " $* " in
     *' %h '*|*' %l '*)
-        printf '%s\n' 1
+        metadata_count=$(cat "$STAGING_METADATA_COUNT" 2>/dev/null || printf '%s\n' 0)
+        if [ "$metadata_count" -ge 2 ]; then
+            printf '%s\n' "${STUB_STAT_EXEC_LINKS:-${STUB_STAT_LINKS:-1}}"
+        else
+            printf '%s\n' "${STUB_STAT_STAGE_LINKS:-${STUB_STAT_LINKS:-1}}"
+        fi
         exit 0
         ;;
     *'/.dbtune.new.'*)
-        last=
-        for argument in "$@"; do
-            last=$argument
-        done
-        if [ -x "$last" ]; then
-            printf '%s %s\n' "${STUB_STAT_UID:-0}" 755
+        metadata_count=$(cat "$STAGING_METADATA_COUNT" 2>/dev/null || printf '%s\n' 0)
+        metadata_count=$((metadata_count + 1))
+        printf '%s\n' "$metadata_count" >"$STAGING_METADATA_COUNT"
+        if [ "$metadata_count" -ge 2 ]; then
+            uid=${STUB_STAT_EXEC_UID:-${STUB_STAT_UID:-0}}
+            gid=${STUB_STAT_EXEC_GID:-${STUB_STAT_GID:-0}}
+            mode=${STUB_STAT_EXEC_MODE:-755}
         else
-            printf '%s %s\n' "${STUB_STAT_UID:-0}" 644
+            uid=${STUB_STAT_STAGE_UID:-${STUB_STAT_UID:-0}}
+            gid=${STUB_STAT_STAGE_GID:-${STUB_STAT_GID:-0}}
+            mode=${STUB_STAT_STAGE_MODE:-644}
         fi
+        case " $* " in
+            *' %u %g %a '*|*' %u %g %Lp '*) printf '%s %s %s\n' "$uid" "$gid" "$mode" ;;
+            *) printf '%s %s\n' "$uid" "$mode" ;;
+        esac
         exit 0
         ;;
 esac
@@ -128,6 +141,38 @@ teardown() {
 
 bats::on_failure() {
     printf '%s\n' "$output" >&3
+}
+
+prepare_existing_privileged_target() {
+    PRIVILEGED_TEST_ROOT=$(mktemp -d "$PROJECT_ROOT/.installer-test.XXXXXX")
+    export PRIVILEGED_TEST_ROOT
+    INSTALL_DIR="$PRIVILEGED_TEST_ROOT/bin"
+    mkdir "$INSTALL_DIR"
+    printf '%s\n' 'previous target' >"$INSTALL_DIR/dbtune"
+    chmod 0555 "$INSTALL_DIR"
+}
+
+run_privileged_installer() {
+    rm -f "$STAGING_METADATA_COUNT"
+    chmod 0555 "$INSTALL_DIR"
+    run env DBTUNE_DOWNLOAD_BASE="file://$RELEASE_DIR" \
+        DBTUNE_INSTALL_DIR="$INSTALL_DIR" \
+        DBTUNE_ALLOW_UNSUPPORTED_OS=1 \
+        STUB_ID_UID=1000 \
+        STUB_STAT_UID=0 \
+        STUB_STAT_GID=0 \
+        STUB_STAT_MODE=755 \
+        STUB_SUDO_EXEC=1 \
+        "$@" \
+        sh "$BATS_TEST_DIRNAME/../../install.sh"
+}
+
+assert_privileged_metadata_rejection() {
+    [ "$status" -ne 0 ]
+    [ "$(cat "$INSTALL_DIR/dbtune")" = 'previous target' ]
+    if [ -e "$SUDO_LOG" ]; then
+        ! grep -F -- 'mv -f' "$SUDO_LOG"
+    fi
 }
 
 @test "installer help defaults to English" {
@@ -417,6 +462,50 @@ ARTIFACT
     grep -F -- "$INSTALL_DIR/.dbtune.new." "$ATTESTATION_LOG"
     grep -F -- "chmod 0755 $INSTALL_DIR/.dbtune.new." "$SUDO_LOG"
     grep -F -- "mv -f $INSTALL_DIR/.dbtune.new." "$SUDO_LOG"
+}
+
+@test "installer rejects wrong staging owner before publication at both modes" {
+    prepare_existing_privileged_target
+
+    run_privileged_installer STUB_STAT_STAGE_UID=1001
+    assert_privileged_metadata_rejection
+
+    : >"$SUDO_LOG"
+    run_privileged_installer STUB_STAT_EXEC_UID=1001
+    assert_privileged_metadata_rejection
+}
+
+@test "installer rejects wrong staging group before publication at both modes" {
+    prepare_existing_privileged_target
+
+    run_privileged_installer STUB_STAT_STAGE_GID=1001
+    assert_privileged_metadata_rejection
+
+    : >"$SUDO_LOG"
+    run_privileged_installer STUB_STAT_EXEC_GID=1001
+    assert_privileged_metadata_rejection
+}
+
+@test "installer rejects wrong staging mode before publication at both checks" {
+    prepare_existing_privileged_target
+
+    run_privileged_installer STUB_STAT_STAGE_MODE=600
+    assert_privileged_metadata_rejection
+
+    : >"$SUDO_LOG"
+    run_privileged_installer STUB_STAT_EXEC_MODE=700
+    assert_privileged_metadata_rejection
+}
+
+@test "installer rejects staging hardlinks before publication at both checks" {
+    prepare_existing_privileged_target
+
+    run_privileged_installer STUB_STAT_STAGE_LINKS=2
+    assert_privileged_metadata_rejection
+
+    : >"$SUDO_LOG"
+    run_privileged_installer STUB_STAT_EXEC_LINKS=2
+    assert_privileged_metadata_rejection
 }
 
 @test "installer preserves the existing target when staged executable smoke validation fails" {

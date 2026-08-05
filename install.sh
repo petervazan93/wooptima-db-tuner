@@ -410,12 +410,20 @@ find_nearest_existing_parent() {
 STAT_STYLE=
 configure_stat() {
     command -v stat >/dev/null 2>&1 || fail stat_missing
-    if stat -c '%u %a' -- / >/dev/null 2>&1; then
+    if stat -c '%u %g %a' -- / >/dev/null 2>&1; then
         STAT_STYLE=gnu
-    elif stat -f '%u %Lp' / >/dev/null 2>&1; then
+    elif stat -f '%u %g %Lp' / >/dev/null 2>&1; then
         STAT_STYLE=bsd
     else
         fail stat_unsupported
+    fi
+}
+
+staging_metadata() {
+    if [ "$STAT_STYLE" = gnu ]; then
+        stat -c '%u %g %a' -- "$1"
+    else
+        stat -f '%u %g %Lp' "$1"
     fi
 }
 
@@ -440,11 +448,13 @@ validate_privileged_staging() {
     expected_mode=$2
     [ -f "$staging" ] && [ ! -L "$staging" ] ||
         fail temporary_target_not_regular "$staging"
-    metadata=$(directory_metadata "$staging") ||
+    metadata=$(staging_metadata "$staging") ||
         fail temporary_target_metadata "$staging"
     owner=${metadata%% *}
-    mode=${metadata#* }
-    [ "$owner" -eq 0 ] && [ "$mode" = "$expected_mode" ] ||
+    group_and_mode=${metadata#* }
+    group=${group_and_mode%% *}
+    mode=${group_and_mode#* }
+    [ "$owner" -eq 0 ] && [ "$group" -eq 0 ] && [ "$mode" = "$expected_mode" ] ||
         fail temporary_target_metadata "$staging"
     links=$(file_link_count "$staging") ||
         fail temporary_target_metadata "$staging"
