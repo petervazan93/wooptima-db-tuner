@@ -30,6 +30,8 @@ The commands above target the `v0.4.1` release candidate and work after its tag 
 
 The release workflow creates one SLSA provenance statement with three subjects: `dbtune`, `dbtune.sha256`, and `install.sh`. `dbtune-attestation.jsonl` is a published offline bundle, not a subject. `dbtune.sha256` contains the digest of `dbtune`. The manual preflight verifies the `install.sh` subject; the installer checks the checksum and verifies the `dbtune` subject against the upstream repository, owner, signer workflow, exact tag, and GitHub-hosted runner policy.
 
+For a privileged destination, the installer first creates a root-owned `0644` non-executable staging inode in the trusted destination directory. It verifies that inode's checksum, attestation, Bash syntax, and embedded version before changing it to `0755`, directly executes the staged path for its executable version smoke check, and revalidates the inode and destination path. Only then does `mv` atomically publish that same inode; no bytes are copied after their final trust verification.
+
 ### v0.4.1 interface contract
 
 The v0.4.1 installer and executable default to English. Set `DBTUNE_UI_LANG=sk` explicitly for the Slovak executable interface. Only `en` and `sk` are accepted; an unsupported non-empty value is rejected with exit status 64 before command dispatch or installer trust checks. The selected language never changes repository, provenance, checksum, publication, or runtime safety validation.
