@@ -446,16 +446,22 @@ file_link_count() {
 validate_privileged_staging() {
     staging=$1
     expected_mode=$2
-    [ -f "$staging" ] && [ ! -L "$staging" ] ||
+    if [ -f "$staging" ] && [ ! -L "$staging" ]; then
+        :
+    else
         fail temporary_target_not_regular "$staging"
+    fi
     metadata=$(staging_metadata "$staging") ||
         fail temporary_target_metadata "$staging"
     owner=${metadata%% *}
     group_and_mode=${metadata#* }
     group=${group_and_mode%% *}
     mode=${group_and_mode#* }
-    [ "$owner" -eq 0 ] && [ "$group" -eq 0 ] && [ "$mode" = "$expected_mode" ] ||
+    if [ "$owner" -eq 0 ] && [ "$group" -eq 0 ] && [ "$mode" = "$expected_mode" ]; then
+        :
+    else
         fail temporary_target_metadata "$staging"
+    fi
     links=$(file_link_count "$staging") ||
         fail temporary_target_metadata "$staging"
     [ "$links" -eq 1 ] || fail temporary_target_hardlinks "$staging"
