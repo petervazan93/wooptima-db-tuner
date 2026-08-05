@@ -499,7 +499,7 @@ dbtune_collect_status_snapshot() {
 }
 
 dbtune_collect_cpu_snapshot() {
-    local pid stat_file values
+    local pid stat_file values user_ticks system_ticks start ticks
 
     pid=$("${DBTUNE_PGREP:-pgrep}" -xo mariadbd 2>/dev/null) || {
         printf '0\t0\t0\n'
@@ -507,8 +507,10 @@ dbtune_collect_cpu_snapshot() {
     }
     stat_file="${DBTUNE_PROC_ROOT:-/proc}/$pid/stat"
     [[ -r $stat_file ]] || { printf '0\t0\t0\n'; return 0; }
-    values=$(awk '{ print $14 + $15 "\t" $22 }' "$stat_file") || return
-    printf '%s\t%s\n' "$pid" "$values"
+    values=$(awk '{ print $14 "\t" $15 "\t" $22 }' "$stat_file") || return
+    IFS=$'\t' read -r user_ticks system_ticks start <<<"$values"
+    ticks=$(dbtune_uint64_add "$user_ticks" "$system_ticks") || return 65
+    printf '%s\t%s\t%s\n' "$pid" "$ticks" "$start"
 }
 
 dbtune_collect_monotonic() {
@@ -549,29 +551,27 @@ dbtune_collect_interval_status() {
     fi
 }
 
-dbtune_collect_restart_detected() {
+dbtune_collect_uptime_status() {
     local previous_uptime=$1 previous_monotonic=$2 previous_epoch=$3
-    local previous_pid=$4 previous_start=$5 uptime_first=$6 uptime_second=$7
-    local monotonic_now=$8 now=$9 cpu_first=${10} cpu_second=${11}
-    local current_pid current_start second_pid second_start elapsed='' skew
+    local uptime_first=$4 uptime_second=$5 monotonic_now=$6 now=$7
+    local comparison elapsed='' skew minimum_required uptime_delta
 
-    IFS=$'\t' read -r current_pid _ current_start <<<"$cpu_first"
-    IFS=$'\t' read -r second_pid _ second_start <<<"$cpu_second"
-    if [[ $previous_pid =~ ^[1-9][0-9]*$ && $previous_start =~ ^[1-9][0-9]*$ &&
-        $current_pid =~ ^[1-9][0-9]*$ && $current_start =~ ^[1-9][0-9]*$ ]] &&
-        [[ $previous_pid != "$current_pid" || $previous_start != "$current_start" ]]; then
+    if ! dbtune_uint64_valid "$previous_uptime" || ! dbtune_uint64_valid "$uptime_first" ||
+        ! dbtune_uint64_valid "$uptime_second"; then
+        printf 'degraded_counter_inconsistent\n'
         return 0
     fi
-    if [[ $current_pid =~ ^[1-9][0-9]*$ && $current_start =~ ^[1-9][0-9]*$ &&
-        $second_pid =~ ^[1-9][0-9]*$ && $second_start =~ ^[1-9][0-9]*$ ]] &&
-        [[ $current_pid != "$second_pid" || $current_start != "$second_start" ]]; then
+    comparison=$(dbtune_uint64_compare "$uptime_second" "$uptime_first") || return 65
+    if ((comparison < 0)); then
+        printf 'degraded_counter_reset\n'
+        return 0
+    elif ((comparison == 0)); then
+        printf 'degraded_counter_inconsistent\n'
         return 0
     fi
-    if awk -v first="$uptime_first" -v second="$uptime_second" 'BEGIN { exit !(second <= first) }'; then
-        return 0
-    fi
-    if [[ $previous_uptime =~ ^[0-9]+([.][0-9]+)?$ ]] &&
-        awk -v previous="$previous_uptime" -v current="$uptime_first" 'BEGIN { exit !(current < previous) }'; then
+    comparison=$(dbtune_uint64_compare "$uptime_first" "$previous_uptime") || return 65
+    if ((comparison < 0)); then
+        printf 'degraded_counter_reset\n'
         return 0
     fi
 
@@ -584,11 +584,26 @@ dbtune_collect_restart_detected() {
     fi
     skew=${DBTUNE_RESTART_SKEW_SECONDS:-5}
     [[ $skew =~ ^[0-9]+([.][0-9]+)?$ ]] || skew=5
-    if [[ -n $elapsed ]] && awk -v previous="$previous_uptime" -v current="$uptime_first" \
-        -v elapsed="$elapsed" -v skew="$skew" 'BEGIN { exit !(current + skew < previous + elapsed) }'; then
-        return 0
+    if [[ -n $elapsed ]]; then
+        minimum_required=$(awk -v elapsed="$elapsed" -v skew="$skew" 'BEGIN {
+            minimum=elapsed-skew
+            if (minimum <= 0) { print 0; exit }
+            rounded=int(minimum)
+            if (rounded < minimum) rounded++
+            printf "%.0f\n", rounded
+        }') || return 65
+        dbtune_uint64_valid "$minimum_required" || {
+            printf 'degraded_counter_inconsistent\n'
+            return 0
+        }
+        uptime_delta=$(dbtune_uint64_subtract "$uptime_first" "$previous_uptime") || return 65
+        comparison=$(dbtune_uint64_compare "$uptime_delta" "$minimum_required") || return 65
+        if ((comparison < 0)); then
+            printf 'degraded_counter_inconsistent\n'
+            return 0
+        fi
     fi
-    return 1
+    printf 'ok\n'
 }
 
 dbtune_collect_cpu_identity_valid() {
@@ -626,13 +641,8 @@ dbtune_collect_restart_status() {
         printf 'degraded_restart_identity\n'
         return 0
     fi
-    if dbtune_collect_restart_detected "$previous_uptime" "$previous_monotonic" "$previous_epoch" \
-        "$previous_pid" "$previous_start" "$uptime_first" "$uptime_second" "$monotonic_now" \
-        "$now" "$cpu_first" "$cpu_second"; then
-        printf 'restart\n'
-    else
-        printf 'ok\n'
-    fi
+    dbtune_collect_uptime_status "$previous_uptime" "$previous_monotonic" "$previous_epoch" \
+        "$uptime_first" "$uptime_second" "$monotonic_now" "$now"
 }
 
 dbtune_collect_identity_valid() {
@@ -685,6 +695,7 @@ dbtune_collect_delta() {
     local timestamp=$1 first=$2 second=$3 seconds=$4 cpu_first=$5 cpu_second=$6
     local clock_ticks=$7 memory=$8 load1=$9 restart_flag=${10}
     local sample_status=${11:-ok} comparison name high low difference reset_names=''
+    local first_pid first_ticks first_extra second_pid second_ticks second_extra cpu_delta=0
     local -a a=() b=() deltas=()
     local -a cumulative=(2 3 4 5 6 7 10 11 12 13)
     local -a names=(buffer_pool_reads buffer_pool_read_requests innodb_data_read handler_read_rnd_next created_tmp_disk_tables created_tmp_tables qcache_hits com_select innodb_log_waits innodb_buffer_pool_wait_free)
@@ -692,6 +703,19 @@ dbtune_collect_delta() {
     IFS=$'\t' read -r -a a <<<"$first"
     IFS=$'\t' read -r -a b <<<"$second"
     ((${#a[@]} == 13 && ${#b[@]} == 13)) || return 65
+    IFS=$'\t' read -r first_pid first_ticks _ first_extra <<<"$cpu_first"
+    IFS=$'\t' read -r second_pid second_ticks _ second_extra <<<"$cpu_second"
+    if ((restart_flag)); then
+        cpu_delta=0
+    elif [[ -z $first_extra && -z $second_extra && $first_pid == "$second_pid" ]] &&
+        dbtune_uint64_valid "$first_ticks" && dbtune_uint64_valid "$second_ticks"; then
+        comparison=$(dbtune_uint64_compare "$second_ticks" "$first_ticks") || return 65
+        if ((comparison < 0)); then
+            reset_names=cpu_ticks
+        else
+            cpu_delta=$(dbtune_uint64_subtract "$second_ticks" "$first_ticks") || return 65
+        fi
+    fi
     if ((restart_flag)); then
         deltas=(0 0 0 0 0 0 0 0 0 0)
     else
@@ -719,22 +743,21 @@ dbtune_collect_delta() {
     fi
 
     awk -F '\t' -v timestamp="$timestamp" -v first="$first" -v second="$second" \
-        -v seconds="$seconds" -v cpu_first="$cpu_first" -v cpu_second="$cpu_second" \
+        -v seconds="$seconds" \
         -v hz="$clock_ticks" -v memory="$memory" -v load1="$load1" -v restart="$restart_flag" \
         -v sample_status="$sample_status" -v reads="${deltas[0]}" -v requests="${deltas[1]}" \
         -v data_read="${deltas[2]}" -v rnd="${deltas[3]}" -v tmp_disk="${deltas[4]}" \
         -v tmp_total="${deltas[5]}" -v qhits="${deltas[6]}" -v selects="${deltas[7]}" \
-        -v log_waits="${deltas[8]}" -v wait_free="${deltas[9]}" '
+        -v log_waits="${deltas[8]}" -v wait_free="${deltas[9]}" -v cpu_delta="$cpu_delta" '
         BEGIN {
             split(first, a, "\t"); split(second, b, "\t")
-            split(cpu_first, c1, "\t"); split(cpu_second, c2, "\t")
             split(memory, mem, "\t")
             valid_interval=(sample_status == "ok" && seconds > 0)
             bp_hit=requests > 0 ? 100*(1-reads/requests) : 100
             if (bp_hit < 0) bp_hit=0; if (bp_hit > 100) bp_hit=100
             tmp_pct=tmp_total > 0 ? 100*tmp_disk/tmp_total : 0
             qcache_pct=selects > 0 ? 100*qhits/selects : 0
-            cpu=(valid_interval && !restart && c1[1] == c2[1] && c1[1] != 0 && c2[2] >= c1[2] && hz > 0) ? 100*(c2[2]-c1[2])/(hz*seconds) : 0
+            cpu=(valid_interval && !restart && hz > 0) ? 100*cpu_delta/(hz*seconds) : 0
             printf "%s\t%s\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%s\t%s\t%.2f\t%s\t%s\t%.2f\t%s\t%s\t%s\t%d\t%s\t%.6f\t%s\n",
                 timestamp,b[1],bp_hit,valid_interval ? reads/seconds : 0,valid_interval ? data_read/seconds : 0,valid_interval ? rnd/seconds : 0,tmp_pct,
                 b[8],b[9],qcache_pct,log_waits,wait_free,cpu,mem[1],mem[2],load1,restart,selects,seconds,sample_status
@@ -898,8 +921,8 @@ dbtune_collect_tick_body() {
     fi
     interval_seconds=$(dbtune_collect_interval_seconds "$monotonic_first" "$monotonic_second" 2>/dev/null) || interval_seconds=0
     interval_status=$(dbtune_collect_interval_status "$interval_seconds" "$sample_seconds")
-    if [[ $restart_status == degraded_restart_identity ]]; then
-        sample_status=degraded_restart_identity
+    if [[ $restart_status == degraded_* ]]; then
+        sample_status=$restart_status
     else
         sample_status=$interval_status
     fi

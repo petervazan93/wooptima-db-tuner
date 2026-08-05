@@ -1016,6 +1016,26 @@ dbtune_uint64_subtract() {
     printf '%s\n' "$result"
 }
 
+dbtune_uint64_add() {
+    local left=${1:-} right=${2:-}
+    local left_index right_index left_digit right_digit digit carry=0 result=''
+
+    dbtune_uint64_valid "$left" && dbtune_uint64_valid "$right" || return 65
+    left_index=$((${#left} - 1))
+    right_index=$((${#right} - 1))
+    while ((left_index >= 0 || right_index >= 0 || carry)); do
+        if ((left_index >= 0)); then left_digit=${left:left_index:1}; else left_digit=0; fi
+        if ((right_index >= 0)); then right_digit=${right:right_index:1}; else right_digit=0; fi
+        digit=$((left_digit + right_digit + carry))
+        carry=$((digit / 10))
+        result="$((digit % 10))$result"
+        left_index=$((left_index - 1))
+        right_index=$((right_index - 1))
+    done
+    dbtune_uint64_valid "$result" || return 65
+    printf '%s\n' "$result"
+}
+
 dbtune_status_snapshot_exact() {
     local raw=${1-} line key value normalized expected_key
     local -a expected=("${@:2}")

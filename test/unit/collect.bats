@@ -255,6 +255,54 @@ source_tick_dispatch() {
     [ "$output" = restart ]
 }
 
+@test "unchanged restart identity degrades contradictory uptime with exact uint64 ordering" {
+    local state first=$'100\t10\t100\t1000\t20\t2\t10\t3\t8\t30\t60\t1\t1'
+    local second=$'160\t20\t120\t1100\t30\t3\t12\t3\t8\t32\t64\t2\t2'
+
+    run dbtune_collect_restart_status 100 1000 999000 10 20 110 109 1100 1000000 $'10\t100\t20' $'10\t101\t20'
+    [ "$status" -eq 0 ]
+    [ "$output" = degraded_counter_reset ]
+    state=$output
+    run dbtune_collect_delta now "$first" "$second" 60 $'10\t100\t20' $'10\t101\t20' 100 $'900000\t12000' 1.25 0 "$state"
+    [ "$status" -eq 0 ]
+    [ "$(awk -F '\t' '{print $11, $12, $17, $20}' <<<"$output")" = '1 1 0 degraded_counter_reset' ]
+
+    run dbtune_collect_restart_status 120 1000 999000 10 20 110 170 1100 1000000 $'10\t100\t20' $'10\t101\t20'
+    [ "$output" = degraded_counter_reset ]
+
+    run dbtune_collect_restart_status 100 1000 999000 10 20 110 170 1100 1000000 $'10\t100\t20' $'10\t101\t20'
+    [ "$output" = degraded_counter_inconsistent ]
+
+    run dbtune_collect_restart_status bad 1000 999000 10 20 110 170 1100 1000000 $'10\t100\t20' $'10\t101\t20'
+    [ "$output" = degraded_counter_inconsistent ]
+
+    run dbtune_collect_restart_status 9007199254740992 1000 999000 10 20 9007199254740993 9007199254740994 1001 1000000 $'10\t9007199254740992\t20' $'10\t9007199254740993\t20'
+    [ "$output" = ok ]
+}
+
+@test "CPU snapshots and percentages preserve one tick above the AWK integer range" {
+    local proc="$BATS_TEST_TMPDIR/proc"
+    mkdir -p "$proc/42"
+    printf '42 (mariadbd) S 0 0 0 0 0 0 0 0 0 0 9007199254740992 1 0 0 0 0 0 0 123\n' >"$proc/42/stat"
+    export DBTUNE_PROC_ROOT=$proc
+    export DBTUNE_PGREP=fake_pgrep
+    fake_pgrep() { printf '42\n'; }
+
+    run dbtune_collect_cpu_snapshot
+    [ "$status" -eq 0 ]
+    [ "$output" = $'42\t9007199254740993\t123' ]
+
+    first=$'100\t10\t100\t1000\t20\t2\t10\t3\t8\t30\t60\t1\t1'
+    second=$'101\t10\t100\t1000\t20\t2\t10\t3\t8\t30\t60\t1\t1'
+    run dbtune_collect_delta now "$first" "$second" 1 $'42\t9007199254740992\t123' $'42\t9007199254740993\t123' 100 $'900000\t12000' 1.25 0 ok
+    [ "$status" -eq 0 ]
+    [ "$(awk -F '\t' '{print $13, $20}' <<<"$output")" = '1.00 ok' ]
+
+    run dbtune_collect_delta now "$first" "$second" 1 $'42\t9007199254740993\t123' $'42\t9007199254740992\t123' 100 $'900000\t12000' 1.25 0 ok
+    [ "$status" -eq 0 ]
+    [ "$(awk -F '\t' '{print $13, $20}' <<<"$output")" = '0.00 degraded_counter_reset' ]
+}
+
 @test "counter inconsistent deltas are degraded and inspector rejects representable corruption" {
     local first=$'100\t10\t100\t1000\t20\t2\t10\t3\t8\t30\t60\t1\t1'
     local second
