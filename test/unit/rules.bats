@@ -41,6 +41,8 @@ backup.last_success	2026-07-23T02:00:00Z
 backup_interval_hours	6
 bind_address	127.0.0.1
 wildcard_grants	0
+security.grants_audited	1
+security.hostname_grant_count	0
 EOF
 }
 
@@ -686,6 +688,49 @@ EOF
     done
 }
 
+@test "skip_name_resolve uses exact current value and hostname grant evidence matrix" {
+    local current evidence expected_verdict expected_key expected_value file
+    make_audit "$BATS_TEST_TMPDIR/base.tsv"
+    make_samples "$BATS_TEST_TMPDIR/samples.tsv" 30 2 10
+
+    for current in ON 1 OFF 0 missing unknown unresolved 2 arbitrary; do
+        for evidence in zero positive failed malformed; do
+            file="$BATS_TEST_TMPDIR/skip-$current-$evidence.tsv"
+            awk -F '\t' '$1 != "security.grants_audited" && $1 != "security.hostname_grant_count" && $1 != "mariadb.variable.skip_name_resolve" {print}' \
+                "$BATS_TEST_TMPDIR/base.tsv" >"$file"
+            [[ $current == missing ]] || printf 'mariadb.variable.skip_name_resolve\t%s\n' "$current" >>"$file"
+            case $evidence in
+                zero) printf 'security.grants_audited\t1\nsecurity.hostname_grant_count\t0\n' >>"$file" ;;
+                positive) printf 'security.grants_audited\t1\nsecurity.hostname_grant_count\t2\n' >>"$file" ;;
+                failed) printf 'security.grants_audited\t0\nsecurity.hostname_grant_count\tunknown\n' >>"$file" ;;
+                malformed) printf 'security.grants_audited\t1\nsecurity.hostname_grant_count\tbad\n' >>"$file" ;;
+            esac
+
+            dbtune_rules_analyze "$file" "$BATS_TEST_TMPDIR/samples.tsv" "" "" "" 10 >"$file.analysis"
+
+            expected_verdict=UNKNOWN
+            expected_key=''
+            expected_value=''
+            if [[ $current == ON || $current == 1 || $current == OFF || $current == 0 ]]; then
+                if [[ $evidence == positive ]]; then
+                    expected_verdict=REVIEW
+                elif [[ $evidence == zero ]]; then
+                    if [[ $current == ON || $current == 1 ]]; then
+                        expected_verdict=OK
+                    else
+                        expected_verdict=CHANGE
+                        expected_key=skip_name_resolve
+                        expected_value=1
+                    fi
+                fi
+            fi
+            run awk -F '\t' '$1=="R-PINNED" && $8 ~ /^reason_skip_name_resolve/ {print $4 "\t" $5 "\t" $6; exit}' "$file.analysis"
+            [ "$status" -eq 0 ]
+            [ "$output" = "$expected_verdict"$'\t'"$expected_key"$'\t'"$expected_value" ]
+        done
+    done
+}
+
 @test "production audit scoped TSV contract feeds server and app rules" {
     cat >"$BATS_TEST_TMPDIR/audit.tsv" <<'EOF'
 mariadb.version	11.4.12-MariaDB
@@ -706,6 +751,8 @@ app.system_wp_cron	0
 redis.maxmemory_policy	allkeys-lru
 backup.schedule_count	1
 security.remote_grant_count	1
+security.grants_audited	1
+security.hostname_grant_count	1
 security.port_3306	public
 landmine.innodb_change_buffering.severity	critical
 EOF

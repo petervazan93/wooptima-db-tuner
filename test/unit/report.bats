@@ -46,6 +46,8 @@ audit.section.mariadb.optional_evidence	mariadb.variable.innodb_flush_method=dep
 audit.section.hardware.status	complete
 audit.section.applications.status	complete
 audit.section.security.status	complete
+security.grants_audited	1
+security.hostname_grant_count	0
 audit.required_sections	mariadb,hardware,applications,security
 audit.failed_sections	none
 audit.partial_sections	none
@@ -191,6 +193,8 @@ CNF
     grep -F '"audit.overall_status":"PASS"' "$DBTUNE_STATE_DIR/report.json"
     grep -F '"audit.exit_status":"0"' "$DBTUNE_STATE_DIR/report.json"
     grep -F '"audit.section.security.status":"complete"' "$DBTUNE_STATE_DIR/report.json"
+    grep -F '"security.grants_audited":"1"' "$DBTUNE_STATE_DIR/report.json"
+    grep -F '"security.hostname_grant_count":"0"' "$DBTUNE_STATE_DIR/report.json"
     grep -F '"audit.section.mariadb.evidence_schema_version":"1"' "$DBTUNE_STATE_DIR/report.json"
     grep -F '"audit.section.mariadb.invalid_evidence":"none"' "$DBTUNE_STATE_DIR/report.json"
     grep -F '_Run: `report-run`' "$DBTUNE_STATE_DIR/report.md"

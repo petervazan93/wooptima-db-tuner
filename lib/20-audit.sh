@@ -1138,7 +1138,7 @@ dbtune_audit_collect_apps() {
 dbtune_audit_collect_platform() {
     local out=${1:-}
     local runcloud=${DBTUNE_RUNCLOUD_CNF:-/etc/mysql/conf.d/runcloud.cnf}
-    local key value limit=unknown fpm=0 backup=0 backup_schedules=0 grants rows count=0 listener=unknown
+    local key value limit=unknown fpm=0 backup=0 backup_schedules=0 listener=unknown
     local evidence backup_status=unknown backup_source=unknown backup_checked=unknown backup_success=unknown
     local unattended=${DBTUNE_UNATTENDED_CONFIG:-/etc/apt/apt.conf.d/50unattended-upgrades}
 
@@ -1217,19 +1217,7 @@ dbtune_audit_collect_platform() {
         dbtune_audit_put "$out" php_fpm.ols_stack 0
     fi
 
-    if rows=$(dbtune_audit_sql "SELECT CONCAT(USER,'@',HOST) FROM mysql.user WHERE HOST NOT IN ('localhost','127.0.0.1','::1') ORDER BY USER,HOST"); then
-        dbtune_audit_put "$out" security.grants_audited 1
-    else
-        rows=''
-        dbtune_audit_put "$out" security.grants_audited 0
-        dbtune_audit_put "$out" finding.grants_query_failed warning
-    fi
-    while IFS= read -r grants; do
-        [[ -n $grants ]] || continue
-        dbtune_audit_put "$out" "security.remote_grant.$count" "$grants"
-        count=$((count + 1))
-    done <<<"$rows"
-    dbtune_audit_put "$out" security.remote_grant_count "$count"
+    dbtune_audit_collect_grants "$out"
     if command -v ss >/dev/null 2>&1; then
         if ss -lnt 2>/dev/null | command awk '$4 ~ /(^|:)(0\.0\.0\.0|\[::\]|\*)?:?3306$/ { found=1 } END { exit !found }'; then
             listener=public
@@ -1246,6 +1234,163 @@ dbtune_audit_collect_platform() {
         dbtune_audit_put "$out" security.root_cnf_note contains_credentials_do_not_share
     else
         dbtune_audit_put "$out" security.root_cnf_present 0
+    fi
+}
+
+dbtune_grant_host_classify() {
+    local host=${1-}
+
+    [[ -n $host && ${host^^} != NULL && $host != '\N' && ! $host =~ [[:cntrl:]] ]] || return 65
+    command awk '
+        function canonical_octet(value) {
+            return value ~ /^(0|[1-9][0-9]{0,2})$/ && value + 0 <= 255
+        }
+        function ipv4(value, parts, count, i) {
+            count = split(value, parts, ".")
+            if (count != 4) return 0
+            for (i = 1; i <= count; i++) if (!canonical_octet(parts[i])) return 0
+            return 1
+        }
+        function ipv4_wildcard(value, prefix, parts, count, i) {
+            if (value !~ /[.]%$/) return 0
+            prefix = substr(value, 1, length(value) - 2)
+            count = split(prefix, parts, ".")
+            if (count < 1 || count > 3) return 0
+            for (i = 1; i <= count; i++) if (!canonical_octet(parts[i])) return 0
+            return 1
+        }
+        function contiguous_mask(value, parts, count, i, bit, octet, zero_seen) {
+            if (!ipv4(value)) return 0
+            count = split(value, parts, ".")
+            for (i = 1; i <= count; i++) {
+                octet = parts[i] + 0
+                for (bit = 128; bit >= 1; bit /= 2) {
+                    if (octet >= bit) {
+                        if (zero_seen) return 0
+                        octet -= bit
+                    } else zero_seen = 1
+                }
+            }
+            return 1
+        }
+        function ipv4_netmask(value, slash, address, mask) {
+            slash = index(value, "/")
+            if (!slash || index(substr(value, slash + 1), "/")) return 0
+            address = substr(value, 1, slash - 1)
+            mask = substr(value, slash + 1)
+            return ipv4(address) && contiguous_mask(mask)
+        }
+        function hex_group(value) {
+            return value ~ /^[[:xdigit:]]+$/ && length(value) <= 4
+        }
+        function ipv6(value, last_colon, tail, expanded, rest, double_at, left, right, groups, count, i, total) {
+            if (value !~ /:/ || value ~ /[^[:xdigit:]:.]/) return 0
+            if (value ~ /[.]/) {
+                last_colon = 0
+                for (i = 1; i <= length(value); i++) if (substr(value, i, 1) == ":") last_colon = i
+                if (!last_colon) return 0
+                tail = substr(value, last_colon + 1)
+                if (!ipv4(tail)) return 0
+                value = substr(value, 1, last_colon) "0:0"
+            }
+            double_at = index(value, "::")
+            if (double_at) {
+                rest = substr(value, double_at + 2)
+                if (index(rest, "::")) return 0
+                left = substr(value, 1, double_at - 1)
+                right = rest
+                total = 0
+                if (left != "") {
+                    count = split(left, groups, ":")
+                    for (i = 1; i <= count; i++) if (!hex_group(groups[i])) return 0
+                    total += count
+                }
+                if (right != "") {
+                    count = split(right, groups, ":")
+                    for (i = 1; i <= count; i++) if (!hex_group(groups[i])) return 0
+                    total += count
+                }
+                return total < 8
+            }
+            count = split(value, groups, ":")
+            if (count != 8) return 0
+            for (i = 1; i <= count; i++) if (!hex_group(groups[i])) return 0
+            return 1
+        }
+        function ipv6_wildcard(value, prefix, groups, count, i) {
+            if (value !~ /:%$/) return 0
+            prefix = substr(value, 1, length(value) - 2)
+            count = split(prefix, groups, ":")
+            if (count < 1 || count > 7) return 0
+            for (i = 1; i <= count; i++) if (!hex_group(groups[i])) return 0
+            return 1
+        }
+        BEGIN {
+            host = ARGV[1]
+            if (host == "localhost" || host == "%" || ipv4(host) || ipv4_wildcard(host) ||
+                ipv4_netmask(host) || ipv6(host) || ipv6_wildcard(host)) print "address"
+            else print "hostname"
+            exit
+        }
+    ' "$host"
+}
+
+dbtune_grant_hex_decode() {
+    local hex=${1-}
+    local escaped='' pair
+
+    [[ $hex =~ ^([[:xdigit:]]{2})*$ && ${hex^^} != *00* ]] || return 65
+    while [[ -n $hex ]]; do
+        pair=${hex:0:2}
+        escaped+="\\x$pair"
+        hex=${hex:2}
+    done
+    printf '%b' "$escaped"
+}
+
+dbtune_audit_collect_grants() {
+    local out=${1:-}
+    local grants_file='' line user_hex host_hex host class key hostname_count=0 failed=0
+    local -A seen=()
+
+    if ! grants_file=$(mktemp "${TMPDIR:-/tmp}/dbtune-grants.XXXXXX") || ! chmod 600 "$grants_file"; then
+        failed=1
+    elif ! dbtune_audit_sql 'SELECT HEX(USER), HEX(HOST) FROM mysql.user ORDER BY USER,HOST' >"$grants_file"; then
+        failed=1
+    else
+        while IFS= read -r line || [[ -n $line ]]; do
+            if [[ $line != *$'\t'* || ${line#*$'\t'} == *$'\t'* ]]; then
+                failed=1
+                break
+            fi
+            user_hex=${line%%$'\t'*}
+            host_hex=${line#*$'\t'}
+            key="${user_hex^^}:${host_hex^^}"
+            if [[ -n ${seen[$key]+x} ]]; then
+                failed=1
+                break
+            fi
+            seen[$key]=1
+            if ! dbtune_grant_hex_decode "$user_hex" >/dev/null ||
+                ! host=$(dbtune_grant_hex_decode "$host_hex") ||
+                ! class=$(dbtune_grant_host_classify "$host"); then
+                failed=1
+                break
+            fi
+            [[ $class != hostname ]] || hostname_count=$((hostname_count + 1))
+        done <"$grants_file"
+    fi
+    [[ -z $grants_file ]] || rm -f "$grants_file"
+
+    if ((failed)); then
+        dbtune_audit_put "$out" security.grants_audited 0
+        dbtune_audit_put "$out" security.hostname_grant_count unknown
+        dbtune_audit_put "$out" security.remote_grant_count unknown
+        dbtune_audit_put "$out" finding.grants_query_failed warning
+    else
+        dbtune_audit_put "$out" security.grants_audited 1
+        dbtune_audit_put "$out" security.hostname_grant_count "$hostname_count"
+        dbtune_audit_put "$out" security.remote_grant_count "$hostname_count"
     fi
 }
 
@@ -1286,7 +1431,8 @@ dbtune_audit_finalize_status() {
     local database_file=${3:-}
     local available mariadb_status hardware_status applications_status security_status version family
     local cpu ram storage discovery app_count app_partial app_failed app_status_count
-    local grants listener hardware_evidence=0 findings=0 incomplete=0 failed_count=0
+    local grants grants_count hostname_grants hostname_grants_count listener listener_count
+    local grant_evidence=0 listener_evidence=0 hardware_evidence=0 findings=0 incomplete=0 failed_count=0
     local evidence_key evidence_value validator requirement _role first_value quarantined_conflicts
     local evidence_present evidence_conflict mariadb_missing='' mariadb_invalid='' mariadb_conflicting='' mariadb_optional=''
     local overall exit_status section status domain failed_sections='' partial_sections='' affected_domains=''
@@ -1378,11 +1524,14 @@ dbtune_audit_finalize_status() {
         applications_status=complete
     fi
 
-    grants=$(command awk -F '\t' '$1=="security.grants_audited" {print $2; exit}' "$audit")
-    listener=$(command awk -F '\t' '$1=="security.port_3306" {print tolower($2); exit}' "$audit")
-    if [[ $grants == 1 && -n $listener && $listener != unknown ]]; then
+    IFS=$'\t' read -r grants_count grants < <(command awk -F '\t' '$1=="security.grants_audited" {count++; if (count==1) value=$2} END {print count+0 "\t" value}' "$audit")
+    IFS=$'\t' read -r hostname_grants_count hostname_grants < <(command awk -F '\t' '$1=="security.hostname_grant_count" {count++; if (count==1) value=$2} END {print count+0 "\t" value}' "$audit")
+    IFS=$'\t' read -r listener_count listener < <(command awk -F '\t' '$1=="security.port_3306" {count++; if (count==1) value=tolower($2)} END {print count+0 "\t" value}' "$audit")
+    [[ $grants_count == 1 && $grants == 1 && $hostname_grants_count == 1 && $hostname_grants =~ ^(0|[1-9][0-9]*)$ ]] && grant_evidence=1
+    [[ $listener_count == 1 && $listener =~ ^(local|public|not_listening)$ ]] && listener_evidence=1
+    if ((grant_evidence && listener_evidence)); then
         security_status=complete
-    elif [[ $grants != 1 && ( -z $listener || $listener == unknown ) ]]; then
+    elif ((!grant_evidence && !listener_evidence)); then
         security_status=failed
     else
         security_status=partial

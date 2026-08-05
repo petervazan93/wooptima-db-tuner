@@ -958,6 +958,8 @@ dbtune_render_json() {
     dbtune_json_add_audit_value audit.section.hardware.status audit.section.hardware.status
     dbtune_json_add_audit_value audit.section.applications.status audit.section.applications.status
     dbtune_json_add_audit_value audit.section.security.status audit.section.security.status
+    dbtune_json_add_audit_value security.grants_audited security.grants_audited
+    dbtune_json_add_audit_value security.hostname_grant_count security.hostname_grant_count
     dbtune_json_add_audit_value server.hostname audit.hostname hostname host.name server.hostname
     dbtune_json_add_audit_value server.mariadb_version mariadb_version mariadb.version server.mariadb_version
     dbtune_json_add_audit_value server.os os os_version server.os

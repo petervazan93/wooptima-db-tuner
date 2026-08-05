@@ -929,6 +929,18 @@ dbtune_i18n_lookup() {
         sk:reason_skip_name_resolve)
             DBTUNE_I18N_MESSAGE='Lokálne aplikácie nepotrebujú reverzné DNS.'
             ;;
+        en:reason_skip_name_resolve_hostname_grants)
+            DBTUNE_I18N_MESSAGE='Hostname-dependent grants require review before enabling skip_name_resolve.'
+            ;;
+        sk:reason_skip_name_resolve_hostname_grants)
+            DBTUNE_I18N_MESSAGE='Granty závislé od hostname vyžadujú kontrolu pred zapnutím skip_name_resolve.'
+            ;;
+        en:reason_skip_name_resolve_unknown)
+            DBTUNE_I18N_MESSAGE='Valid current-value and grant evidence is required before changing skip_name_resolve.'
+            ;;
+        sk:reason_skip_name_resolve_unknown)
+            DBTUNE_I18N_MESSAGE='Zmena skip_name_resolve vyžaduje platnú aktuálnu hodnotu a dôkazy o grantoch.'
+            ;;
         en:reason_thread_cache)
             DBTUNE_I18N_MESSAGE='The cache reduces thread creation cost.'
             ;;
@@ -1030,6 +1042,12 @@ dbtune_i18n_lookup() {
             ;;
         sk:reason_security_ok)
             DBTUNE_I18N_MESSAGE='Audit nenašiel verejný listener ani vzdialený grant.'
+            ;;
+        en:reason_security_unknown)
+            DBTUNE_I18N_MESSAGE='Security exposure cannot be determined without complete grant evidence.'
+            ;;
+        sk:reason_security_unknown)
+            DBTUNE_I18N_MESSAGE='Bez úplných dôkazov o grantoch sa bezpečnostné vystavenie nedá určiť.'
             ;;
         en:reason_root_cnf_credential)
             DBTUNE_I18N_MESSAGE='Never print the root.cnf password; rotate it simultaneously in MariaDB and the RunCloud file.'

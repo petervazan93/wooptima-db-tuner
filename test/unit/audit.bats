@@ -447,6 +447,124 @@ EOF
     [ "$status" -eq 0 ]
 }
 
+@test "grant host classifier accepts only exact address forms" {
+    local host
+    local addresses=(
+        localhost % 0.0.0.0 255.255.255.255 192.168.% 10.%
+        192.0.2.1/255.255.255.0 192.0.2.1/255.255.255.255 192.0.2.1/0.0.0.0
+        2001:db8:0:0:0:0:0:1 2001:db8::1 ::1 ::ffff:192.0.2.128
+        2001:db8:% ABCD:%
+    )
+    local hostnames=(
+        db.example.com '192.168.\%' '192.168._' '192.168.example.%'
+        256.1.2.3 01.2.3.4 1..2.3 192.0.2.1/255.0.255.0
+        192.0.2.1/255.255.255 192.0.2.1/33 :::: abcd:host
+    )
+
+    for host in "${addresses[@]}"; do
+        run dbtune_grant_host_classify "$host"
+        [ "$status" -eq 0 ]
+        [ "$output" = address ]
+    done
+    for host in "${hostnames[@]}"; do
+        run dbtune_grant_host_classify "$host"
+        [ "$status" -eq 0 ]
+        [ "$output" = hostname ]
+    done
+    for host in '' NULL '\N' $'host\001name'; do
+        run dbtune_grant_host_classify "$host"
+        [ "$status" -eq 65 ]
+        [ -z "$output" ]
+    done
+}
+
+@test "hostname grant collection validates and decodes exact HEX account rows" {
+    dbtune_audit_sql() {
+        printf '%s\n' "$1" >"$BATS_TEST_TMPDIR/grants-query.sql"
+        printf '%s\n' \
+            $'726F6F74\t6C6F63616C686F7374' \
+            $'617070\t3139322E3136382E25' \
+            $'617070\t64622E6578616D706C652E636F6D' \
+            $'61707032\t64622E6578616D706C652E636F6D'
+    }
+
+    dbtune_audit_collect_platform "$BATS_TEST_TMPDIR/platform.tsv"
+
+    grep -F 'HEX(USER), HEX(HOST)' "$BATS_TEST_TMPDIR/grants-query.sql"
+    grep -F $'security.grants_audited\t1' "$BATS_TEST_TMPDIR/platform.tsv"
+    grep -F $'security.hostname_grant_count\t2' "$BATS_TEST_TMPDIR/platform.tsv"
+    run grep -F 'db.example.com' "$BATS_TEST_TMPDIR/platform.tsv"
+    [ "$status" -ne 0 ]
+    run grep -F 'security.remote_grant.' "$BATS_TEST_TMPDIR/platform.tsv"
+    [ "$status" -ne 0 ]
+}
+
+@test "hostname grant collection fails closed on duplicate malformed NUL and invalid host rows" {
+    local name
+    for name in duplicate extra missing blank odd nonhex nul empty_host; do
+        case $name in
+            duplicate) GRANT_ROWS=$'61\t6C6F63616C686F7374\n61\t6C6F63616C686F7374' ;;
+            extra) GRANT_ROWS=$'61\t6C6F63616C686F7374\t00' ;;
+            missing) GRANT_ROWS='61' ;;
+            blank) GRANT_ROWS='' ;;
+            odd) GRANT_ROWS=$'61\t123' ;;
+            nonhex) GRANT_ROWS=$'61\tGG' ;;
+            nul) GRANT_ROWS=$'6100\t6C6F63616C686F7374' ;;
+            empty_host) GRANT_ROWS=$'61\t' ;;
+        esac
+        dbtune_audit_sql() { printf '%s\n' "$GRANT_ROWS"; }
+        dbtune_audit_collect_platform "$BATS_TEST_TMPDIR/$name.tsv"
+
+        [ "$(awk -F '\t' '$1=="security.grants_audited" {print $2}' "$BATS_TEST_TMPDIR/$name.tsv")" = 0 ]
+        [ "$(awk -F '\t' '$1=="security.hostname_grant_count" {print $2}' "$BATS_TEST_TMPDIR/$name.tsv")" = unknown ]
+        [ "$(awk -F '\t' '$1=="security.grants_audited" {count++} END {print count+0}' "$BATS_TEST_TMPDIR/$name.tsv")" = 1 ]
+        [ "$(awk -F '\t' '$1=="security.hostname_grant_count" {count++} END {print count+0}' "$BATS_TEST_TMPDIR/$name.tsv")" = 1 ]
+        [[ -z $GRANT_ROWS ]] || ! grep -F "$GRANT_ROWS" "$BATS_TEST_TMPDIR/$name.tsv"
+    done
+}
+
+@test "security evidence is complete only for one audited status and one uint hostname count" {
+    local grants count expected file
+    : >"$BATS_TEST_TMPDIR/status-apps.tsv"
+    : >"$BATS_TEST_TMPDIR/status-databases.tsv"
+    for grants in zero one malformed missing; do
+        for count in zero positive unknown malformed missing duplicate; do
+            file="$BATS_TEST_TMPDIR/security-$grants-$count.tsv"
+            printf '%s\n' $'mariadb.available\t0' $'hw.cpu_count\t0' $'hw.ram_bytes\t0' \
+                $'hw.storage_class\tunknown' $'app.discovery_status\tfailed' $'app.count\t0' \
+                $'security.port_3306\tlocal' >"$file"
+            case $grants in
+                zero) printf 'security.grants_audited\t0\n' >>"$file" ;;
+                one) printf 'security.grants_audited\t1\n' >>"$file" ;;
+                malformed) printf 'security.grants_audited\tmaybe\n' >>"$file" ;;
+            esac
+            case $count in
+                zero) printf 'security.hostname_grant_count\t0\n' >>"$file" ;;
+                positive) printf 'security.hostname_grant_count\t2\n' >>"$file" ;;
+                unknown) printf 'security.hostname_grant_count\tunknown\n' >>"$file" ;;
+                malformed) printf 'security.hostname_grant_count\t-1\n' >>"$file" ;;
+                duplicate) printf 'security.hostname_grant_count\t0\nsecurity.hostname_grant_count\t0\n' >>"$file" ;;
+            esac
+
+            dbtune_audit_finalize_status "$file" "$BATS_TEST_TMPDIR/status-apps.tsv" "$BATS_TEST_TMPDIR/status-databases.tsv"
+
+            expected=partial
+            [[ $grants == one && ( $count == zero || $count == positive ) ]] && expected=complete
+            [ "$(awk -F '\t' '$1=="audit.section.security.status" {print $2}' "$file")" = "$expected" ]
+        done
+    done
+}
+
+@test "grant query failure emits one failed status and unknown hostname count" {
+    dbtune_audit_sql() { return 1; }
+
+    dbtune_audit_collect_platform "$BATS_TEST_TMPDIR/platform.tsv"
+
+    [ "$(awk -F '\t' '$1=="security.grants_audited" {print $2}' "$BATS_TEST_TMPDIR/platform.tsv")" = 0 ]
+    [ "$(awk -F '\t' '$1=="security.hostname_grant_count" {print $2}' "$BATS_TEST_TMPDIR/platform.tsv")" = unknown ]
+    [ "$(awk -F '\t' '$1 ~ /^security[.](grants_audited|hostname_grant_count)$/ {count++} END {print count+0}' "$BATS_TEST_TMPDIR/platform.tsv")" = 2 ]
+}
+
 @test "shared database metrics cron and multisite remain app scoped" {
     local app_a="$DBTUNE_HOME_ROOT/runcloud/webapps/a"
     local app_b="$DBTUNE_HOME_ROOT/runcloud/webapps/b"
@@ -564,6 +682,7 @@ hw.storage_class	nvme
 app.discovery_status	complete
 app.count	1
 security.grants_audited	1
+security.hostname_grant_count	0
 security.port_3306	local
 EOF
     append_complete_mariadb_evidence "$BATS_TEST_TMPDIR/status-audit.tsv"
@@ -597,6 +716,7 @@ hw.storage_class	nvme
 app.discovery_status	complete
 app.count	0
 security.grants_audited	1
+security.hostname_grant_count	0
 security.port_3306	local
 EOF
     append_complete_mariadb_evidence "$BATS_TEST_TMPDIR/complete-audit.tsv"
@@ -620,7 +740,7 @@ EOF
 @test "missing non-sentinel proposal variable makes MariaDB evidence partial" {
     printf '%s\n' $'mariadb.available\t1' $'hw.cpu_count\t8' $'hw.ram_bytes\t17179869184' \
         $'hw.storage_class\tnvme' $'app.discovery_status\tcomplete' $'app.count\t0' \
-        $'security.grants_audited\t1' $'security.port_3306\tlocal' >"$BATS_TEST_TMPDIR/status-audit.tsv"
+        $'security.grants_audited\t1' $'security.hostname_grant_count\t0' $'security.port_3306\tlocal' >"$BATS_TEST_TMPDIR/status-audit.tsv"
     append_complete_mariadb_evidence "$BATS_TEST_TMPDIR/complete-audit.tsv"
     command awk -F '\t' '$1 != "mariadb.variable.innodb_io_capacity_max" {print}' \
         "$BATS_TEST_TMPDIR/complete-audit.tsv" >>"$BATS_TEST_TMPDIR/status-audit.tsv"
@@ -637,7 +757,7 @@ EOF
 @test "malformed numeric and enum MariaDB evidence is safely diagnosed" {
     printf '%s\n' $'mariadb.available\t1' $'hw.cpu_count\t8' $'hw.ram_bytes\t17179869184' \
         $'hw.storage_class\tnvme' $'app.discovery_status\tcomplete' $'app.count\t0' \
-        $'security.grants_audited\t1' $'security.port_3306\tlocal' >"$BATS_TEST_TMPDIR/status-audit.tsv"
+        $'security.grants_audited\t1' $'security.hostname_grant_count\t0' $'security.port_3306\tlocal' >"$BATS_TEST_TMPDIR/status-audit.tsv"
     append_complete_mariadb_evidence "$BATS_TEST_TMPDIR/complete-audit.tsv"
     command awk -F '\t' 'BEGIN {OFS="\t"}
         $1=="mariadb.variable.innodb_io_capacity" {$2="fast"}
@@ -662,7 +782,7 @@ EOF
 @test "required evidence conflicts become UNKNOWN without exposing values" {
     printf '%s\n' $'mariadb.available\t1' $'hw.cpu_count\t8' $'hw.ram_bytes\t17179869184' \
         $'hw.storage_class\tnvme' $'app.discovery_status\tcomplete' $'app.count\t0' \
-        $'security.grants_audited\t1' $'security.port_3306\tlocal' >"$BATS_TEST_TMPDIR/status-audit.tsv"
+        $'security.grants_audited\t1' $'security.hostname_grant_count\t0' $'security.port_3306\tlocal' >"$BATS_TEST_TMPDIR/status-audit.tsv"
     append_complete_mariadb_evidence "$BATS_TEST_TMPDIR/status-audit.tsv"
     printf 'mariadb.variable.max_connections\tsecret-conflicting-value\n' >>"$BATS_TEST_TMPDIR/status-audit.tsv"
     : >"$BATS_TEST_TMPDIR/status-apps.tsv"
@@ -686,7 +806,7 @@ EOF
         file="$BATS_TEST_TMPDIR/${version%%-*}.tsv"
         printf '%s\n' $'mariadb.available\t1' $'hw.cpu_count\t8' $'hw.ram_bytes\t17179869184' \
             $'hw.storage_class\tnvme' $'app.discovery_status\tcomplete' $'app.count\t0' \
-            $'security.grants_audited\t1' $'security.port_3306\tlocal' >"$file"
+            $'security.grants_audited\t1' $'security.hostname_grant_count\t0' $'security.port_3306\tlocal' >"$file"
         append_complete_mariadb_evidence "$BATS_TEST_TMPDIR/complete.tsv" "$version"
         if [[ $version == 11.* ]]; then
             command awk -F '\t' '$1 != "mariadb.variable.innodb_flush_method" {print}' "$BATS_TEST_TMPDIR/complete.tsv" >>"$file"
@@ -708,7 +828,7 @@ EOF
 
     printf '%s\n' $'mariadb.available\t1' $'hw.cpu_count\t8' $'hw.ram_bytes\t17179869184' \
         $'hw.storage_class\tnvme' $'app.discovery_status\tcomplete' $'app.count\t0' \
-        $'security.grants_audited\t1' $'security.port_3306\tlocal' >"$BATS_TEST_TMPDIR/unsupported.tsv"
+        $'security.grants_audited\t1' $'security.hostname_grant_count\t0' $'security.port_3306\tlocal' >"$BATS_TEST_TMPDIR/unsupported.tsv"
     append_complete_mariadb_evidence "$BATS_TEST_TMPDIR/unsupported.tsv" 12.0.0-MariaDB
     dbtune_audit_finalize_status "$BATS_TEST_TMPDIR/unsupported.tsv" "$BATS_TEST_TMPDIR/status-apps.tsv" "$BATS_TEST_TMPDIR/status-databases.tsv"
     grep -F $'audit.section.mariadb.invalid_evidence\tmariadb.version=unsupported' "$BATS_TEST_TMPDIR/unsupported.tsv"
@@ -726,6 +846,7 @@ hw.storage_class	nvme
 app.discovery_status	complete
 app.count	0
 security.grants_audited	1
+security.hostname_grant_count	0
 security.port_3306	local
 EOF
     append_complete_mariadb_evidence "$BATS_TEST_TMPDIR/status-audit.tsv"
@@ -759,6 +880,7 @@ hw.storage_class	unknown
 app.discovery_status	complete
 app.count	0
 security.grants_audited	1
+security.hostname_grant_count	0
 security.port_3306	local
 EOF
     append_complete_mariadb_evidence "$BATS_TEST_TMPDIR/status-audit.tsv"
@@ -789,6 +911,7 @@ hw.storage_class	nvme
 app.discovery_status	complete
 app.count	2
 security.grants_audited	1
+security.hostname_grant_count	0
 security.port_3306	local
 EOF
     append_complete_mariadb_evidence "$BATS_TEST_TMPDIR/status-audit.tsv"
@@ -817,6 +940,7 @@ hw.storage_class	unknown
 app.discovery_status	failed
 app.count	0
 security.grants_audited	0
+security.hostname_grant_count	unknown
 security.port_3306	unknown
 EOF
     : >"$BATS_TEST_TMPDIR/status-apps.tsv"
@@ -940,6 +1064,7 @@ EOF
     }
     dbtune_audit_collect_platform() {
         dbtune_audit_put "$1" security.grants_audited 1
+        dbtune_audit_put "$1" security.hostname_grant_count 0
         dbtune_audit_put "$1" security.port_3306 local
     }
     dbtune_audit_collect_apps() {
@@ -982,6 +1107,7 @@ EOF
     dbtune_audit_collect_platform() {
         dbtune_audit_put "$1" systemd.limit_nofile 32768
         dbtune_audit_put "$1" security.grants_audited 1
+        dbtune_audit_put "$1" security.hostname_grant_count 0
         dbtune_audit_put "$1" security.port_3306 local
         dbtune_audit_put "$1" security.root_cnf_present 0
     }

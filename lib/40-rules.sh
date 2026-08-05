@@ -134,6 +134,8 @@ dbtune_rules_analyze() {
         if (key == "disk_class" || key == "storage_type") return "storage_class"
         if (key == "runcloud_skip_log_bin") return "skip_log_bin"
         if (key == "security_remote_grant_count") return "remote_grant_count"
+        if (key == "security_grants_audited") return "grants_audited"
+        if (key == "security_hostname_grant_count") return "hostname_grant_count"
         if (key == "security_port_3306") return "port_3306"
         if (key == "security_root_cnf_present") return "root_cnf_present"
         if (key == "limit_nofile") return "systemd_limit_nofile"
@@ -453,6 +455,13 @@ dbtune_rules_analyze() {
         return value == "0" || value == "no" || value == "false" || value == "off" || value == "disabled" || value == "inactive"
     }
 
+    function exact_bool(value) {
+        value = tolower(trim(value))
+        if (value == "on" || value == "1") return 1
+        if (value == "off" || value == "0") return 0
+        return -1
+    }
+
     function sort_text(values, count, i, j, swap) {
         for (i = 2; i <= count; i++) {
             swap = values[i]
@@ -658,11 +667,28 @@ dbtune_rules_analyze() {
         setting("R-PINNED", "innodb_max_dirty_pages_pct", "60", "medium", "flush", "reason_dirty_pages_limit")
         setting("R-PINNED", "innodb_max_dirty_pages_pct_lwm", "10", "medium", "flush", "reason_dirty_pages_lwm")
         setting("R-PINNED", "innodb_lock_wait_timeout", "30", "medium", "connections", "reason_lock_wait_timeout")
-        setting("R-PINNED", "skip_name_resolve", "1", "medium", "local clients", "reason_skip_name_resolve")
+        skip_name_resolve_rule()
         setting("R-PINNED", "thread_cache_size", "64", "low", "connections", "reason_thread_cache")
         size_setting("R-PINNED", "tmp_table_size", "64M", "medium", "LONGTEXT remains disk-backed", "reason_tmp_table_size")
         size_setting("R-PINNED", "max_heap_table_size", "64M", "medium", "must match tmp_table_size", "reason_max_heap_table_size")
         setting("R-PINNED", "table_definition_cache", "2000", "low", "wordpress tables", "reason_table_definition_cache")
+    }
+
+    function skip_name_resolve_rule(current, enabled, audited, hostname_count, evidence) {
+        current = ag("skip_name_resolve", "")
+        enabled = exact_bool(current)
+        audited = ag("grants_audited", "")
+        hostname_count = ag("hostname_grant_count", "")
+        evidence = "grant_evidence=" ((audited == "1" && uint64_text(hostname_count)) ? "complete" : "invalid")
+        if (enabled < 0 || audited != "1" || !uint64_text(hostname_count)) {
+            emit("R-PINNED", "server", "medium", "UNKNOWN", "", "", evidence "; current=" (enabled < 0 ? "invalid" : "valid") "; proposal_blocked=missing-or-invalid-evidence", "reason_skip_name_resolve_unknown")
+        } else if (hostname_count != "0") {
+            emit("R-PINNED", "server", "medium", "REVIEW", "", "", "hostname_grant_count=" hostname_count "; current=" (enabled ? "ON" : "OFF"), "reason_skip_name_resolve_hostname_grants")
+        } else if (enabled) {
+            emit("R-PINNED", "server", "info", "OK", "", "", "hostname_grant_count=0; current=ON", "reason_skip_name_resolve")
+        } else {
+            emit("R-PINNED", "server", "medium", "CHANGE", "skip_name_resolve", "1", "hostname_grant_count=0; current=OFF", "reason_skip_name_resolve")
+        }
     }
 
     function operational_rules(key_reads, backup_interval, bind, wildcard, configured, effective, backup_status, backup_source, backup_success, backup_evidence) {
@@ -689,8 +715,10 @@ dbtune_rules_analyze() {
             emit("R-OPENFILES", "server", "medium", "SYSTEMD-LIMIT", "", "", "configured=" configured "; effective=" effective "; LimitNOFILE=" ag("systemd_limit_nofile", "unknown"), "reason_open_files_systemd_limit")
         else emit("R-OPENFILES", "server", "info", "OK", "", "", "effective=" effective, "reason_open_files_ok")
 
-        bind = tolower(ag("bind_address", "")); wildcard = numeric(ag("remote_grant_count", ag("wildcard_grants", "0")))
-        if (bind == "0.0.0.0" || bind == "*" || tolower(ag("port_3306", "")) == "public" || wildcard > 0)
+        bind = tolower(ag("bind_address", "")); wildcard = ag("hostname_grant_count", "")
+        if (ag("grants_audited", "") != "1" || !uint64_text(wildcard))
+            emit("R-SEC", "server", "medium", "UNKNOWN", "", "", "grant_evidence=invalid; listener=" ag("port_3306", "unknown"), "reason_security_unknown")
+        else if (bind == "0.0.0.0" || bind == "*" || tolower(ag("port_3306", "")) == "public" || wildcard != "0")
             emit("R-SEC", "server", "high", "EXPOSED", "", "", "bind_address=" bind "; remote_grants=" wildcard "; listener=" ag("port_3306", "unknown"), "reason_security_exposed")
         else emit("R-SEC", "server", "info", "OK", "", "", "bind_address=" bind "; remote_grants=" wildcard, "reason_security_ok")
         if (truth(ag("root_cnf_present", "")) || truth(ag("root_cnf_has_password", ag("root_cnf_plaintext_password", ""))))
