@@ -68,14 +68,27 @@ append_embedded_files() {
     } >>"$output"
 }
 
+validate_test_artifact() {
+    bash -c '
+        source "$1"
+        for function_name in cmd_audit cmd_collect cmd_tick cmd_analyze cmd_report cmd_propose cmd_apply cmd_verify cmd_rollback cmd_status; do
+            declare -F "$function_name" >/dev/null || exit 1
+        done
+        for asset in templates/tuning.cnf.tmpl systemd/dbtune-collect.service systemd/dbtune-collect.timer; do
+            dbtune_embedded_get "$asset" >/dev/null || exit 1
+        done
+    ' _ "$1"
+}
+
 build() {
-    local temporary checksum_temporary='' module function_name alternate version_output version_status=0
+    local temporary checksum_temporary='' validation_temporary='' module function_name alternate
+    local version_output version_status=0
     local -a modules
 
     [[ -d $LIB_DIR ]] || fail "lib directory is missing"
     mkdir -p "$DIST_DIR" || fail "cannot create dist directory"
     temporary=$(mktemp "$DIST_DIR/.dbtune.tmp.XXXXXX") || fail "mktemp failed"
-    trap 'rm -f "$temporary"' EXIT
+    trap 'rm -f "$temporary" "$checksum_temporary" "$validation_temporary"' EXIT
 
     mapfile -t modules < <(find "$LIB_DIR" -maxdepth 1 -type f -name '*.sh' -print | LC_ALL=C sort)
     ((${#modules[@]})) || fail "no lib modules found"
@@ -119,8 +132,23 @@ build() {
         for function_name in cmd_audit cmd_collect cmd_tick cmd_analyze cmd_report cmd_propose cmd_apply cmd_verify cmd_rollback cmd_status; do
             grep -q "^${function_name}()" "$temporary" || fail "artifact is missing $function_name"
         done
+        validation_temporary=$(mktemp "$DIST_DIR/.dbtune-validation.tmp.XXXXXX") || fail "validation mktemp failed"
+        awk '
+            $0 == "readonly DBTUNE_ARTIFACT_PROFILE=production" {
+                print "readonly DBTUNE_ARTIFACT_PROFILE=integration-test"
+                next
+            }
+            $0 == "if [[ $DBTUNE_ARTIFACT_PROFILE != production ]]; then" {
+                print "if [[ $DBTUNE_ARTIFACT_PROFILE != integration-test ]]; then"
+                next
+            }
+            { print }
+        ' "$temporary" >"$validation_temporary" || fail "failed to create test-profile validation artifact"
+        chmod 755 "$validation_temporary" || fail "validation chmod failed"
+        validate_test_artifact "$validation_temporary" || fail "artifact embedded asset validation failed"
+        rm -f "$validation_temporary"
+        validation_temporary=
         checksum_temporary=$(mktemp "$DIST_DIR/.dbtune.sha256.tmp.XXXXXX") || fail "checksum mktemp failed"
-        trap 'rm -f "$temporary" "$checksum_temporary"' EXIT
         if command -v sha256sum >/dev/null 2>&1; then
             sha256sum "$temporary" | awk '{print $1 "  dbtune"}' >"$checksum_temporary" || fail "sha256sum failed"
         elif command -v shasum >/dev/null 2>&1; then
@@ -129,15 +157,7 @@ build() {
             fail "neither sha256sum nor shasum is available"
         fi
     else
-        bash -c '
-            source "$1"
-            for function_name in cmd_audit cmd_collect cmd_tick cmd_analyze cmd_report cmd_propose cmd_apply cmd_verify cmd_rollback cmd_status; do
-                declare -F "$function_name" >/dev/null || exit 1
-            done
-            for asset in templates/tuning.cnf.tmpl systemd/dbtune-collect.service systemd/dbtune-collect.timer; do
-                dbtune_embedded_get "$asset" >/dev/null || exit 1
-            done
-        ' _ "$temporary" || fail "artifact does not contain all commands and embedded assets"
+        validate_test_artifact "$temporary" || fail "artifact does not contain all commands and embedded assets"
     fi
     mv -f "$temporary" "$OUTPUT" || fail "failed to publish artifact"
     [[ -z $checksum_temporary ]] || mv -f "$checksum_temporary" "$CHECKSUM" || fail "failed to publish checksum"

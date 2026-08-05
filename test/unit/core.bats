@@ -318,6 +318,32 @@ file_mode() {
     [ "$(artifact_hash "$fixture/dist/dbtune.sha256")" = "$checksum_hash" ]
 }
 
+@test "default production build validates embedded assets through a test profile" {
+    local fixture production_hash checksum_hash real_base64 stub_bin
+
+    fixture=$(build_project_fixture)
+    "$fixture/build.sh"
+    production_hash=$(artifact_hash "$fixture/dist/dbtune")
+    checksum_hash=$(artifact_hash "$fixture/dist/dbtune.sha256")
+    real_base64=$(command -v base64)
+    stub_bin="$BATS_TEST_TMPDIR/base64-stub"
+    mkdir "$stub_bin"
+    cat >"$stub_bin/base64" <<'STUB'
+#!/usr/bin/env bash
+if [[ ${1:-} == --decode || ${1:-} == -D ]]; then
+    exec "$REAL_BASE64" "$@"
+fi
+printf '%s\n' 'not-valid-base64!'
+STUB
+    chmod +x "$stub_bin/base64"
+
+    run env PATH="$stub_bin:$PATH" REAL_BASE64="$real_base64" "$fixture/build.sh"
+
+    [ "$status" -ne 0 ]
+    [ "$(artifact_hash "$fixture/dist/dbtune")" = "$production_hash" ]
+    [ "$(artifact_hash "$fixture/dist/dbtune.sha256")" = "$checksum_hash" ]
+}
+
 @test "production artifact sanitizes hostile runtime overrides" {
     local fixture marker marker_command bash_env runtime_dump
 
@@ -431,6 +457,14 @@ ENV
     [ "$status" -eq 0 ]
     [ "$output" = 'dbtune 0.4.1' ]
     [ ! -e "$marker" ]
+
+    run env ARTIFACT="$fixture/dist/dbtune" bash -c '
+        dbtune_dispatch() { return 99; }
+        export -f dbtune_dispatch
+        exec "$ARTIFACT" version
+    '
+    [ "$status" -eq 0 ]
+    [ "$output" = 'dbtune 0.4.1' ]
 }
 
 @test "runtime environment contract classifies every production symbol" {

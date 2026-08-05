@@ -172,17 +172,29 @@ CONTRACT
 
 dbtune_runtime_prepare_environment() {
     builtin local name declaration exported_names exported_function_declarations line function_name
+    builtin local function_details function_source extdebug_enabled=0
     builtin local safe_path=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
     [[ $DBTUNE_ARTIFACT_PROFILE == production ]] || return 0
     exported_function_declarations=$(builtin declare -Fx) || return 65
+    builtin shopt -q extdebug && extdebug_enabled=1
+    builtin shopt -s extdebug || return 65
     while IFS= read -r line; do
         [[ -n $line ]] || continue
         function_name=${line##* }
         [[ $function_name =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || return 65
-        builtin unset -f "$function_name" || return 65
-        ! builtin declare -F "$function_name" >/dev/null || return 65
+        function_details=$(builtin declare -F "$function_name") || return 65
+        function_source=${function_details##* }
+        if [[ $function_source == "${BASH_SOURCE[0]}" ]]; then
+            # shellcheck disable=SC2163 # The function name comes from declare output.
+            builtin export -n -f "$function_name" || return 65
+            builtin declare -F "$function_name" >/dev/null || return 65
+        else
+            builtin unset -f "$function_name" || return 65
+            ! builtin declare -F "$function_name" >/dev/null || return 65
+        fi
     done <<<"$exported_function_declarations"
+    ((extdebug_enabled == 1)) || builtin shopt -u extdebug || return 65
 
     declaration=$(builtin declare -p DBTUNE_ARTIFACT_PROFILE 2>/dev/null) || return 65
     [[ $declaration =~ ^declare\ -[^[:space:]]*r && $DBTUNE_ARTIFACT_PROFILE == production ]] || return 65
