@@ -116,6 +116,7 @@ esac
 STUB
     cat >"$BATS_TEST_TMPDIR/bin/mariadbd" <<'STUB'
 #!/usr/bin/env bash
+printf '%s\n' "$*" >>"$BATS_TEST_TMPDIR/mariadbd.log"
 case " $* " in
     *" --help --verbose "*) printf '%s\n' '  --validate-config' ;;
     *" --validate-config "*) printf '%s\n' "$STUB_VALIDATE_OUTPUT"; exit "$STUB_VALIDATE_STATUS" ;;
@@ -141,7 +142,15 @@ esac
 STUB
     cat >"$BATS_TEST_TMPDIR/bin/chown" <<'STUB'
 #!/usr/bin/env bash
-if [[ -n $STUB_FAIL_CHOWN_MATCH && " $* " == *"$STUB_FAIL_CHOWN_MATCH"* ]]; then exit 1; fi
+printf '%s\n' "$*" >>"$BATS_TEST_TMPDIR/chown.log"
+if [[ -n $STUB_FAIL_CHOWN_MATCH && " $* " == *"$STUB_FAIL_CHOWN_MATCH"* ]]; then
+    exit 1
+fi
+if [[ ${STUB_CHOWN_SYMLINK_ATTACK:-0} == 1 && $1 == mysql:mysql ]]; then
+    target=${@: -1}
+    ln -sf "$STUB_VALIDATE_HELP_VICTIM" "$target/help.log"
+    ln -sf "$STUB_VALIDATE_OUTPUT_VICTIM" "$target/output.log"
+fi
 exit 0
 STUB
     cat >"$BATS_TEST_TMPDIR/bin/cp" <<'STUB'
@@ -355,6 +364,32 @@ run_publish_fixture() {
     [ "$status" -eq 65 ]
     [ "$(cat "$DBTUNE_CONFIG_TARGET")" = original ]
     [ "$(cat "$DBTUNE_STATE_DIR/state")" = proposed ]
+}
+
+@test "config validation keeps root redirections outside the mysql-owned datadir" {
+    export STUB_CHOWN_SYMLINK_ATTACK=1
+    export STUB_VALIDATE_HELP_VICTIM="$BATS_TEST_TMPDIR/help-victim"
+    export STUB_VALIDATE_OUTPUT_VICTIM="$BATS_TEST_TMPDIR/output-victim"
+    printf 'help-safe\n' >"$STUB_VALIDATE_HELP_VICTIM"
+    printf 'output-safe\n' >"$STUB_VALIDATE_OUTPUT_VICTIM"
+
+    run dbtune_lifecycle_validate_config
+
+    [ "$status" -eq 0 ]
+    [ "$(cat "$STUB_VALIDATE_HELP_VICTIM")" = help-safe ]
+    [ "$(cat "$STUB_VALIDATE_OUTPUT_VICTIM")" = output-safe ]
+    chowned_dir=$(awk '$1 == "mysql:mysql" {print $2; exit}' "$BATS_TEST_TMPDIR/chown.log")
+    [[ $chowned_dir == */data ]]
+    grep -F -- "--datadir=$chowned_dir" "$BATS_TEST_TMPDIR/mariadbd.log"
+}
+
+@test "config validation fails closed when mysql datadir ownership cannot be established" {
+    export STUB_FAIL_CHOWN_MATCH=mysql:mysql
+
+    run dbtune_lifecycle_validate_config
+
+    [ "$status" -ne 0 ]
+    ! grep -F -- '--validate-config' "$BATS_TEST_TMPDIR/mariadbd.log"
 }
 
 @test "apply accepts an absent target in the explicit allowed directory" {
