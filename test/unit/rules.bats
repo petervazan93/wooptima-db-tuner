@@ -638,6 +638,54 @@ EOF
     [[ "$output" == *'last_success=2026-07-23T02:00:00Z'* ]]
 }
 
+@test "R-MYISAM requires exact uint64 evidence before proposing key buffer size" {
+    local name value expected_verdict expected_key expected_value
+
+    make_audit "$BATS_TEST_TMPDIR/base.tsv"
+    make_samples "$BATS_TEST_TMPDIR/samples.tsv" 30 2 10
+    for name in missing unknown unresolved malformed zero positive maximum; do
+        awk -F '\t' '$1 != "mariadb.status.key_read_requests" && $1 != "key_read_requests" {print}' OFS='\t' \
+            "$BATS_TEST_TMPDIR/base.tsv" >"$BATS_TEST_TMPDIR/$name.tsv"
+        case $name in
+            missing) value='' ;;
+            unknown) value=unknown ;;
+            unresolved) value=unresolved ;;
+            malformed) value=12x ;;
+            zero) value=0 ;;
+            positive) value=1 ;;
+            maximum) value=18446744073709551615 ;;
+        esac
+        [[ -z $value ]] || printf 'mariadb.status.key_read_requests\t%s\n' "$value" >>"$BATS_TEST_TMPDIR/$name.tsv"
+        printf 'mariadb.variable.key_buffer_size\t134217728\n' >>"$BATS_TEST_TMPDIR/$name.tsv"
+
+        dbtune_rules_analyze "$BATS_TEST_TMPDIR/$name.tsv" "$BATS_TEST_TMPDIR/samples.tsv" "" "" "" 10 >"$BATS_TEST_TMPDIR/$name-analysis.tsv"
+
+        case $name in
+            missing|unknown|unresolved|malformed)
+                expected_verdict=UNKNOWN
+                expected_key=''
+                expected_value=''
+                ;;
+            zero)
+                expected_verdict=CHANGE
+                expected_key=key_buffer_size
+                expected_value=32M
+                ;;
+            positive|maximum)
+                expected_verdict=KEEP
+                expected_key=''
+                expected_value=''
+                ;;
+        esac
+        run awk -F '\t' '$1=="R-MYISAM" {print $4 "\t" $5 "\t" $6 "\t" $7; exit}' "$BATS_TEST_TMPDIR/$name-analysis.tsv"
+        [ "$status" -eq 0 ]
+        [[ "$output" == "$expected_verdict"$'\t'"$expected_key"$'\t'"$expected_value"$'\t'* ]]
+        if [[ $expected_verdict == UNKNOWN ]]; then
+            [[ "$output" == *'proposal_blocked=missing-or-invalid-metric'* ]]
+        fi
+    done
+}
+
 @test "production audit scoped TSV contract feeds server and app rules" {
     cat >"$BATS_TEST_TMPDIR/audit.tsv" <<'EOF'
 mariadb.version	11.4.12-MariaDB

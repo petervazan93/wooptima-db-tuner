@@ -10,6 +10,7 @@ setup() {
     source "$BATS_TEST_DIRNAME/../../lib/00-header.sh"
     source "$BATS_TEST_DIRNAME/../../lib/05-i18n.sh"
     source "$BATS_TEST_DIRNAME/../../lib/10-util.sh"
+    source "$BATS_TEST_DIRNAME/../../lib/20-audit.sh"
     source "$BATS_TEST_DIRNAME/../../lib/50-report.sh"
     dbtune_i18n_set sk
     mkdir -p "$DBTUNE_STATE_DIR"
@@ -28,7 +29,7 @@ hw.cpu_count	8
 hw.ram_bytes	17179869184
 hw.storage_class	nvme
 mariadb.dataset_bytes	4294967296
-mariadb.variable.innodb_buffer_pool_size	128M
+mariadb.variable.innodb_buffer_pool_size	134217728
 mariadb.variable.max_connections	4096
 backup.status	verified
 backup.source	unit-test-backup
@@ -730,6 +731,112 @@ EOF
     run cmd_report
     [ "$status" -eq 65 ]
     [[ "$output" == *"Unsafe proposal record"* ]]
+}
+
+@test "report and propose reject proposal fields on non-changing verdicts without replacing artifacts" {
+    local verdict
+
+    for verdict in UNKNOWN REVIEW KEEP OK UNSUPPORTED; do
+        printf '%s\n' \
+            $'rule_id\tscope\tseverity\tverdict\tproposed_key\tproposed_value\tevidence\treason_id' \
+            $'R-TEST\tserver\thigh\t'"$verdict"$'\tmax_connections\t200\ttest\treason_max_connections_change' \
+            >"$DBTUNE_STATE_DIR/analysis.tsv"
+        write_analysis_manifest
+        dbtune_state_write analyzed
+        printf 'existing-report\n' >"$DBTUNE_STATE_DIR/report.md"
+        printf 'existing-json\n' >"$DBTUNE_STATE_DIR/report.json"
+        printf 'existing-proposal\n' >"$DBTUNE_STATE_DIR/proposed-99-zz-tuning.cnf"
+        printf 'existing-manifest\n' >"$DBTUNE_STATE_DIR/proposal-manifest.tsv"
+
+        run cmd_report
+        [ "$status" -eq 65 ]
+        [ "$(cat "$DBTUNE_STATE_DIR/report.md")" = existing-report ]
+        [ "$(cat "$DBTUNE_STATE_DIR/report.json")" = existing-json ]
+        run cmd_propose
+        [ "$status" -eq 65 ]
+        [ "$(cat "$DBTUNE_STATE_DIR/proposed-99-zz-tuning.cnf")" = existing-proposal ]
+        [ "$(cat "$DBTUNE_STATE_DIR/proposal-manifest.tsv")" = existing-manifest ]
+    done
+}
+
+@test "report and propose reject incomplete conflicting or invalid proposal fields atomically" {
+    local name rows
+
+    for name in missing-key missing-value malformed-current conflicting-verdicts; do
+        case $name in
+            missing-key)
+                rows=$'R-TEST\tserver\thigh\tCHANGE\t\t200\ttest\treason_max_connections_change'
+                ;;
+            missing-value)
+                rows=$'R-TEST\tserver\thigh\tCHANGE\tmax_connections\t\ttest\treason_max_connections_change'
+                ;;
+            malformed-current)
+                rows=$'R-TEST\tserver\thigh\tCHANGE\tmax_connections\t200\ttest\treason_max_connections_change'
+                awk -F '\t' '$1 != "mariadb.variable.max_connections" {print}' OFS='\t' \
+                    "$DBTUNE_STATE_DIR/audit.tsv" >"$BATS_TEST_TMPDIR/audit.tsv"
+                printf 'mariadb.variable.max_connections\tinvalid\n' >>"$BATS_TEST_TMPDIR/audit.tsv"
+                mv "$BATS_TEST_TMPDIR/audit.tsv" "$DBTUNE_STATE_DIR/audit.tsv"
+                ;;
+            conflicting-verdicts)
+                rows=$'R-FIRST\tserver\thigh\tCHANGE\tmax_connections\t200\tfirst\treason_max_connections_change\nR-SECOND\tserver\thigh\tREDUCE\tmax-connections\t100\tsecond\treason_max_connections_change'
+                ;;
+        esac
+        printf '%s\n%s\n' \
+            $'rule_id\tscope\tseverity\tverdict\tproposed_key\tproposed_value\tevidence\treason_id' \
+            "$rows" >"$DBTUNE_STATE_DIR/analysis.tsv"
+        dbtune_provenance_write_audit_manifest "$DBTUNE_STATE_DIR/audit-manifest.tsv" \
+            report-run "$DBTUNE_STATE_DIR/audit.tsv" "$DBTUNE_STATE_DIR/apps.tsv" "$DBTUNE_STATE_DIR/databases.tsv"
+        write_analysis_manifest
+        dbtune_state_write analyzed
+        printf 'existing-report\n' >"$DBTUNE_STATE_DIR/report.md"
+        printf 'existing-json\n' >"$DBTUNE_STATE_DIR/report.json"
+        printf 'existing-proposal\n' >"$DBTUNE_STATE_DIR/proposed-99-zz-tuning.cnf"
+        printf 'existing-manifest\n' >"$DBTUNE_STATE_DIR/proposal-manifest.tsv"
+
+        run cmd_report
+        [ "$status" -eq 65 ]
+        [ "$(cat "$DBTUNE_STATE_DIR/report.md")" = existing-report ]
+        [ "$(cat "$DBTUNE_STATE_DIR/report.json")" = existing-json ]
+        run cmd_propose
+        [ "$status" -eq 65 ]
+        [ "$(cat "$DBTUNE_STATE_DIR/proposed-99-zz-tuning.cnf")" = existing-proposal ]
+        [ "$(cat "$DBTUNE_STATE_DIR/proposal-manifest.tsv")" = existing-manifest ]
+
+        if [[ $name == malformed-current ]]; then
+            awk -F '\t' '$1 != "mariadb.variable.max_connections" || $2 != "invalid"' \
+                "$DBTUNE_STATE_DIR/audit.tsv" >"$BATS_TEST_TMPDIR/audit.tsv"
+            printf 'mariadb.variable.max_connections\t4096\n' >>"$BATS_TEST_TMPDIR/audit.tsv"
+            mv "$BATS_TEST_TMPDIR/audit.tsv" "$DBTUNE_STATE_DIR/audit.tsv"
+        fi
+    done
+}
+
+@test "proposal loader canonicalizes valid boolean current evidence" {
+    printf 'mariadb.variable.skip_name_resolve\tON\n' >>"$DBTUNE_STATE_DIR/audit.tsv"
+    DBTUNE_SERVER_SUPPORT=supported
+    DBTUNE_ANALYSIS_LINES=(
+        $'R-PINNED\tserver\tmedium\tCHANGE\tskip_name_resolve\t0\tlocal clients\treason_skip_name_resolve'
+    )
+
+    dbtune_proposals_load "$DBTUNE_STATE_DIR/audit.tsv"
+    dbtune_proposal_parse "${DBTUNE_PROPOSAL_LINES[0]}"
+    [ "$DBTUNE_PROPOSAL_CURRENT" = 1 ]
+}
+
+@test "static recommendation header omits evidence-dependent MyISAM and name resolution hints" {
+    printf '%s\n' \
+        $'rule_id\tscope\tseverity\tverdict\tproposed_key\tproposed_value\tevidence\treason_id' \
+        $'R-MYISAM\tserver\tlow\tUNKNOWN\t\t\tKey_read_requests=unknown; proposal_blocked=missing-or-invalid-metric\treason_myisam_key_buffer' \
+        $'R-PINNED\tserver\tmedium\tREVIEW\t\t\tskip_name_resolve=unknown\treason_skip_name_resolve' \
+        >"$DBTUNE_STATE_DIR/analysis.tsv"
+    write_analysis_manifest
+    dbtune_state_write analyzed
+
+    run cmd_propose
+
+    [ "$status" -eq 0 ]
+    run grep -E '^[#[:space:]]*(key_buffer_size|skip_name_resolve)[[:space:]]*=' "$DBTUNE_STATE_DIR/proposed-99-zz-tuning.cnf"
+    [ "$status" -eq 1 ]
 }
 
 @test "repeated proposal preserves proposed state and deterministic keys" {

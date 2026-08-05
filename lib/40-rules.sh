@@ -423,6 +423,13 @@ dbtune_rules_analyze() {
         return value ~ /^-?[0-9]+([.][0-9]+)?$/ ? value + 0 : 0
     }
 
+    function uint64_text(value) {
+        if (value !~ /^(0|[1-9][0-9]*)$/) return 0
+        if (length(value) < 20) return 1
+        if (length(value) > 20) return 0
+        return ("x" value <= "x18446744073709551615")
+    }
+
     function bytes(value, number, unit) {
         value = toupper(trim(value))
         gsub(/[[:space:]]/, "", value)
@@ -659,9 +666,13 @@ dbtune_rules_analyze() {
     }
 
     function operational_rules(key_reads, backup_interval, bind, wildcard, configured, effective, backup_status, backup_source, backup_success, backup_evidence) {
-        key_reads = numeric(ag("key_read_requests", "0"))
-        if (key_reads > 0) emit("R-MYISAM", "server", "info", "KEEP", "", "", "Key_read_requests=" key_reads, "reason_myisam_keep")
-        else size_setting("R-MYISAM", "key_buffer_size", "32M", "low", "Key_read_requests=0", "reason_myisam_key_buffer")
+        key_reads = ag("key_read_requests", "")
+        if (!("key_read_requests" in present) || !uint64_text(key_reads))
+            emit("R-MYISAM", "server", "low", "UNKNOWN", "", "", "Key_read_requests=" (key_reads == "" ? "missing" : key_reads) "; proposal_blocked=missing-or-invalid-metric", "reason_myisam_unknown")
+        else if (key_reads == "0")
+            size_setting("R-MYISAM", "key_buffer_size", "32M", "low", "Key_read_requests=0", "reason_myisam_key_buffer")
+        else
+            emit("R-MYISAM", "server", "info", "KEEP", "", "", "Key_read_requests=" key_reads, "reason_myisam_keep")
 
         setting("R-SLOWLOG", "slow_query_log", "1", "medium", "persistent early warning", "reason_slow_query_log")
         setting("R-SLOWLOG", "slow_query_log_file", "/var/log/mysql/slow.log", "medium", "covered by logrotate", "reason_slow_query_log_file")

@@ -707,6 +707,12 @@ dbtune_i18n_lookup() {
         sk:proposal_invalid_record)
             DBTUNE_I18N_MESSAGE='Neplatny proposal record v pravidle %s'
             ;;
+        en:proposal_verdict_fields)
+            DBTUNE_I18N_MESSAGE='Rule %s verdict %s cannot contain proposal fields'
+            ;;
+        sk:proposal_verdict_fields)
+            DBTUNE_I18N_MESSAGE='Pravidlo %s s verdiktom %s nemoze obsahovat proposal polia'
+            ;;
         en:proposal_unsafe_record)
             DBTUNE_I18N_MESSAGE='Unsafe proposal record in rule %s'
             ;;
@@ -724,6 +730,12 @@ dbtune_i18n_lookup() {
             ;;
         sk:proposal_current_unknown)
             DBTUNE_I18N_MESSAGE='Proposal %s nema znamu efektivnu current hodnotu'
+            ;;
+        en:proposal_current_invalid)
+            DBTUNE_I18N_MESSAGE='Proposal %s has an invalid effective current value'
+            ;;
+        sk:proposal_current_invalid)
+            DBTUNE_I18N_MESSAGE='Proposal %s ma neplatnu efektivnu current hodnotu'
             ;;
         en:report_required_input_missing)
             DBTUNE_I18N_MESSAGE='Required input is missing: %s'
@@ -946,6 +958,12 @@ dbtune_i18n_lookup() {
             ;;
         sk:reason_myisam_keep)
             DBTUNE_I18N_MESSAGE='MyISAM sa používa, key buffer sa nesmie plošne zmenšiť.'
+            ;;
+        en:reason_myisam_unknown)
+            DBTUNE_I18N_MESSAGE='MyISAM usage cannot be determined without valid Key_read_requests evidence.'
+            ;;
+        sk:reason_myisam_unknown)
+            DBTUNE_I18N_MESSAGE='Pouzitie MyISAM sa bez platneho dokazu Key_read_requests neda urcit.'
             ;;
         en:reason_myisam_key_buffer)
             DBTUNE_I18N_MESSAGE='Modern WordPress normally does not use MyISAM.'
