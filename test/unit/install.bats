@@ -59,6 +59,24 @@ exec "$REAL_ID" "$@"
 STUB
 cat >"$STUB_BIN/stat" <<'STUB'
 #!/bin/sh
+case " $* " in
+    *' %h '*|*' %l '*)
+        printf '%s\n' 1
+        exit 0
+        ;;
+    *'/.dbtune.new.'*)
+        last=
+        for argument in "$@"; do
+            last=$argument
+        done
+        if [ -x "$last" ]; then
+            printf '%s %s\n' "${STUB_STAT_UID:-0}" 755
+        else
+            printf '%s %s\n' "${STUB_STAT_UID:-0}" 644
+        fi
+        exit 0
+        ;;
+esac
 if [ -n "${STUB_STAT_UID:-}" ] && [ -n "${STUB_STAT_MODE:-}" ]; then
     printf '%s %s\n' "$STUB_STAT_UID" "$STUB_STAT_MODE"
     exit 0
@@ -72,6 +90,15 @@ printf '%s\n' "$*" >>"$SUDO_LOG"
 command=$1
 shift
 if [ "$command" = install ] && [ "${1:-}" = -o ]; then
+    previous=
+    last=
+    for argument in "$@"; do
+        previous=$last
+        last=$argument
+    done
+    if [ -n "${STUB_SUDO_INSTALL_SOURCE_REPLACEMENT:-}" ]; then
+        cp "$STUB_SUDO_INSTALL_SOURCE_REPLACEMENT" "$previous"
+    fi
     shift 4
     "$command" "$@" || exit $?
     if [ -n "${STUB_SWAP_DESTINATION:-}" ]; then
@@ -320,6 +347,75 @@ ARTIFACT
     [ "$status" -eq 0 ]
     [ -x "$INSTALL_DIR/dbtune" ]
     grep -F -- 'install -d -m 0755' "$SUDO_LOG"
+    grep -F -- "mv -f $INSTALL_DIR/.dbtune.new." "$SUDO_LOG"
+}
+
+@test "installer rejects an artifact swapped when sudo creates the privileged stage" {
+    PRIVILEGED_TEST_ROOT=$(mktemp -d "$PROJECT_ROOT/.installer-test.XXXXXX")
+    export PRIVILEGED_TEST_ROOT
+    INSTALL_DIR="$PRIVILEGED_TEST_ROOT/bin"
+    mkdir "$INSTALL_DIR"
+    printf '%s\n' 'previous target' >"$INSTALL_DIR/dbtune"
+    chmod 0555 "$INSTALL_DIR"
+    if command -v sha256sum >/dev/null 2>&1; then
+        previous_hash=$(sha256sum "$INSTALL_DIR/dbtune" | awk '{print $1}')
+    else
+        previous_hash=$(shasum -a 256 "$INSTALL_DIR/dbtune" | awk '{print $1}')
+    fi
+    execution_marker="$BATS_TEST_TMPDIR/swapped-executed"
+    cat >"$BATS_TEST_TMPDIR/swapped-dbtune" <<'ARTIFACT'
+#!/usr/bin/env bash
+printf '%s\n' executed >"$SWAPPED_EXECUTION_MARKER"
+if [[ ${1:-} == version ]]; then
+    printf '%s\n' 'dbtune 0.4.1'
+else
+    exit 64
+fi
+ARTIFACT
+    chmod +x "$BATS_TEST_TMPDIR/swapped-dbtune"
+
+    run env DBTUNE_DOWNLOAD_BASE="file://$RELEASE_DIR" \
+        DBTUNE_INSTALL_DIR="$INSTALL_DIR" \
+        DBTUNE_ALLOW_UNSUPPORTED_OS=1 \
+        STUB_ID_UID=1000 \
+        STUB_STAT_UID=0 \
+        STUB_STAT_MODE=755 \
+        STUB_SUDO_EXEC=1 \
+        STUB_SUDO_INSTALL_SOURCE_REPLACEMENT="$BATS_TEST_TMPDIR/swapped-dbtune" \
+        SWAPPED_EXECUTION_MARKER="$execution_marker" \
+        sh "$BATS_TEST_DIRNAME/../../install.sh"
+
+    [ "$status" -ne 0 ]
+    [ ! -e "$execution_marker" ]
+    if command -v sha256sum >/dev/null 2>&1; then
+        current_hash=$(sha256sum "$INSTALL_DIR/dbtune" | awk '{print $1}')
+    else
+        current_hash=$(shasum -a 256 "$INSTALL_DIR/dbtune" | awk '{print $1}')
+    fi
+    [ "$current_hash" = "$previous_hash" ]
+    ! grep -F -- 'mv -f' "$SUDO_LOG"
+}
+
+@test "installer verifies the privileged staging file before publication" {
+    PRIVILEGED_TEST_ROOT=$(mktemp -d "$PROJECT_ROOT/.installer-test.XXXXXX")
+    export PRIVILEGED_TEST_ROOT
+    INSTALL_DIR="$PRIVILEGED_TEST_ROOT/bin"
+    mkdir "$INSTALL_DIR"
+    chmod 0555 "$INSTALL_DIR"
+
+    run env DBTUNE_DOWNLOAD_BASE="file://$RELEASE_DIR" \
+        DBTUNE_INSTALL_DIR="$INSTALL_DIR" \
+        DBTUNE_ALLOW_UNSUPPORTED_OS=1 \
+        STUB_ID_UID=1000 \
+        STUB_STAT_UID=0 \
+        STUB_STAT_MODE=755 \
+        STUB_SUDO_EXEC=1 \
+        sh "$BATS_TEST_DIRNAME/../../install.sh"
+
+    [ "$status" -eq 0 ]
+    grep -F -- 'install -o root -g root -m 0644' "$SUDO_LOG"
+    grep -F -- "$INSTALL_DIR/.dbtune.new." "$ATTESTATION_LOG"
+    grep -F -- "chmod 0755 $INSTALL_DIR/.dbtune.new." "$SUDO_LOG"
     grep -F -- "mv -f $INSTALL_DIR/.dbtune.new." "$SUDO_LOG"
 }
 
