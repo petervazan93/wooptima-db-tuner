@@ -539,15 +539,21 @@ dbtune_lifecycle_config_entries() {
 
 dbtune_lifecycle_validate_variable_names() {
     local records=${1:-}
-    local query list='' separator='' name value extra output_file command_status=0 malformed=0
+    local expected_records_hash=${2:-}
+    local records_capture records_hash query list='' separator='' name value extra output_file command_status=0 malformed=0
     local -A requested=() found=()
 
+    records_capture=$(command cat "$records") || return 65
+    [[ -n $records_capture && $expected_records_hash =~ ^[0-9a-f]{64}$ ]] || return 65
+    records_hash=$(printf '%s\n' "$records_capture" | dbtune_sha256_stream) || return
+    [[ $records_hash == "$expected_records_hash" ]] || return 65
+    dbtune_lifecycle_after_records_hash "$records" || return
     while IFS=$'\t' read -r name value extra; do
         [[ -n $name && -n $value && -z $extra ]] || return 65
         requested["$name"]=1
         list+="${separator}'$name'"
         separator=,
-    done <"$records"
+    done <<<"$records_capture"
     if ((${#requested[@]} == 0)); then
         dbtune_log error "$(dbtune_msg lifecycle_no_active_variables)"
         return 65
@@ -662,6 +668,17 @@ dbtune_lifecycle_new_history() {
     done
     install -d -m 700 "$history" || return 1
     printf '%s\n' "$history"
+}
+
+dbtune_lifecycle_discard_uncommitted_history() {
+    local history=${1:-}
+    local root="$DBTUNE_STATE_DIR/apply"
+    local cycle_id=${history##*/}
+
+    [[ ${history%/*} == "$root" && $cycle_id =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ &&
+        -d $history && ! -L $history ]] || return 65
+    rm -rf "$history" || return 1
+    rmdir "$root" 2>/dev/null || true
 }
 
 dbtune_lifecycle_shell_quote() {
@@ -2094,6 +2111,10 @@ dbtune_lifecycle_before_history_copy() {
     return 0
 }
 
+dbtune_lifecycle_after_records_hash() {
+    return 0
+}
+
 dbtune_lifecycle_before_target_copy() {
     return 0
 }
@@ -2132,8 +2153,7 @@ dbtune_lifecycle_apply_snapshot() {
     parent_identities=$DBTUNE_LIFECYCLE_PARENT_IDENTITIES
     dbtune_init_state_dir || return 1
     dbtune_lifecycle_require_snapshot_hash "$proposal" "$DBTUNE_APPLY_SNAPSHOT_HASH" || return
-    [[ $(dbtune_sha256_file "$records") == "$DBTUNE_APPLY_RECORDS_HASH" ]] || return 65
-    dbtune_lifecycle_validate_variable_names "$records" || return
+    dbtune_lifecycle_validate_variable_names "$records" "$DBTUNE_APPLY_RECORDS_HASH" || return
     dbtune_lifecycle_reject_galera || return
     dbtune_lifecycle_reject_mydumper || return
     if [[ -r $DBTUNE_STATE_DIR/analysis.tsv ]]; then
@@ -2145,10 +2165,16 @@ dbtune_lifecycle_apply_snapshot() {
     if [[ -r $(dbtune_lifecycle_current_file) ]]; then
         IFS= read -r previous_current <"$(dbtune_lifecycle_current_file)" || previous_current=''
     fi
-    had_original=$(dbtune_lifecycle_prepare_history "$history" "$target" "$proposal" "$backup_evidence" \
+    if had_original=$(dbtune_lifecycle_prepare_history "$history" "$target" "$proposal" "$backup_evidence" \
         "$target_topology" "$directory_identity" "$target_identity" "$target_hash" \
         "$parent_identities" "$previous_current" "$DBTUNE_APPLY_SNAPSHOT_HASH" \
-        "$DBTUNE_APPLY_RECORDS_HASH" "$DBTUNE_APPLY_RECORD_COUNT") || return
+        "$DBTUNE_APPLY_RECORDS_HASH" "$DBTUNE_APPLY_RECORD_COUNT"); then
+        :
+    else
+        status=$?
+        dbtune_lifecycle_discard_uncommitted_history "$history" || return
+        return "$status"
+    fi
     dbtune_lifecycle_capture_baseline "$history" || {
         dbtune_log error "$(dbtune_msg lifecycle_baseline_failed)"
         return 1

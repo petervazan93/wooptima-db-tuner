@@ -321,6 +321,16 @@ replace_apply_snapshot() {
     mv "$replacement" "$file"
 }
 
+replace_apply_records() {
+    local file=${1:-}
+    local replacement="$file.replacement"
+
+    printf 'max_connections\t300\n' >"$replacement"
+    chmod 400 "$replacement"
+    mv "$replacement" "$file"
+    touch "$BATS_TEST_TMPDIR/records-replaced"
+}
+
 prepare_apply_a_b() {
     printf 'external\n' >"$DBTUNE_CONFIG_TARGET"
     cmd_apply >/dev/null
@@ -511,6 +521,37 @@ run_publish_fixture() {
     assert_apply_preflight_unchanged
 }
 
+@test "records path replacement after hash check cannot change the live variable query" {
+    reset_apply_preflight_fixture
+    dbtune_lifecycle_after_records_hash() {
+        [[ -e $BATS_TEST_TMPDIR/records-replaced ]] || replace_apply_records "$1"
+    }
+    dbtune_sha256_file() {
+        local file=${1:-} hash
+
+        if command -v sha256sum >/dev/null 2>&1; then
+            hash=$(sha256sum "$file" | awk '{print $1}')
+        else
+            hash=$(shasum -a 256 "$file" | awk '{print $1}')
+        fi
+        if [[ $file == "$DBTUNE_STATE_DIR"/.apply-records.* ]]; then
+            if [[ -e $BATS_TEST_TMPDIR/records-hashed-once && ! -e $BATS_TEST_TMPDIR/records-replaced ]]; then
+                replace_apply_records "$file"
+            else
+                touch "$BATS_TEST_TMPDIR/records-hashed-once"
+            fi
+        fi
+        printf '%s\n' "$hash"
+    }
+
+    run cmd_apply
+
+    [ "$status" -eq 0 ]
+    grep -F "'max_connections'" "$BATS_TEST_TMPDIR/sql.log"
+    grep -F "'skip_name_resolve'" "$BATS_TEST_TMPDIR/sql.log"
+    cmp "$DBTUNE_CONFIG_TARGET" "$DBTUNE_STATE_DIR/proposed-99-zz-tuning.cnf"
+}
+
 @test "proposal snapshot mutation is detected at every copy and publication boundary" {
     local hook
     local hooks=(after-strict-parse before-history-copy before-target-copy before-publisher)
@@ -547,6 +588,9 @@ run_publish_fixture() {
         [ "$(cat "$DBTUNE_CONFIG_TARGET")" = 'original target' ]
         [ "$(dbtune_state_read)" = proposed ]
         [ ! -e "$DBTUNE_STATE_DIR/apply/current" ]
+        if [[ $hook == after-strict-parse || $hook == before-history-copy ]]; then
+            [ ! -e "$DBTUNE_STATE_DIR/apply" ]
+        fi
     done
 }
 
