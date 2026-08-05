@@ -6,10 +6,29 @@ setup() {
     export BATS_TEST_TMPDIR
     export DBTUNE_STATE_DIR="$BATS_TEST_TMPDIR/state"
     export DBTUNE_LOG_LEVEL=quiet
+    export PROJECT_ROOT
+    PROJECT_ROOT=$(CDPATH='' cd -- "$BATS_TEST_DIRNAME/../.." && pwd -P)
     source "$BATS_TEST_DIRNAME/../../lib/00-header.sh"
     source "$BATS_TEST_DIRNAME/../../lib/05-i18n.sh"
     source "$BATS_TEST_DIRNAME/../../lib/10-util.sh"
     source "$BATS_TEST_DIRNAME/../../lib/90-main.sh"
+}
+
+build_project_fixture() {
+    local fixture="$BATS_TEST_TMPDIR/project"
+
+    mkdir -p "$fixture"
+    cp "$PROJECT_ROOT/build.sh" "$fixture/build.sh"
+    cp -R "$PROJECT_ROOT/lib" "$PROJECT_ROOT/templates" "$PROJECT_ROOT/systemd" "$fixture/"
+    printf '%s\n' "$fixture"
+}
+
+artifact_hash() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | awk '{print $1}'
+    else
+        shasum -a 256 "$1" | awk '{print $1}'
+    fi
 }
 
 file_mode() {
@@ -255,4 +274,209 @@ file_mode() {
 @test "internal tick always exits zero" {
     run dbtune_main _tick
     [ "$status" -eq 0 ]
+}
+
+@test "build profile validation preserves existing production artifacts atomically" {
+    local fixture production_hash checksum_hash invocation
+
+    fixture=$(build_project_fixture)
+    "$fixture/build.sh"
+    production_hash=$(artifact_hash "$fixture/dist/dbtune")
+    checksum_hash=$(artifact_hash "$fixture/dist/dbtune.sha256")
+
+    for invocation in '--profile' '--profile unknown' '--profile production extra' \
+        '--profile production --profile integration-test'; do
+        read -r -a arguments <<<"$invocation"
+        run "$fixture/build.sh" "${arguments[@]}"
+        [ "$status" -ne 0 ]
+        [ "$(artifact_hash "$fixture/dist/dbtune")" = "$production_hash" ]
+        [ "$(artifact_hash "$fixture/dist/dbtune.sha256")" = "$checksum_hash" ]
+    done
+}
+
+@test "build profiles embed one immutable marker and isolate integration output" {
+    local fixture production_hash checksum_hash
+
+    fixture=$(build_project_fixture)
+    run "$fixture/build.sh"
+    [ "$status" -eq 0 ]
+    [ "$(grep -c '^readonly DBTUNE_ARTIFACT_PROFILE=production$' "$fixture/dist/dbtune")" -eq 1 ]
+    ! grep -q 'DBTUNE_ARTIFACT_PROFILE=source-test\|DBTUNE_ARTIFACT_PROFILE=integration-test' "$fixture/dist/dbtune"
+
+    run "$fixture/build.sh" --profile production
+    [ "$status" -eq 0 ]
+    [ "$(grep -c '^readonly DBTUNE_ARTIFACT_PROFILE=production$' "$fixture/dist/dbtune")" -eq 1 ]
+    production_hash=$(artifact_hash "$fixture/dist/dbtune")
+    checksum_hash=$(artifact_hash "$fixture/dist/dbtune.sha256")
+
+    run "$fixture/build.sh" --profile integration-test
+    [ "$status" -eq 0 ]
+    [ -x "$fixture/dist/dbtune-integration" ]
+    [ "$(grep -c '^readonly DBTUNE_ARTIFACT_PROFILE=integration-test$' "$fixture/dist/dbtune-integration")" -eq 1 ]
+    ! grep -q 'DBTUNE_ARTIFACT_PROFILE=source-test\|DBTUNE_ARTIFACT_PROFILE=production' "$fixture/dist/dbtune-integration"
+    [ "$(artifact_hash "$fixture/dist/dbtune")" = "$production_hash" ]
+    [ "$(artifact_hash "$fixture/dist/dbtune.sha256")" = "$checksum_hash" ]
+}
+
+@test "production artifact sanitizes hostile runtime overrides" {
+    local fixture marker marker_command bash_env runtime_dump
+
+    fixture=$(build_project_fixture)
+    "$fixture/build.sh"
+    marker="$BATS_TEST_TMPDIR/override-marker"
+    marker_command="$BATS_TEST_TMPDIR/marker-command"
+    cat >"$marker_command" <<'STUB'
+#!/usr/bin/env bash
+touch "$DBTUNE_OVERRIDE_MARKER"
+STUB
+    chmod +x "$marker_command"
+
+    run env \
+        DBTUNE_FLOCK="$marker_command" \
+        DBTUNE_SYSTEMCTL="$marker_command" \
+        DBTUNE_SQL_AUTH_METHOD=defaults \
+        DBTUNE_SQL_DEFAULTS_FILE="$BATS_TEST_TMPDIR/attacker.cnf" \
+        DBTUNE_PUBLISH_FAULT_HOOK="$marker_command" \
+        DBTUNE_NOW_EPOCH=1 \
+        DBTUNE_MIN_APPLY_SAMPLES=0 \
+        DBTUNE_OVERRIDE_MARKER="$marker" \
+        DBTUNE_PROGRAM=attacker \
+        DBTUNE_DEFAULT_DAYS=999 \
+        DBTUNE_ARTIFACT_PROFILE=integration-test \
+        "$fixture/dist/dbtune" status
+
+    [ "$status" -eq 0 ]
+    [ ! -e "$marker" ]
+
+    run env DBTUNE_PROGRAM=attacker "$fixture/dist/dbtune" version
+    [ "$status" -eq 0 ]
+    [ "$output" = 'dbtune 0.4.1' ]
+
+    bash_env="$BATS_TEST_TMPDIR/runtime-dump-env"
+    runtime_dump="$BATS_TEST_TMPDIR/runtime-dump"
+    cat >"$bash_env" <<'ENV'
+trap 'printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" "${DBTUNE_PROGRAM_PATH-unset}" "$DBTUNE_PROGRAM" "$DBTUNE_UI_LANG" "$DBTUNE_STATE_DIR" "$DBTUNE_CONFIG_TARGET" "$DBTUNE_CONFIG_ALLOWED_DIR" "$DBTUNE_ROOT_CNF" "$DBTUNE_LOG_LEVEL" "$DBTUNE_MAX_BACKUP_AGE_SECONDS" >"$RUNTIME_DUMP"' EXIT
+ENV
+    run env BASH_ENV="$bash_env" RUNTIME_DUMP="$runtime_dump" \
+        DBTUNE_PROGRAM_PATH="$marker_command" DBTUNE_UI_LANG=sk \
+        DBTUNE_STATE_DIR="$BATS_TEST_TMPDIR/operator-state" \
+        DBTUNE_CONFIG_TARGET="$BATS_TEST_TMPDIR/operator-target.cnf" \
+        DBTUNE_CONFIG_ALLOWED_DIR="$BATS_TEST_TMPDIR/operator-config" \
+        DBTUNE_ROOT_CNF="$BATS_TEST_TMPDIR/operator-root.cnf" \
+        DBTUNE_LOG_LEVEL=quiet DBTUNE_MAX_BACKUP_AGE_SECONDS=123 \
+        "$fixture/dist/dbtune" version
+    [ "$status" -eq 0 ]
+    [ "$(cat "$runtime_dump")" = "unset"$'\t'"dbtune"$'\t'"sk"$'\t'"$BATS_TEST_TMPDIR/operator-state"$'\t'"$BATS_TEST_TMPDIR/operator-target.cnf"$'\t'"$BATS_TEST_TMPDIR/operator-config"$'\t'"$BATS_TEST_TMPDIR/operator-root.cnf"$'\t'"quiet"$'\t'"123" ]
+}
+
+@test "production artifact cannot be sourced and still executes through bash" {
+    local fixture
+
+    fixture=$(build_project_fixture)
+    "$fixture/build.sh"
+
+    run bash -c 'source "$1"; result=$?; declare -F cmd_apply >/dev/null; defined=$?; printf "%s %s\n" "$result" "$defined"; exit "$result"' _ "$fixture/dist/dbtune"
+    [ "$status" -eq 65 ]
+    [ "$output" = '65 1' ]
+
+    run bash -c 'source "$0"; result=$?; declare -F cmd_apply >/dev/null; defined=$?; printf "%s %s\n" "$result" "$defined"; exit "$result"' "$fixture/dist/dbtune"
+    [ "$status" -eq 65 ]
+    [ "$output" = '65 1' ]
+
+    run bash "$fixture/dist/dbtune" version
+    [ "$status" -eq 0 ]
+    [ "$output" = 'dbtune 0.4.1' ]
+}
+
+@test "environment cannot switch production profile or freeze sanitization" {
+    local fixture bash_env
+
+    fixture=$(build_project_fixture)
+    "$fixture/build.sh"
+    bash_env="$BATS_TEST_TMPDIR/bash-env"
+    printf '%s\n' 'readonly PATH' >"$bash_env"
+
+    run env BASH_ENV="$bash_env" bash "$fixture/dist/dbtune" version
+    [ "$status" -eq 65 ]
+
+    run bash -c 'readonly DBTUNE_ARTIFACT_PROFILE=bad; source "$1"' _ "$fixture/dist/dbtune"
+    [ "$status" -eq 65 ]
+
+    printf '%s\n' 'readonly DBTUNE_ARTIFACT_VERSION=bad' >"$bash_env"
+    run env BASH_ENV="$bash_env" bash "$fixture/dist/dbtune" version
+    [ "$status" -eq 65 ]
+}
+
+@test "exported command functions cannot cross the production boundary" {
+    local fixture marker
+
+    fixture=$(build_project_fixture)
+    "$fixture/build.sh"
+    marker="$BATS_TEST_TMPDIR/exported-function-marker"
+
+    run env ARTIFACT="$fixture/dist/dbtune" MARKER="$marker" bash -c '
+        export DBTUNE_STATE_DIR="${MARKER}.state"
+        flock() { touch "$MARKER"; return 1; }
+        export -f flock
+        exec "$ARTIFACT" _tick
+    '
+    [ "$status" -eq 0 ]
+    [ ! -e "$marker" ]
+
+    run env ARTIFACT="$fixture/dist/dbtune" MARKER="$marker" bash -c '
+        printf() { touch "$MARKER"; builtin printf "$@"; }
+        export -f printf
+        exec "$ARTIFACT" version
+    '
+    [ "$status" -eq 0 ]
+    [ "$output" = 'dbtune 0.4.1' ]
+    [ ! -e "$marker" ]
+}
+
+@test "runtime environment contract classifies every production symbol" {
+    run "$PROJECT_ROOT/test/support/check-runtime-environment.sh"
+    [ "$status" -eq 0 ]
+}
+
+@test "runtime command resolver accepts only absolute trusted executables" {
+    local trusted
+
+    run dbtune_runtime_command_path 'bad/name'
+    [ "$status" -eq 64 ]
+    run dbtune_runtime_command_path dbtune-command-that-does-not-exist
+    [ "$status" -eq 69 ]
+
+    PATH=/bin:/usr/bin
+    trusted=$(dbtune_runtime_command_path bash)
+    [[ $trusted == /* ]]
+    [ -f "$trusted" ]
+    [ ! -L "$trusted" ]
+    [ -x "$trusted" ]
+
+    printf '%s\n' '#!/usr/bin/env bash' 'exit 0' >"$BATS_TEST_TMPDIR/untrusted-command"
+    chmod +x "$BATS_TEST_TMPDIR/untrusted-command"
+    PATH="$BATS_TEST_TMPDIR:$PATH" run dbtune_runtime_command_path untrusted-command
+    [ "$status" -eq 69 ]
+}
+
+@test "runtime environment checker names duplicate and unclassified symbols" {
+    local fixture="$BATS_TEST_TMPDIR/checker-project"
+
+    mkdir -p "$fixture/test/support"
+    cp -R "$PROJECT_ROOT/lib" "$fixture/"
+    cp "$PROJECT_ROOT/test/support/check-runtime-environment.sh" "$fixture/test/support/"
+    printf '%s\n' 'DBTUNE_UNCLASSIFIED_PROBE=1' >>"$fixture/lib/90-main.sh"
+    run "$fixture/test/support/check-runtime-environment.sh"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *'unclassified runtime environment symbol: DBTUNE_UNCLASSIFIED_PROBE'* ]]
+
+    cp "$PROJECT_ROOT/lib/90-main.sh" "$fixture/lib/90-main.sh"
+    awk '
+        { print }
+        $0 == "DBTUNE_ARTIFACT_PROFILE\timmutable" { print }
+    ' "$fixture/lib/10-util.sh" >"$fixture/lib/10-util.sh.new"
+    mv "$fixture/lib/10-util.sh.new" "$fixture/lib/10-util.sh"
+    run "$fixture/test/support/check-runtime-environment.sh"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *'duplicate runtime environment classification: DBTUNE_ARTIFACT_PROFILE'* ]]
 }

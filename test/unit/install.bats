@@ -325,6 +325,7 @@ ARTIFACT
 @test "installer rejects a 0.1.0 artifact requested as 9.9.9 despite runtime overrides" {
     cat >"$RELEASE_DIR/dbtune" <<'ARTIFACT'
 #!/usr/bin/env bash
+readonly DBTUNE_ARTIFACT_PROFILE=production
 if [[ ${1:-} == version ]]; then printf '%s\n' 'dbtune 0.1.0'; else exit 64; fi
 ARTIFACT
     chmod +x "$RELEASE_DIR/dbtune"
@@ -358,6 +359,38 @@ ARTIFACT
     [ "$status" -ne 0 ]
     [[ "$output" == *'artifact SHA-256 verification failed'* ]]
     [ ! -e "$INSTALL_DIR/dbtune" ]
+}
+
+@test "installer rejects an attested integration profile without replacing the target" {
+    fixture="$BATS_TEST_TMPDIR/integration-project"
+    mkdir "$fixture"
+    cp "$PROJECT_ROOT/build.sh" "$fixture/build.sh"
+    cp -R "$PROJECT_ROOT/lib" "$PROJECT_ROOT/templates" "$PROJECT_ROOT/systemd" "$fixture/"
+    "$fixture/build.sh" --profile integration-test
+    cp "$fixture/dist/dbtune-integration" "$RELEASE_DIR/dbtune"
+    cat >>"$RELEASE_DIR/dbtune" <<'MARKER'
+touch "$INTEGRATION_EXECUTION_MARKER"
+MARKER
+    execution_marker="$BATS_TEST_TMPDIR/integration-executed"
+    printf '%s\n' previous >"$INSTALL_DIR/dbtune"
+    chmod +x "$INSTALL_DIR/dbtune"
+    if command -v sha256sum >/dev/null 2>&1; then
+        (cd "$RELEASE_DIR" && sha256sum dbtune >dbtune.sha256)
+    else
+        (cd "$RELEASE_DIR" && shasum -a 256 dbtune >dbtune.sha256)
+    fi
+
+    run env DBTUNE_DOWNLOAD_BASE="file://$RELEASE_DIR" \
+        DBTUNE_INSTALL_DIR="$INSTALL_DIR" \
+        DBTUNE_ALLOW_UNSUPPORTED_OS=1 \
+        INTEGRATION_EXECUTION_MARKER="$execution_marker" \
+        sh "$BATS_TEST_DIRNAME/../../install.sh"
+
+    [ "$status" -ne 0 ]
+    [[ "$output" == *'downloaded artifact is not a production profile'* ]]
+    [ "$(cat "$INSTALL_DIR/dbtune")" = previous ]
+    [ ! -e "$execution_marker" ]
+    grep -F -- 'attestation verify' "$ATTESTATION_LOG"
 }
 
 @test "installer creates a new user-local destination without sudo" {
@@ -521,6 +554,7 @@ ARTIFACT
     fi
     cat >"$RELEASE_DIR/dbtune" <<'ARTIFACT'
 #!/usr/bin/env bash
+readonly DBTUNE_ARTIFACT_PROFILE=production
 [[ ! -x $0 ]] || exit 65
 if [[ ${1:-} == version ]]; then
     printf '%s\n' 'dbtune 0.4.1'

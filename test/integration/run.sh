@@ -34,6 +34,23 @@ integration_smoke() {
     local service=$1
 
     printf 'integration: %s live variable a parser smoke test\n' "$service"
+    # shellcheck disable=SC2016
+    integration_compose exec -T "$service" sh -eu -c '
+        test "$(grep -c "^readonly DBTUNE_ARTIFACT_PROFILE=integration-test$" /usr/local/bin/dbtune)" -eq 1
+        test "$(grep -c "^readonly DBTUNE_ARTIFACT_PROFILE=production$" /usr/local/bin/dbtune-production)" -eq 1
+        test "$(DBTUNE_PROGRAM=integration-hook /usr/local/bin/dbtune version)" = "integration-hook 0.4.1"
+        test "$(DBTUNE_PROGRAM=integration-hook /usr/local/bin/dbtune-production version)" = "dbtune 0.4.1"
+        marker=/var/lib/dbtune-integration-hook
+        hook=/var/lib/dbtune-flock-hook
+        printf "%s\n" "#!/bin/sh" "touch $marker" "exec /usr/bin/flock \"\$@\"" >"$hook"
+        chmod 755 "$hook"
+        rm -rf /var/lib/dbtune-profile-state "$marker"
+        DBTUNE_STATE_DIR=/var/lib/dbtune-profile-state DBTUNE_FLOCK="$hook" /usr/local/bin/dbtune _tick
+        test -e "$marker"
+        rm -rf /var/lib/dbtune-profile-state "$marker"
+        DBTUNE_STATE_DIR=/var/lib/dbtune-profile-state DBTUNE_FLOCK="$hook" /usr/local/bin/dbtune-production _tick
+        test ! -e "$marker"
+    ' || return 1
     integration_compose exec -T "$service" mariadb -Nse \
         "SELECT COUNT(*) FROM information_schema.GLOBAL_VARIABLES WHERE VARIABLE_NAME IN ('MAX_CONNECTIONS','SKIP_NAME_RESOLVE') HAVING COUNT(*)=2" |
         grep -qx '2' || return 1

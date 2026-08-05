@@ -757,7 +757,8 @@ dbtune_lifecycle_install_config() {
 dbtune_lifecycle_require_publisher() {
     local python=${DBTUNE_PYTHON:-python3}
 
-    if ! command -v "$python" >/dev/null 2>&1 || ! "$python" - <<'PY'
+    [[ $DBTUNE_ARTIFACT_PROFILE != production ]] || python=$(dbtune_runtime_command_path python3) || return 69
+    if ! command -v "$python" >/dev/null 2>&1 || ! "$python" -I -E -s - <<'PY'
 import ctypes
 import os
 import sys
@@ -792,6 +793,7 @@ dbtune_lifecycle_publish_managed_config() {
     local expected_source_hash=${7:-}
     local expected_parent_identities=${8:-}
     local directory base source_base=- python expected_uid expected_gid expected_mode status=0
+    local fail_match='' fault_hook='' crash_point='' crash_match=''
     local message_not_regular message_metadata message_hardlinks message_replaced message_changed
     local message_open_dir message_dir_replaced message_parent_chain message_parent_replaced
     local message_topology message_fault_hook message_atomic_flags message_fault_before message_failed
@@ -809,6 +811,14 @@ dbtune_lifecycle_publish_managed_config() {
     [[ $expected_topology == absent || $expected_topology == regular ]] || return 64
     [[ $expected_directory_identity =~ ^[0-9]+:[0-9]+$ ]] || return 64
     python=${DBTUNE_PYTHON:-python3}
+    if [[ $DBTUNE_ARTIFACT_PROFILE == production ]]; then
+        python=$(dbtune_runtime_command_path python3) || return 69
+    else
+        fail_match=${DBTUNE_PUBLISH_FAIL_MATCH:-}
+        fault_hook=${DBTUNE_PUBLISH_FAULT_HOOK:-}
+        crash_point=${DBTUNE_PUBLISH_CRASH_POINT:-}
+        crash_match=${DBTUNE_PUBLISH_CRASH_MATCH:-}
+    fi
     dbtune_lifecycle_require_publisher || return
     message_not_regular=$(dbtune_msg lifecycle_publisher_not_regular) || return
     message_metadata=$(dbtune_msg lifecycle_publisher_metadata) || return
@@ -833,13 +843,14 @@ dbtune_lifecycle_publish_managed_config() {
         return 65
     fi
     dbtune_lifecycle_before_publish "$target" "$source" || return
-    "$python" - "$directory" "$base" "$source_base" \
+    "$python" -I -E -s - "$directory" "$base" "$source_base" \
         "$expected_directory_identity" "$expected_parent_identities" "$expected_topology" "$expected_target_identity" \
         "$expected_target_hash" "$expected_source_hash" "$expected_uid" "$expected_gid" \
         "$expected_mode" "$message_not_regular" "$message_metadata" "$message_hardlinks" \
         "$message_replaced" "$message_changed" "$message_open_dir" "$message_dir_replaced" \
         "$message_parent_chain" "$message_parent_replaced" "$message_topology" "$message_fault_hook" \
-        "$message_atomic_flags" "$message_fault_before" "$message_failed" <<'PY' || status=$?
+        "$message_atomic_flags" "$message_fault_before" "$message_failed" \
+        "$fail_match" "$fault_hook" "$crash_point" "$crash_match" <<'PY' || status=$?
 import ctypes
 import errno
 import hashlib
@@ -875,11 +886,11 @@ import sys
     message_atomic_flags,
     message_fault_before,
     message_failed,
+    fail_match,
+    fault_hook,
+    crash_point,
+    crash_match,
 ) = sys.argv[1:]
-fail_match = os.environ.get("DBTUNE_PUBLISH_FAIL_MATCH", "")
-fault_hook = os.environ.get("DBTUNE_PUBLISH_FAULT_HOOK", "")
-crash_point = os.environ.get("DBTUNE_PUBLISH_CRASH_POINT", "")
-crash_match = os.environ.get("DBTUNE_PUBLISH_CRASH_MATCH", "")
 expected_uid = int(expected_uid)
 expected_gid = int(expected_gid)
 expected_mode = int(expected_mode, 8)
@@ -1752,6 +1763,8 @@ dbtune_lifecycle_prepare_rollback_service() {
     local history=${1:-}
     local systemctl_command=${DBTUNE_SYSTEMCTL:-systemctl}
 
+    [[ $DBTUNE_ARTIFACT_PROFILE != production ]] || systemctl_command=$(dbtune_runtime_command_path systemctl) || return
+
     DBTUNE_ROLLBACK_COMPLETION_START_STATUS=0
     DBTUNE_ROLLBACK_COMPLETION_RESTART_REQUIRED=0
     rm -f "$history/SERVICE_START_FAILED"
@@ -1990,6 +2003,8 @@ dbtune_lifecycle_apply_snapshot() {
     local target history had_original previous_state previous_current='' unmeasured=0
     local target_topology directory_identity target_identity target_hash parent_identities
     local systemctl_command=${DBTUNE_SYSTEMCTL:-systemctl}
+
+    [[ $DBTUNE_ARTIFACT_PROFILE != production ]] || systemctl_command=$(dbtune_runtime_command_path systemctl) || return
 
     dbtune_lifecycle_has_measurement || unmeasured=1
     if ((force == 1)); then

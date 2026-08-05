@@ -1,3 +1,264 @@
+dbtune_runtime_environment_contract() {
+    cat <<'CONTRACT'
+DBTUNE_ARTIFACT_PROFILE	immutable
+DBTUNE_ARTIFACT_VERSION	immutable
+DBTUNE_UI_LANG	operator
+DBTUNE_STATE_DIR	operator
+DBTUNE_CONFIG_TARGET	operator
+DBTUNE_CONFIG_ALLOWED_DIR	operator
+DBTUNE_ROOT_CNF	operator
+DBTUNE_LOG_LEVEL	operator
+DBTUNE_MAX_BACKUP_AGE_SECONDS	operator
+DBTUNE_BACKUP_EVIDENCE_FILE	test-only
+DBTUNE_BACKUP_EVIDENCE_UID	test-only
+DBTUNE_CLK_TCK	test-only
+DBTUNE_COLLECT_CONFIG_FILE	test-only
+DBTUNE_COLLECT_HEALTH_FILE	test-only
+DBTUNE_COLLECT_LOCK_FILE	test-only
+DBTUNE_COLLECT_SERVICE_PATH	test-only
+DBTUNE_COLLECT_TIMER_PATH	test-only
+DBTUNE_COLLECT_TIMER_UNIT	test-only
+DBTUNE_CONFIG_GID	test-only
+DBTUNE_CONFIG_MODE	test-only
+DBTUNE_CONFIG_UID	test-only
+DBTUNE_CRONTAB_FILE	test-only
+DBTUNE_CRON_ROOT	test-only
+DBTUNE_CRON_SCAN_ROOT	test-only
+DBTUNE_DATE	test-only
+DBTUNE_DBSIZE_DATE_FILE	test-only
+DBTUNE_DBSIZE_FILE	test-only
+DBTUNE_DF	test-only
+DBTUNE_EVENT_FLOCK	test-only
+DBTUNE_FAULT_INJECT	test-only
+DBTUNE_FLOCK	test-only
+DBTUNE_FREE	test-only
+DBTUNE_GETCONF	test-only
+DBTUNE_HOME_ROOT	test-only
+DBTUNE_INSTALL	test-only
+DBTUNE_LAST_UPTIME_FILE	test-only
+DBTUNE_MAX_SAMPLES_BYTES	test-only
+DBTUNE_MAX_SAMPLE_INTERVAL_SECONDS	test-only
+DBTUNE_MAX_SLOW_LOG_BYTES	test-only
+DBTUNE_MIN_APPLY_SAMPLES	test-only
+DBTUNE_MIN_AUTO_SAMPLES	test-only
+DBTUNE_MIN_FREE_KB	test-only
+DBTUNE_MONOTONIC	test-only
+DBTUNE_MYSQL_CONFIG_DIR	test-only
+DBTUNE_MYSQL_DATADIR	test-only
+DBTUNE_MYSQL_GROUP	test-only
+DBTUNE_MYSQL_USER	test-only
+DBTUNE_NOW_EPOCH	test-only
+DBTUNE_NOW_HHMM	test-only
+DBTUNE_PGREP	test-only
+DBTUNE_PROC_ROOT	test-only
+DBTUNE_PROGRAM_PATH	test-only
+DBTUNE_PUBLISH_CRASH_MATCH	test-only
+DBTUNE_PUBLISH_CRASH_POINT	test-only
+DBTUNE_PUBLISH_FAIL_MATCH	test-only
+DBTUNE_PUBLISH_FAULT_HOOK	test-only
+DBTUNE_PYTHON	test-only
+DBTUNE_RESTART_SKEW_SECONDS	test-only
+DBTUNE_RUNCLOUD_CNF	test-only
+DBTUNE_SAMPLES_FILE	test-only
+DBTUNE_SAMPLE_SECONDS	test-only
+DBTUNE_SERVER_SUPPORT	test-only
+DBTUNE_SLEEP	test-only
+DBTUNE_SLOW_LOG	test-only
+DBTUNE_SQL_CONNECT_TIMEOUT	test-only
+DBTUNE_SQL_STATEMENT_TIMEOUT	test-only
+DBTUNE_STALE_SAMPLE_SECONDS	test-only
+DBTUNE_STAT	test-only
+DBTUNE_STATE_UID	test-only
+DBTUNE_SYNC	test-only
+DBTUNE_SYSTEMCTL	test-only
+DBTUNE_SYSTEMD_DIR	test-only
+DBTUNE_TODAY	test-only
+DBTUNE_UNATTENDED_CONFIG	test-only
+DBTUNE_UNATTENDED_DIR	test-only
+DBTUNE_WC	test-only
+DBTUNE_ACTION_COMMAND	internal
+DBTUNE_ACTION_CONNECT_TIMEOUT_SECONDS	internal
+DBTUNE_ACTION_DESTRUCTIVE	internal
+DBTUNE_ACTION_KIND	internal
+DBTUNE_ACTION_LINES	internal
+DBTUNE_ACTION_RULE_ID	internal
+DBTUNE_ACTION_SAFETY	internal
+DBTUNE_ACTION_SCOPE	internal
+DBTUNE_ACTION_STATEMENT_TIMEOUT_SECONDS	internal
+DBTUNE_ACTION_TARGET	internal
+DBTUNE_ACTION_TIMEOUT_CAPABILITY	internal
+DBTUNE_ACTION_WARNING_ID	internal
+DBTUNE_ANALYSIS_EVIDENCE	internal
+DBTUNE_ANALYSIS_FILE	internal
+DBTUNE_ANALYSIS_FINGERPRINT	internal
+DBTUNE_ANALYSIS_LINES	internal
+DBTUNE_ANALYSIS_PROPOSED_KEY	internal
+DBTUNE_ANALYSIS_PROPOSED_VALUE	internal
+DBTUNE_ANALYSIS_REASON_ID	internal
+DBTUNE_ANALYSIS_RULE_ID	internal
+DBTUNE_ANALYSIS_SCOPE	internal
+DBTUNE_ANALYSIS_SEVERITY	internal
+DBTUNE_ANALYSIS_VERDICT	internal
+DBTUNE_APPLY_BACKUP_AGE_SECONDS	internal
+DBTUNE_APPLY_BACKUP_LAST_SUCCESS	internal
+DBTUNE_APPLY_BACKUP_MAX_AGE_SECONDS	internal
+DBTUNE_APPLY_BACKUP_MODE	internal
+DBTUNE_APPLY_BACKUP_SOURCE	internal
+DBTUNE_APPS_FILE	internal
+DBTUNE_AUDIT_EVIDENCE_ERROR	internal
+DBTUNE_AUDIT_FILE	internal
+DBTUNE_AUDIT_HASH	internal
+DBTUNE_AUDIT_QUERY_TIMEOUT_SECONDS	internal
+DBTUNE_AUTOLOAD_LINES	internal
+DBTUNE_AUTOLOAD_NAME	internal
+DBTUNE_AUTOLOAD_SCOPE	internal
+DBTUNE_AUTOLOAD_SIZE	internal
+DBTUNE_BACKUP_EVIDENCE_AGE_SECONDS	internal
+DBTUNE_BACKUP_EVIDENCE_ERROR	internal
+DBTUNE_BACKUP_EVIDENCE_MAX_AGE_SECONDS	internal
+DBTUNE_DATABASES_FILE	internal
+DBTUNE_DBSIZE_HASH	internal
+DBTUNE_DBSIZE_INPUT	internal
+DBTUNE_DBSIZE_SELECTED_HASH	internal
+DBTUNE_DBSIZE_SELECTED_ROWS	internal
+DBTUNE_DEFAULT_DAYS	internal
+DBTUNE_I18N_LANGUAGE	internal
+DBTUNE_I18N_MESSAGE	internal
+DBTUNE_JSON_FIELDS	internal
+DBTUNE_LIFECYCLE_DIRECTORY_IDENTITY	internal
+DBTUNE_LIFECYCLE_INTENT_HISTORY	internal
+DBTUNE_LIFECYCLE_INTENT_PREVIOUS_CURRENT	internal
+DBTUNE_LIFECYCLE_INTENT_PREVIOUS_STATE	internal
+DBTUNE_LIFECYCLE_INTENT_PROPOSAL_HASH	internal
+DBTUNE_LIFECYCLE_PARENT_IDENTITIES	internal
+DBTUNE_LIFECYCLE_RESTORED_BACKUP	internal
+DBTUNE_LIFECYCLE_RESTORED_CYCLE_ID	internal
+DBTUNE_LIFECYCLE_RESTORED_HISTORY	internal
+DBTUNE_LIFECYCLE_RESTORED_SOURCE	internal
+DBTUNE_LIFECYCLE_TARGET_HASH	internal
+DBTUNE_LIFECYCLE_TARGET_IDENTITY	internal
+DBTUNE_LIFECYCLE_TARGET_TOPOLOGY	internal
+DBTUNE_PROGRAM	internal
+DBTUNE_PROPOSAL_CURRENT	internal
+DBTUNE_PROPOSAL_EVIDENCE	internal
+DBTUNE_PROPOSAL_KEY	internal
+DBTUNE_PROPOSAL_LINES	internal
+DBTUNE_PROPOSAL_REASON_ID	internal
+DBTUNE_PROPOSAL_RULE_ID	internal
+DBTUNE_PROPOSAL_SEVERITY	internal
+DBTUNE_PROPOSAL_VALUE	internal
+DBTUNE_ROLLBACK_COMPLETION_RESTART_REQUIRED	internal
+DBTUNE_ROLLBACK_COMPLETION_START_STATUS	internal
+DBTUNE_ROLLBACK_INTENT_CREATED_AT	internal
+DBTUNE_ROLLBACK_INTENT_CYCLE_ID	internal
+DBTUNE_ROLLBACK_INTENT_HISTORY	internal
+DBTUNE_ROLLBACK_INTENT_PREVIOUS_CURRENT	internal
+DBTUNE_ROLLBACK_INTENT_PREVIOUS_STATE	internal
+DBTUNE_ROLLBACK_INTENT_PROPOSAL_HASH	internal
+DBTUNE_ROLLBACK_INTENT_RESTORED_BACKUP	internal
+DBTUNE_ROLLBACK_INTENT_RESTORED_CYCLE_ID	internal
+DBTUNE_ROLLBACK_INTENT_RESTORED_HASH	internal
+DBTUNE_ROLLBACK_INTENT_RESTORED_HISTORY	internal
+DBTUNE_ROLLBACK_INTENT_RESTORED_SOURCE	internal
+DBTUNE_RUN_ID	internal
+DBTUNE_SAMPLES_HASH	internal
+DBTUNE_SQL_AUTH_METHOD	internal
+DBTUNE_SQL_DEFAULTS_FILE	internal
+DBTUNE_STATE_LOCK_IDENTITY	internal
+DBTUNE_TSV_FIELDS	internal
+DBTUNE_WORST_LINES	internal
+CONTRACT
+}
+
+dbtune_runtime_prepare_environment() {
+    builtin local name declaration exported_names exported_function_declarations line function_name
+    builtin local safe_path=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+    [[ $DBTUNE_ARTIFACT_PROFILE == production ]] || return 0
+    exported_function_declarations=$(builtin declare -Fx) || return 65
+    while IFS= read -r line; do
+        [[ -n $line ]] || continue
+        function_name=${line##* }
+        [[ $function_name =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || return 65
+        builtin unset -f "$function_name" || return 65
+        ! builtin declare -F "$function_name" >/dev/null || return 65
+    done <<<"$exported_function_declarations"
+
+    declaration=$(builtin declare -p DBTUNE_ARTIFACT_PROFILE 2>/dev/null) || return 65
+    [[ $declaration =~ ^declare\ -[^[:space:]]*r && $DBTUNE_ARTIFACT_PROFILE == production ]] || return 65
+    declaration=$(builtin declare -p DBTUNE_ARTIFACT_VERSION 2>/dev/null) || return 65
+    [[ $declaration =~ ^declare\ -[^[:space:]]*r && $DBTUNE_ARTIFACT_VERSION == 0.4.1 ]] || return 65
+    for name in PATH LC_ALL LANG; do
+        declaration=$(builtin declare -p "$name" 2>/dev/null || true)
+        [[ ! $declaration =~ ^declare\ -[^[:space:]]*r ]] || return 65
+    done
+
+    PATH=$safe_path || return 65
+    LC_ALL=C || return 65
+    LANG=C || return 65
+    builtin export PATH LC_ALL LANG
+    [[ $PATH == "$safe_path" && $LC_ALL == C && $LANG == C ]] || return 65
+
+    exported_names=$(builtin compgen -e) || return 65
+    while IFS= read -r name; do
+        [[ $name == DBTUNE_* ]] || continue
+        case $name in
+            DBTUNE_ARTIFACT_PROFILE|DBTUNE_ARTIFACT_VERSION|DBTUNE_UI_LANG|DBTUNE_STATE_DIR|\
+            DBTUNE_CONFIG_TARGET|DBTUNE_CONFIG_ALLOWED_DIR|DBTUNE_ROOT_CNF|DBTUNE_LOG_LEVEL|\
+            DBTUNE_MAX_BACKUP_AGE_SECONDS) continue ;;
+        esac
+        builtin unset "$name" 2>/dev/null || return 65
+        [[ -z ${!name+x} ]] || return 65
+    done <<<"$exported_names"
+
+    DBTUNE_PROGRAM=dbtune || return 65
+    DBTUNE_DEFAULT_DAYS=7 || return 65
+    DBTUNE_SQL_AUTH_METHOD= || return 65
+    DBTUNE_SQL_DEFAULTS_FILE= || return 65
+    builtin export -n DBTUNE_PROGRAM DBTUNE_DEFAULT_DAYS DBTUNE_SQL_AUTH_METHOD DBTUNE_SQL_DEFAULTS_FILE 2>/dev/null || return 65
+    [[ $DBTUNE_PROGRAM == dbtune && $DBTUNE_DEFAULT_DAYS == 7 && -z $DBTUNE_SQL_AUTH_METHOD &&
+        -z $DBTUNE_SQL_DEFAULTS_FILE ]] || return 65
+}
+
+dbtune_runtime_command_path() {
+    local name=${1:-} path directory current uid gid mode stat_path
+
+    [[ $name =~ ^[A-Za-z0-9._+-]+$ ]] || return 64
+    path=$(builtin type -P -- "$name") || return 69
+    [[ $path == /* && -f $path && ! -L $path && -x $path ]] || return 69
+    directory=${path%/*}
+    case $directory in
+        /usr/bin|/bin|/usr/sbin|/sbin|/usr/local/bin|/usr/local/sbin) ;;
+        *) return 69 ;;
+    esac
+    if ((EUID == 0)); then
+        stat_path=/usr/bin/stat
+        [[ -f $stat_path && ! -L $stat_path && -x $stat_path ]] || return 69
+        if "$stat_path" -c '%u %g %a' "$path" >/dev/null 2>&1; then
+            read -r uid gid mode < <("$stat_path" -c '%u %g %a' "$path") || return 69
+        else
+            read -r uid gid mode < <("$stat_path" -f '%u %g %Lp' "$path") || return 69
+        fi
+        [[ $uid == 0 && $mode =~ ^[0-7]{3,4}$ ]] || return 69
+        (((8#$mode & 0022) == 0)) || return 69
+        current=$directory
+        while :; do
+            [[ -d $current && ! -L $current ]] || return 69
+            if "$stat_path" -c '%u %g %a' "$current" >/dev/null 2>&1; then
+                read -r uid gid mode < <("$stat_path" -c '%u %g %a' "$current") || return 69
+            else
+                read -r uid gid mode < <("$stat_path" -f '%u %g %Lp' "$current") || return 69
+            fi
+            [[ $uid == 0 && $mode =~ ^[0-7]{3,4}$ ]] || return 69
+            (((8#$mode & 0022) == 0)) || return 69
+            [[ $current == / ]] && break
+            current=${current%/*}
+            [[ -n $current ]] || current=/
+        done
+    fi
+    builtin printf '%s\n' "$path"
+}
+
 dbtune_state_dir() {
     printf '%s\n' "$DBTUNE_STATE_DIR"
 }
@@ -1350,6 +1611,12 @@ dbtune_with_lifecycle_lock() {
     shift 3 || true
 
     dbtune_init_state_dir || return
+    if [[ $DBTUNE_ARTIFACT_PROFILE == production ]]; then
+        flock_command=$(dbtune_runtime_command_path flock) || {
+            [[ $mode == skip ]] && return 75
+            return 69
+        }
+    fi
     if [[ $operation == _tick ]] && declare -F dbtune_collect_restore_language >/dev/null 2>&1; then
         dbtune_collect_restore_language || return
     fi
@@ -1392,6 +1659,10 @@ dbtune_event() {
     local line lock_file lock_identity lock_fd flock_command=${DBTUNE_EVENT_FLOCK:-flock}
     local locked=0 status=0
     local -a fields
+
+    if [[ $DBTUNE_ARTIFACT_PROFILE == production ]]; then
+        flock_command=$(dbtune_runtime_command_path flock) || return 69
+    fi
 
     [[ -n $event_type ]] || {
         dbtune_log error "$(dbtune_msg core_event_type_required)"

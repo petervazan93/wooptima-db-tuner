@@ -255,6 +255,12 @@ Premenne:
         sk:artifact_syntax_invalid)
             INSTALLER_MESSAGE='stiahnuty artefakt nema platnu Bash syntax'
             ;;
+        en:artifact_profile_invalid)
+            INSTALLER_MESSAGE='downloaded artifact is not a production profile'
+            ;;
+        sk:artifact_profile_invalid)
+            INSTALLER_MESSAGE='stiahnuty artefakt nema produkcny profil'
+            ;;
         en:artifact_version_invalid)
             INSTALLER_MESSAGE='artifact did not return a valid version'
             ;;
@@ -619,6 +625,11 @@ fi
 [ "$actual" = "$expected" ] || fail checksum_failed
 verify_attestation "$artifact" "refs/tags/$selected_release" ||
     fail attestation_failed
+profile_count=$(grep -c '^readonly DBTUNE_ARTIFACT_PROFILE=production$' "$artifact" || true)
+[ "$profile_count" -eq 1 ] || fail artifact_profile_invalid
+if grep -q 'DBTUNE_ARTIFACT_PROFILE=source-test\|DBTUNE_ARTIFACT_PROFILE=integration-test' "$artifact"; then
+    fail artifact_profile_invalid
+fi
 bash -n "$artifact" || fail artifact_syntax_invalid
 artifact_version=$(
     (

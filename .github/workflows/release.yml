@@ -40,6 +40,29 @@ jobs:
         run: make build
       - name: Verify tag matches artifact version
         run: test "v$(dist/dbtune version | awk '{print $2}')" = "$GITHUB_REF_NAME"
+      - name: Verify production runtime boundary
+        run: |
+          test "$(grep -c '^readonly DBTUNE_ARTIFACT_PROFILE=production$' dist/dbtune)" -eq 1
+          ! grep -q 'DBTUNE_ARTIFACT_PROFILE=source-test\|DBTUNE_ARTIFACT_PROFILE=integration-test' dist/dbtune
+          test -x dist/dbtune
+          sha256sum -c dist/dbtune.sha256
+          test ! -e dist/dbtune-integration
+          marker=$(mktemp)
+          rm -f "$marker"
+          marker_command=$(mktemp)
+          printf '%s\n' '#!/usr/bin/env bash' 'touch "$DBTUNE_OVERRIDE_MARKER"' >"$marker_command"
+          chmod +x "$marker_command"
+          env DBTUNE_FLOCK="$marker_command" DBTUNE_SYSTEMCTL="$marker_command" \
+            DBTUNE_SQL_AUTH_METHOD=defaults DBTUNE_SQL_DEFAULTS_FILE=/tmp/attacker.cnf \
+            DBTUNE_PUBLISH_FAULT_HOOK="$marker_command" DBTUNE_NOW_EPOCH=1 \
+            DBTUNE_MIN_APPLY_SAMPLES=0 DBTUNE_OVERRIDE_MARKER="$marker" \
+            dist/dbtune status
+          test ! -e "$marker"
+          test "$(grep -c '^readonly DBTUNE_ARTIFACT_PROFILE=production$' dist/dbtune)" -eq 1
+          ! grep -q 'DBTUNE_ARTIFACT_PROFILE=source-test\|DBTUNE_ARTIFACT_PROFILE=integration-test' dist/dbtune
+          test -x dist/dbtune
+          sha256sum -c dist/dbtune.sha256
+          test ! -e dist/dbtune-integration
       - name: Attest release artifacts
         id: attest
         uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1

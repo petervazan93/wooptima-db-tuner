@@ -16,7 +16,8 @@ services:
     tmpfs:
       - /tmp
     volumes:
-      - ../../dist/dbtune:/usr/local/bin/dbtune:ro
+      - ../../dist/dbtune-integration:/usr/local/bin/dbtune:ro
+      - ../../dist/dbtune:/usr/local/bin/dbtune-production:ro
 
   mariadb114:
     build:
@@ -35,4 +36,5 @@ services:
     tmpfs:
       - /tmp
     volumes:
-      - ../../dist/dbtune:/usr/local/bin/dbtune:ro
+      - ../../dist/dbtune-integration:/usr/local/bin/dbtune:ro
+      - ../../dist/dbtune:/usr/local/bin/dbtune-production:ro

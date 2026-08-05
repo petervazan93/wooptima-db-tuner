@@ -136,6 +136,10 @@ dbtune_collect_install_units() {
     timer_path=${DBTUNE_COLLECT_TIMER_PATH:-$systemd_dir/dbtune-collect.timer}
     program_path=${DBTUNE_PROGRAM_PATH:-/usr/local/bin/dbtune}
     systemctl_command=${DBTUNE_SYSTEMCTL:-systemctl}
+    if [[ $DBTUNE_ARTIFACT_PROFILE == production ]]; then
+        program_path=$(dbtune_runtime_command_path dbtune) || return
+        systemctl_command=$(dbtune_runtime_command_path systemctl) || return
+    fi
     if [[ $program_path != /* || $program_path =~ [[:space:]] ]]; then
         dbtune_log error "$(dbtune_msg collect_program_path_invalid)"
         return 64
@@ -221,6 +225,7 @@ dbtune_collect_start() {
     fi
 
     systemctl_command=${DBTUNE_SYSTEMCTL:-systemctl}
+    [[ $DBTUNE_ARTIFACT_PROFILE != production ]] || systemctl_command=$(dbtune_runtime_command_path systemctl) || return
     timer_unit=${DBTUNE_COLLECT_TIMER_UNIT:-dbtune-collect.timer}
     if ! "$systemctl_command" enable --now "$timer_unit"; then
         dbtune_collect_restore_slow_log >/dev/null 2>&1 || true
@@ -302,6 +307,7 @@ dbtune_collect_disable_timer() {
     local systemctl_command=${DBTUNE_SYSTEMCTL:-systemctl}
     local timer_unit=${DBTUNE_COLLECT_TIMER_UNIT:-dbtune-collect.timer}
 
+    [[ $DBTUNE_ARTIFACT_PROFILE != production ]] || systemctl_command=$(dbtune_runtime_command_path systemctl) || return
     "$systemctl_command" disable --now "$timer_unit"
 }
 
@@ -330,10 +336,12 @@ dbtune_collect_finish_locked() {
 
 dbtune_collect_stop() {
     local result=0 lock_file lock_identity lock_fd lock_status timer_result=ok
+    local flock_command=${DBTUNE_FLOCK:-flock}
 
     (($# == 0)) || { dbtune_collect_usage >&2; return 64; }
     dbtune_init_state_dir || return
     dbtune_require_state collect_stop || return
+    [[ $DBTUNE_ARTIFACT_PROFILE != production ]] || flock_command=$(dbtune_runtime_command_path flock) || return
     if ! dbtune_collect_disable_timer; then
         result=1
         timer_result=failed
@@ -345,18 +353,18 @@ dbtune_collect_stop() {
         return "$lock_status"
     }
     lock_identity=$DBTUNE_STATE_LOCK_IDENTITY
-    if ! "${DBTUNE_FLOCK:-flock}" -x "$lock_fd"; then
+    if ! "$flock_command" -x "$lock_fd"; then
         dbtune_collect_health error stop_lock || true
         exec {lock_fd}>&-
         return 1
     fi
     if ! dbtune_validate_state_lock "$lock_file" "$(dbtune_msg collect_label_collector_lock)" "$lock_identity"; then
-        "${DBTUNE_FLOCK:-flock}" -u "$lock_fd" >/dev/null 2>&1 || true
+        "$flock_command" -u "$lock_fd" >/dev/null 2>&1 || true
         exec {lock_fd}>&-
         return 65
     fi
     dbtune_collect_finish_locked stopped "reason=manual timer=$timer_result" || result=1
-    "${DBTUNE_FLOCK:-flock}" -u "$lock_fd" >/dev/null 2>&1 || true
+    "$flock_command" -u "$lock_fd" >/dev/null 2>&1 || true
     exec {lock_fd}>&-
     dbtune_event collect_stopped || true
     ((result == 0)) || return 1
@@ -840,30 +848,31 @@ dbtune_collect_tick_body() {
 }
 
 cmd_tick() {
-    local lock_file lock_identity lock_fd
+    local lock_file lock_identity lock_fd flock_command=${DBTUNE_FLOCK:-flock}
 
     if (($#)); then
         dbtune_log warn "$(dbtune_msg collect_tick_arguments_ignored)"
     fi
     dbtune_init_state_dir || return 0
+    [[ $DBTUNE_ARTIFACT_PROFILE != production ]] || flock_command=$(dbtune_runtime_command_path flock) || return 0
     lock_file=$(dbtune_collect_lock_file)
     dbtune_open_state_lock lock_fd "$lock_file" "$(dbtune_msg collect_label_collector_lock)" || {
         dbtune_collect_health error lock_open || true
         return 0
     }
     lock_identity=$DBTUNE_STATE_LOCK_IDENTITY
-    if ! "${DBTUNE_FLOCK:-flock}" -n "$lock_fd"; then
+    if ! "$flock_command" -n "$lock_fd"; then
         dbtune_event tick_skipped reason locked || true
         exec {lock_fd}>&-
         return 0
     fi
     if ! dbtune_validate_state_lock "$lock_file" "$(dbtune_msg collect_label_collector_lock)" "$lock_identity"; then
-        "${DBTUNE_FLOCK:-flock}" -u "$lock_fd" >/dev/null 2>&1 || true
+        "$flock_command" -u "$lock_fd" >/dev/null 2>&1 || true
         exec {lock_fd}>&-
         return 0
     fi
     dbtune_collect_tick_body || true
-    "${DBTUNE_FLOCK:-flock}" -u "$lock_fd" >/dev/null 2>&1 || true
+    "$flock_command" -u "$lock_fd" >/dev/null 2>&1 || true
     exec {lock_fd}>&-
     return 0
 }

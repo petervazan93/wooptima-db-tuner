@@ -1573,3 +1573,20 @@ STUB
     [ ! -e "$BATS_TEST_TMPDIR/mktemp.log" ]
     [ ! -e "$DBTUNE_STATE_DIR/apply" ]
 }
+
+@test "publisher isolates Python from hostile module search paths" {
+    mkdir "$BATS_TEST_TMPDIR/pythonpath"
+    cat >"$BATS_TEST_TMPDIR/pythonpath/sitecustomize.py" <<'PY'
+import os
+
+with open(os.environ["PYTHON_STARTUP_MARKER"], "w", encoding="utf-8") as marker:
+    marker.write("loaded\n")
+PY
+    export PYTHONPATH="$BATS_TEST_TMPDIR/pythonpath"
+    export PYTHON_STARTUP_MARKER="$BATS_TEST_TMPDIR/python-startup-marker"
+
+    run cmd_apply
+
+    [ "$status" -eq 0 ]
+    [ ! -e "$PYTHON_STARTUP_MARKER" ]
+}
