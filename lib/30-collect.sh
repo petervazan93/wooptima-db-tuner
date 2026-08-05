@@ -158,6 +158,18 @@ dbtune_collect_install_units() {
     "$systemctl_command" daemon-reload
 }
 
+dbtune_collect_preflight_samples_file() {
+    local file header expected
+
+    file=$(dbtune_collect_samples_file)
+    [[ -s $file ]] || return 0
+    IFS= read -r header <"$file" || return 65
+    expected=$(dbtune_collect_sample_header)
+    [[ $header == "$expected" ]] && return 0
+    printf '%s\n' "$(dbtune_msg collect_sample_header_unsupported)" >&2
+    return 65
+}
+
 dbtune_collect_start() {
     local days=${DBTUNE_DEFAULT_DAYS:-7}
     local long_query_time=2
@@ -186,6 +198,7 @@ dbtune_collect_start() {
     done
     dbtune_require_uint "--days" "$days" 1 3650 || return
     dbtune_collect_validate_long_query_time "$long_query_time" || return
+    dbtune_collect_preflight_samples_file || return
     dbtune_require_state collect_start || return
     dbtune_init_state_dir || return 1
 
@@ -471,28 +484,18 @@ dbtune_collect_guards() {
 }
 
 dbtune_collect_status_snapshot() {
-    local raw
+    local raw validated line
+    local -a values=()
 
     raw=$(dbtune_sql "SHOW GLOBAL STATUS WHERE Variable_name IN ('Uptime','Innodb_buffer_pool_reads','Innodb_buffer_pool_read_requests','Innodb_data_read','Handler_read_rnd_next','Created_tmp_disk_tables','Created_tmp_tables','Threads_running','Threads_connected','Qcache_hits','Com_select','Innodb_log_waits','Innodb_buffer_pool_wait_free');") || return
-    awk -F '\t' '
-        { key=tolower($1); value[key]=$2 }
-        END {
-            if (!("uptime" in value)) exit 1
-            printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
-                value["uptime"]+0,
-                value["innodb_buffer_pool_reads"]+0,
-                value["innodb_buffer_pool_read_requests"]+0,
-                value["innodb_data_read"]+0,
-                value["handler_read_rnd_next"]+0,
-                value["created_tmp_disk_tables"]+0,
-                value["created_tmp_tables"]+0,
-                value["threads_running"]+0,
-                value["threads_connected"]+0,
-                value["qcache_hits"]+0,
-                value["com_select"]+0,
-                value["innodb_log_waits"]+0,
-                value["innodb_buffer_pool_wait_free"]+0
-        }' <<<"$raw"
+    validated=$(dbtune_status_snapshot_exact "$raw" uptime innodb_buffer_pool_reads \
+        innodb_buffer_pool_read_requests innodb_data_read handler_read_rnd_next \
+        created_tmp_disk_tables created_tmp_tables threads_running threads_connected \
+        qcache_hits com_select innodb_log_waits innodb_buffer_pool_wait_free) || return 65
+    while IFS=$'\t' read -r _ line; do
+        values+=("$line")
+    done <<<"$validated"
+    (IFS=$'\t'; printf '%s\n' "${values[*]}")
 }
 
 dbtune_collect_cpu_snapshot() {
@@ -588,6 +591,57 @@ dbtune_collect_restart_detected() {
     return 1
 }
 
+dbtune_collect_cpu_identity_valid() {
+    local snapshot=${1-} pid ticks start extra
+
+    IFS=$'\t' read -r pid ticks start extra <<<"$snapshot"
+    [[ -z $extra && $pid =~ ^[1-9][0-9]*$ && $start =~ ^[1-9][0-9]*$ ]] || return 1
+    dbtune_uint64_valid "$pid" && dbtune_uint64_valid "$ticks" && dbtune_uint64_valid "$start"
+}
+
+dbtune_collect_restart_status() {
+    local previous_uptime=$1 previous_monotonic=$2 previous_epoch=$3
+    local previous_pid=$4 previous_start=$5 uptime_first=$6 uptime_second=$7
+    local monotonic_now=$8 now=$9 cpu_first=${10} cpu_second=${11}
+    local first_pid first_start second_pid second_start
+
+    if dbtune_collect_cpu_identity_valid "$cpu_first" && dbtune_collect_cpu_identity_valid "$cpu_second"; then
+        IFS=$'\t' read -r first_pid _ first_start <<<"$cpu_first"
+        IFS=$'\t' read -r second_pid _ second_start <<<"$cpu_second"
+        if [[ $first_pid != "$second_pid" || $first_start != "$second_start" ]]; then
+            printf 'restart\n'
+            return 0
+        fi
+    else
+        printf 'degraded_restart_identity\n'
+        return 0
+    fi
+    if dbtune_uint64_valid "$previous_pid" && dbtune_uint64_valid "$previous_start" &&
+        [[ $previous_pid != 0 && $previous_start != 0 ]]; then
+        if [[ $previous_pid != "$first_pid" || $previous_start != "$first_start" ]]; then
+            printf 'restart\n'
+            return 0
+        fi
+    else
+        printf 'degraded_restart_identity\n'
+        return 0
+    fi
+    if dbtune_collect_restart_detected "$previous_uptime" "$previous_monotonic" "$previous_epoch" \
+        "$previous_pid" "$previous_start" "$uptime_first" "$uptime_second" "$monotonic_now" \
+        "$now" "$cpu_first" "$cpu_second"; then
+        printf 'restart\n'
+    else
+        printf 'ok\n'
+    fi
+}
+
+dbtune_collect_identity_valid() {
+    local uptime=$1 monotonic=$2 epoch=$3 cpu=$4
+
+    dbtune_uint64_valid "$uptime" && dbtune_is_uint "$epoch" &&
+        [[ $monotonic =~ ^[0-9]+([.][0-9]+)?$ ]] && dbtune_collect_cpu_identity_valid "$cpu"
+}
+
 dbtune_collect_ensure_slow_log() {
     local trigger=$1 slow_log long_query_time runtime runtime_enabled runtime_file runtime_long
     local needs_heal=0 verification=ok
@@ -630,37 +684,65 @@ dbtune_collect_load1() {
 dbtune_collect_delta() {
     local timestamp=$1 first=$2 second=$3 seconds=$4 cpu_first=$5 cpu_second=$6
     local clock_ticks=$7 memory=$8 load1=$9 restart_flag=${10}
-    local sample_status=${11:-ok}
+    local sample_status=${11:-ok} comparison name high low difference reset_names=''
+    local -a a=() b=() deltas=()
+    local -a cumulative=(2 3 4 5 6 7 10 11 12 13)
+    local -a names=(buffer_pool_reads buffer_pool_read_requests innodb_data_read handler_read_rnd_next created_tmp_disk_tables created_tmp_tables qcache_hits com_select innodb_log_waits innodb_buffer_pool_wait_free)
+
+    IFS=$'\t' read -r -a a <<<"$first"
+    IFS=$'\t' read -r -a b <<<"$second"
+    ((${#a[@]} == 13 && ${#b[@]} == 13)) || return 65
+    if ((restart_flag)); then
+        deltas=(0 0 0 0 0 0 0 0 0 0)
+    else
+        for name in "${!cumulative[@]}"; do
+            low=${a[${cumulative[$name]}-1]}
+            high=${b[${cumulative[$name]}-1]}
+            comparison=$(dbtune_uint64_compare "$high" "$low") || return 65
+            if ((comparison < 0)); then
+                deltas+=(0)
+                [[ -z $reset_names ]] || reset_names+=,
+                reset_names+=${names[$name]}
+            else
+                difference=$(dbtune_uint64_subtract "$high" "$low") || return
+                deltas+=("$difference")
+            fi
+        done
+        if [[ -n $reset_names ]]; then
+            sample_status=degraded_counter_reset
+            dbtune_log warn "counter reset: $reset_names"
+        elif [[ $(dbtune_uint64_compare "${deltas[0]}" "${deltas[1]}") == 1 ||
+            $(dbtune_uint64_compare "${deltas[4]}" "${deltas[5]}") == 1 ||
+            $(dbtune_uint64_compare "${deltas[6]}" "${deltas[7]}") == 1 ]]; then
+            sample_status=degraded_counter_inconsistent
+        fi
+    fi
 
     awk -F '\t' -v timestamp="$timestamp" -v first="$first" -v second="$second" \
         -v seconds="$seconds" -v cpu_first="$cpu_first" -v cpu_second="$cpu_second" \
         -v hz="$clock_ticks" -v memory="$memory" -v load1="$load1" -v restart="$restart_flag" \
-        -v sample_status="$sample_status" '
-        function delta(a, b) { if (restart || b < a) return 0; return b-a }
+        -v sample_status="$sample_status" -v reads="${deltas[0]}" -v requests="${deltas[1]}" \
+        -v data_read="${deltas[2]}" -v rnd="${deltas[3]}" -v tmp_disk="${deltas[4]}" \
+        -v tmp_total="${deltas[5]}" -v qhits="${deltas[6]}" -v selects="${deltas[7]}" \
+        -v log_waits="${deltas[8]}" -v wait_free="${deltas[9]}" '
         BEGIN {
             split(first, a, "\t"); split(second, b, "\t")
             split(cpu_first, c1, "\t"); split(cpu_second, c2, "\t")
             split(memory, mem, "\t")
             valid_interval=(sample_status == "ok" && seconds > 0)
-            reads=delta(a[2],b[2]); requests=delta(a[3],b[3])
-            data_read=delta(a[4],b[4]); rnd=delta(a[5],b[5])
-            tmp_disk=delta(a[6],b[6]); tmp_total=delta(a[7],b[7])
-            qhits=delta(a[10],b[10]); selects=delta(a[11],b[11])
-            qcache_queries=qhits+selects
-            log_waits=delta(a[12],b[12]); wait_free=delta(a[13],b[13])
             bp_hit=requests > 0 ? 100*(1-reads/requests) : 100
             if (bp_hit < 0) bp_hit=0; if (bp_hit > 100) bp_hit=100
             tmp_pct=tmp_total > 0 ? 100*tmp_disk/tmp_total : 0
-            qcache_pct=qcache_queries > 0 ? 100*qhits/qcache_queries : 0
+            qcache_pct=selects > 0 ? 100*qhits/selects : 0
             cpu=(valid_interval && !restart && c1[1] == c2[1] && c1[1] != 0 && c2[2] >= c1[2] && hz > 0) ? 100*(c2[2]-c1[2])/(hz*seconds) : 0
-            printf "%s\t%.0f\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%.0f\t%.0f\t%.2f\t%.0f\t%.0f\t%.2f\t%.0f\t%.0f\t%s\t%d\t%.0f\t%.6f\t%s\n",
+            printf "%s\t%s\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%s\t%s\t%.2f\t%s\t%s\t%.2f\t%s\t%s\t%s\t%d\t%s\t%.6f\t%s\n",
                 timestamp,b[1],bp_hit,valid_interval ? reads/seconds : 0,valid_interval ? data_read/seconds : 0,valid_interval ? rnd/seconds : 0,tmp_pct,
-                b[8],b[9],qcache_pct,log_waits,wait_free,cpu,mem[1],mem[2],load1,restart,qcache_queries,seconds,sample_status
+                b[8],b[9],qcache_pct,log_waits,wait_free,cpu,mem[1],mem[2],load1,restart,selects,seconds,sample_status
         }'
 }
 
 dbtune_collect_sample_header() {
-    printf 'timestamp\tuptime\tbp_hit_pct\tbp_misses_s\tdata_read_s\trnd_next_s\ttmp_disk_pct\tthreads_running\tthreads_connected\tqcache_hit_pct\tlog_waits_delta\twait_free_delta\tcpu_pct\tmem_available_kb\tswap_used_kb\tload1\trestart_flag\tqcache_queries_delta\tinterval_seconds\tsample_status\n'
+    printf 'timestamp\tuptime\tbp_hit_pct\tbp_misses_s\tdata_read_s\trnd_next_s\ttmp_disk_pct\tthreads_running\tthreads_connected\tqcache_hit_pct\tlog_waits_delta\twait_free_delta\tcpu_pct\tmem_available_kb\tswap_used_kb\tload1\trestart_flag\tcom_select_delta\tinterval_seconds\tsample_status\n'
 }
 
 dbtune_collect_legacy_sample_header() {
@@ -669,19 +751,15 @@ dbtune_collect_legacy_sample_header() {
 
 dbtune_collect_append_sample() {
     local line=$1
-    local file header expected legacy
+    local file header expected
 
     file=$(dbtune_collect_samples_file)
     expected=$(dbtune_collect_sample_header)
-    legacy=$(dbtune_collect_legacy_sample_header)
     if [[ ! -s $file ]]; then
         printf '%s\n' "$expected" >>"$file" || return
     else
         IFS= read -r header <"$file" || return 1
-        if [[ $header == "$legacy" ]]; then
-            awk 'NR == 1 { print $0 "\tqcache_queries_delta\tinterval_seconds\tsample_status"; next } { print $0 "\t\t\tok" }' "$file" |
-                dbtune_atomic_write "$file" 600 || return 1
-        elif [[ $header != "$expected" ]]; then
+        if [[ $header != "$expected" ]]; then
             dbtune_log error "$(dbtune_msg collect_sample_header_unsupported)"
             return 65
         fi
@@ -759,7 +837,8 @@ dbtune_collect_tick_body() {
     local previous_uptime='' previous_monotonic='' previous_epoch='' previous_pid='' previous_start=''
     local current_pid current_start monotonic_first='' monotonic_second='' sample_epoch
     local last_uptime_file sample_count min_auto_samples slow_log_result=failed restart_trigger=periodic timer_result
-    local health_status='' interval_seconds=0 sample_status=degraded_interval
+    local health_status='' interval_seconds=0 sample_status=degraded_interval interval_status
+    local restart_status=degraded_restart_identity
 
     [[ $(dbtune_state_read) == collecting ]] || return 0
     if [[ -r $(dbtune_collect_health_file) ]]; then
@@ -808,16 +887,22 @@ dbtune_collect_tick_body() {
 
     IFS=$'\t' read -r uptime_first _ <<<"$first"
     IFS=$'\t' read -r uptime_second _ <<<"$second"
-    if dbtune_collect_restart_detected "$previous_uptime" "$previous_monotonic" "$previous_epoch" \
+    restart_status=$(dbtune_collect_restart_status "$previous_uptime" "$previous_monotonic" "$previous_epoch" \
         "$previous_pid" "$previous_start" "$uptime_first" "$uptime_second" "$monotonic_first" \
-        "$now" "$cpu_first" "$cpu_second"; then
+        "$now" "$cpu_first" "$cpu_second") || restart_status=degraded_restart_identity
+    if [[ $restart_status == restart ]]; then
         restart_flag=1
         restart_trigger=restart
         dbtune_event db_restart_detected previous_uptime "${previous_uptime:-unknown}" uptime "$uptime_second" \
             previous_pid "${previous_pid:-unknown}" current_pid "${cpu_second%%$'\t'*}" || true
     fi
     interval_seconds=$(dbtune_collect_interval_seconds "$monotonic_first" "$monotonic_second" 2>/dev/null) || interval_seconds=0
-    sample_status=$(dbtune_collect_interval_status "$interval_seconds" "$sample_seconds")
+    interval_status=$(dbtune_collect_interval_status "$interval_seconds" "$sample_seconds")
+    if [[ $restart_status == degraded_restart_identity ]]; then
+        sample_status=degraded_restart_identity
+    else
+        sample_status=$interval_status
+    fi
     if ! slow_log_result=$(dbtune_collect_ensure_slow_log "$restart_trigger"); then
         slow_log_result=failed
         dbtune_event collect_slow_log_self_heal_failed trigger "$restart_trigger" || true
@@ -830,12 +915,14 @@ dbtune_collect_tick_body() {
     }
     dbtune_collect_append_sample "$line" || { dbtune_collect_health error append; return 0; }
     sample_epoch=$(dbtune_collect_epoch) || sample_epoch=$now
-    IFS=$'\t' read -r current_pid _ current_start <<<"$cpu_second"
-    printf '%s\t%s\t%s\t%s\t%s\n' "$uptime_second" "$monotonic_second" "$sample_epoch" \
-        "${current_pid:-0}" "${current_start:-0}" | dbtune_atomic_write "$last_uptime_file" 600 || {
-        dbtune_collect_health error uptime_write
-        return 0
-    }
+    if dbtune_collect_identity_valid "$uptime_second" "$monotonic_second" "$sample_epoch" "$cpu_second"; then
+        IFS=$'\t' read -r current_pid _ current_start <<<"$cpu_second"
+        printf '%s\t%s\t%s\t%s\t%s\n' "$uptime_second" "$monotonic_second" "$sample_epoch" \
+            "$current_pid" "$current_start" | dbtune_atomic_write "$last_uptime_file" 600 || {
+            dbtune_collect_health error uptime_write
+            return 0
+        }
+    fi
     dbtune_collect_daily_dbsize || dbtune_event dbsize_snapshot_failed || true
     if [[ $slow_log_result == failed ]]; then
         dbtune_collect_health error "restart_flag=$restart_flag sample_status=$sample_status interval_seconds=$interval_seconds slow_log=failed" || true

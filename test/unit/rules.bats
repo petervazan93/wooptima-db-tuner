@@ -52,12 +52,12 @@ make_samples() {
     local log_waits=${5:-0}
     local mem_available_kb=${6:-12582912}
     local connected=${7:-50}
-    local qcache_queries=${8:-1}
+    local com_select=${8:-1}
 
-    awk -v hit="$hit" -v threads="$threads" -v count="$count" -v waits="$log_waits" -v available="$mem_available_kb" -v connected="$connected" -v qcache_queries="$qcache_queries" 'BEGIN {
+    awk -v hit="$hit" -v threads="$threads" -v count="$count" -v waits="$log_waits" -v available="$mem_available_kb" -v connected="$connected" -v com_select="$com_select" 'BEGIN {
         OFS="\t"
-        print "timestamp","uptime","bp_hit_pct","bp_misses_s","data_read_s","rnd_next_s","tmp_disk_pct","threads_running","threads_connected","qcache_hit_pct","log_waits_delta","wait_free_delta","cpu_pct","mem_available_kb","swap_used_kb","load1","restart_flag","qcache_queries_delta","interval_seconds","sample_status"
-        for (i=1; i<=count; i++) print "2026-07-24T00:00:00Z",i*300,99.9,1,1024,100,20,threads,connected,hit,(i==1 ? waits : 0),0,5,available,0,1,0,qcache_queries,300,"ok"
+        print "timestamp","uptime","bp_hit_pct","bp_misses_s","data_read_s","rnd_next_s","tmp_disk_pct","threads_running","threads_connected","qcache_hit_pct","log_waits_delta","wait_free_delta","cpu_pct","mem_available_kb","swap_used_kb","load1","restart_flag","com_select_delta","interval_seconds","sample_status"
+        for (i=1; i<=count; i++) print "2026-07-24T00:00:00Z",i*300,99.9,1,1024,100,20,threads,connected,hit,(i==1 ? waits : 0),0,5,available,0,1,0,com_select,300,"ok"
     }' >"$file"
 }
 

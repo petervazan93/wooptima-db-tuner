@@ -632,7 +632,7 @@ dbtune_audit_collect_mariadb() {
     local dbout=${2:-}
     local version rows name value key schema total data indexes tables
     local qcache_hits=unknown com_select=unknown hit_rate=unknown
-    local variables status dataset_ok=0
+    local variables status validated_status comparison dataset_ok=0
 
     if ! version=$(dbtune_audit_sql 'SELECT VERSION()'); then
         dbtune_audit_put "$out" mariadb.available 0
@@ -668,17 +668,28 @@ dbtune_audit_collect_mariadb() {
         rows=''
         dbtune_audit_put "$out" finding.global_status_query_failed warning
     fi
-    while IFS=$'\t' read -r name value; do
-        [[ -n $name ]] || continue
-        key=$(dbtune_audit_slug "$name")
-        dbtune_audit_put "$out" "mariadb.status.$key" "$value"
-        case $key in
-            qcache_hits) qcache_hits=$value ;;
-            com_select) com_select=$value ;;
-        esac
-    done <<<"$rows"
-    if [[ $qcache_hits =~ ^[0-9]+$ && $com_select =~ ^[0-9]+$ ]]; then
-        hit_rate=$(command awk -v h="$qcache_hits" -v s="$com_select" 'BEGIN { if (h+s == 0) print 0; else printf "%.2f", 100*h/(h+s) }')
+    if validated_status=$(dbtune_status_snapshot_exact "$rows" \
+        aborted_connects com_select created_tmp_disk_tables created_tmp_tables handler_read_rnd_next \
+        innodb_buffer_pool_pages_data innodb_buffer_pool_pages_free innodb_buffer_pool_read_requests \
+        innodb_buffer_pool_reads innodb_buffer_pool_wait_free innodb_data_read innodb_log_waits \
+        key_read_requests max_used_connections qcache_hits questions slow_queries threads_connected \
+        threads_running uptime); then
+        while IFS=$'\t' read -r name value; do
+            key=$(dbtune_audit_slug "$name")
+            dbtune_audit_put "$out" "mariadb.status.$key" "$value"
+            case $key in
+                qcache_hits) qcache_hits=$value ;;
+                com_select) com_select=$value ;;
+            esac
+        done <<<"$validated_status"
+    else
+        dbtune_audit_put "$out" finding.global_status_query_failed warning
+    fi
+    if dbtune_uint64_valid "$qcache_hits" && dbtune_uint64_valid "$com_select" && [[ $com_select != 0 ]]; then
+        comparison=$(dbtune_uint64_compare "$qcache_hits" "$com_select") || comparison=1
+        if ((comparison <= 0)); then
+            hit_rate=$(command awk -v h="$qcache_hits" -v s="$com_select" 'BEGIN { printf "%.2f", 100*h/s }')
+        fi
     fi
     dbtune_audit_put "$out" mariadb.query_cache_hit_pct "$hit_rate"
 

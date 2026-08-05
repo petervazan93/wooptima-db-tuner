@@ -588,10 +588,10 @@ dbtune_i18n_lookup() {
             DBTUNE_I18N_MESSAGE='Collect watchdog ukoncil zber: %s'
             ;;
         en:collect_sample_header_unsupported)
-            DBTUNE_I18N_MESSAGE='samples.tsv has an unsupported header'
+            DBTUNE_I18N_MESSAGE='samples.tsv uses an old or unsupported header; start a new audit and collection cycle'
             ;;
         sk:collect_sample_header_unsupported)
-            DBTUNE_I18N_MESSAGE='samples.tsv ma nepodporovanu hlavicku'
+            DBTUNE_I18N_MESSAGE='samples.tsv ma staru alebo nepodporovanu hlavicku; spustite novy audit a cyklus zberu'
             ;;
         en:collect_auto_stop_failed)
             DBTUNE_I18N_MESSAGE='Automatic collection stop failed'

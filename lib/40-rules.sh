@@ -163,7 +163,7 @@ dbtune_rules_analyze() {
         return 1
     }
 
-    function load_samples(file, line, fields, header, n, i, value, status, restart, denominator, hit_text) {
+    function load_samples(file, line, fields, header, n, i, value, status, restart, denominator, hit_text, denominator_column) {
         if ((getline line < file) <= 0) {
             print "dbtune: samples.tsv je prazdny" > "/dev/stderr"
             exit 65
@@ -193,11 +193,12 @@ dbtune_rules_analyze() {
             value = numeric(fields[header["log_waits_delta"]]); log_waits_total += value
             value = numeric(fields[header["wait_free_delta"]]); wait_free_total += value
             if (threads_connected[sample_count] > peak_connected) peak_connected = threads_connected[sample_count]
-            if (!("qcache_queries_delta" in header)) {
+            denominator_column=("com_select_delta" in header) ? header["com_select_delta"] : header["qcache_queries_delta"]
+            if (!denominator_column) {
                 qcache_unavailable_count++
                 continue
             }
-            denominator = trim(fields[header["qcache_queries_delta"]])
+            denominator = trim(fields[denominator_column])
             hit_text = trim(fields[header["qcache_hit_pct"]])
             if (denominator !~ /^[0-9]+([.][0-9]+)?$/ || hit_text !~ /^[0-9]+([.][0-9]+)?$/ || hit_text + 0 < 0 || hit_text + 0 > 100) {
                 qcache_unavailable_count++

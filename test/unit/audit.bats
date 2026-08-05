@@ -279,6 +279,48 @@ EOF
     done < <(dbtune_audit_effective_variables)
 }
 
+@test "MariaDB audit preserves uint64 query-cache evidence and rejects inexact snapshots" {
+    local malformed
+    for malformed in none missing duplicate conflicting unknown extra empty signed decimal over_range; do
+        : >"$BATS_TEST_TMPDIR/audit.tsv"
+        : >"$BATS_TEST_TMPDIR/databases.tsv"
+        dbtune_audit_sql() {
+            case $1 in
+                'SELECT VERSION()') printf '11.4.12-MariaDB\n' ;;
+                *GLOBAL_VARIABLES*) complete_mariadb_variable_rows ;;
+                *GLOBAL_STATUS*)
+                    rows=$'aborted_connects\t0\ncom_select\t9007199254740993\ncreated_tmp_disk_tables\t0\ncreated_tmp_tables\t0\nhandler_read_rnd_next\t0\ninnodb_buffer_pool_pages_data\t0\ninnodb_buffer_pool_pages_free\t0\ninnodb_buffer_pool_read_requests\t0\ninnodb_buffer_pool_reads\t0\ninnodb_buffer_pool_wait_free\t0\ninnodb_data_read\t0\ninnodb_log_waits\t0\nkey_read_requests\t0\nmax_used_connections\t0\nqcache_hits\t9007199254740992\nquestions\t0\nslow_queries\t0\nthreads_connected\t0\nthreads_running\t0\nuptime\t18446744073709551615'
+                    case $malformed in
+                        none) ;;
+                        missing) rows=$(awk -F '\t' '$1 != "qcache_hits"' <<<"$rows") ;;
+                        duplicate) rows+=$'\nqcache_hits\t9007199254740992' ;;
+                        conflicting) rows+=$'\nqcache_hits\t1' ;;
+                        unknown) rows+=$'\nunknown_counter\t1' ;;
+                        extra) rows=$(awk -F '\t' -v OFS='\t' '$1 == "qcache_hits" {$3="extra"} {print}' <<<"$rows") ;;
+                        empty) rows=$(awk -F '\t' -v OFS='\t' '$1 == "qcache_hits" {$2=""} {print}' <<<"$rows") ;;
+                        signed) rows=$(awk -F '\t' -v OFS='\t' '$1 == "qcache_hits" {$2="-1"} {print}' <<<"$rows") ;;
+                        decimal) rows=$(awk -F '\t' -v OFS='\t' '$1 == "qcache_hits" {$2="1.5"} {print}' <<<"$rows") ;;
+                        over_range) rows=$(awk -F '\t' -v OFS='\t' '$1 == "qcache_hits" {$2="18446744073709551616"} {print}' <<<"$rows") ;;
+                    esac
+                    printf '%s\n' "$rows"
+                    ;;
+                *GROUP\ BY\ TABLE_SCHEMA*) printf '' ;;
+            esac
+        }
+
+        dbtune_audit_collect_mariadb "$BATS_TEST_TMPDIR/audit.tsv" "$BATS_TEST_TMPDIR/databases.tsv"
+
+        if [[ $malformed == none ]]; then
+            [ "$(awk -F '\t' '$1 == "mariadb.status.uptime" {print $2}' "$BATS_TEST_TMPDIR/audit.tsv")" = 18446744073709551615 ]
+            [ "$(awk -F '\t' '$1 == "mariadb.query_cache_hit_pct" {print $2}' "$BATS_TEST_TMPDIR/audit.tsv")" = 100.00 ]
+        else
+            [ "$(awk -F '\t' '$1 == "mariadb.query_cache_hit_pct" {print $2}' "$BATS_TEST_TMPDIR/audit.tsv")" = unknown ]
+            run awk -F '\t' '$1 == "mariadb.status.uptime" {found=1} END {exit found}' "$BATS_TEST_TMPDIR/audit.tsv"
+            [ "$status" -eq 0 ]
+        fi
+    done
+}
+
 @test "landmine scan applies MariaDB version gates" {
     cat >"$DBTUNE_MYSQL_CONFIG_DIR/99-old.cnf" <<'EOF'
 [mysqld]
@@ -950,7 +992,7 @@ EOF
         case $1 in
             'SELECT VERSION()') printf '11.4.12-MariaDB\n' ;;
             *"GLOBAL_VARIABLES"*) complete_mariadb_variable_rows ;;
-            *"GLOBAL_STATUS"*) printf 'uptime\t86400\nmax_used_connections\t120\nkey_read_requests\t0\ncom_select\t100\nqcache_hits\t50\n' ;;
+            *"GLOBAL_STATUS"*) printf 'aborted_connects\t0\ncom_select\t100\ncreated_tmp_disk_tables\t0\ncreated_tmp_tables\t0\nhandler_read_rnd_next\t0\ninnodb_buffer_pool_pages_data\t0\ninnodb_buffer_pool_pages_free\t0\ninnodb_buffer_pool_read_requests\t0\ninnodb_buffer_pool_reads\t0\ninnodb_buffer_pool_wait_free\t0\ninnodb_data_read\t0\ninnodb_log_waits\t0\nkey_read_requests\t0\nmax_used_connections\t120\nqcache_hits\t50\nquestions\t0\nslow_queries\t0\nthreads_connected\t0\nthreads_running\t0\nuptime\t86400\n' ;;
             *"GROUP BY TABLE_SCHEMA"*) printf 'shopdb\t1073741824\t805306368\t268435456\t20\n' ;;
             *"TABLE_NAME='wp_options'"*) printf '1\n' ;;
             *"SUM(LENGTH(option_value))"*) printf '2097152\t100\n' ;;
