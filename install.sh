@@ -617,16 +617,18 @@ fi
 
 if [ "$PRIVILEGED_INSTALL" -eq 1 ]; then
     run_privileged chmod 0755 "$target_new"
-    validate_privileged_staging "$target_new" 755
-    validate_privileged_install_path
 else
     target_created=1
     install -m 0755 "$temporary/dbtune" "$target_new"
 fi
+installed_version=$("$target_new" version) || fail installed_unusable
+if [ "$PRIVILEGED_INSTALL" -eq 1 ]; then
+    validate_privileged_staging "$target_new" 755
+    validate_privileged_install_path
+fi
 run_privileged mv -f "$target_new" "$INSTALL_DIR/dbtune"
 target_created=0
 
-installed_version=$("$INSTALL_DIR/dbtune" version) || fail installed_unusable
 printf 'Wooptima DB Tuner install: %s\n' "$installed_version"
 installer_printf install_done "$INSTALL_DIR"
 installer_printf next_step

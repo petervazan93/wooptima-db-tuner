@@ -419,6 +419,54 @@ ARTIFACT
     grep -F -- "mv -f $INSTALL_DIR/.dbtune.new." "$SUDO_LOG"
 }
 
+@test "installer preserves the existing target when staged executable smoke validation fails" {
+    PRIVILEGED_TEST_ROOT=$(mktemp -d "$PROJECT_ROOT/.installer-test.XXXXXX")
+    export PRIVILEGED_TEST_ROOT
+    INSTALL_DIR="$PRIVILEGED_TEST_ROOT/bin"
+    mkdir "$INSTALL_DIR"
+    printf '%s\n' 'previous target' >"$INSTALL_DIR/dbtune"
+    if command -v sha256sum >/dev/null 2>&1; then
+        previous_hash=$(sha256sum "$INSTALL_DIR/dbtune" | awk '{print $1}')
+    else
+        previous_hash=$(shasum -a 256 "$INSTALL_DIR/dbtune" | awk '{print $1}')
+    fi
+    cat >"$RELEASE_DIR/dbtune" <<'ARTIFACT'
+#!/usr/bin/env bash
+[[ ! -x $0 ]] || exit 65
+if [[ ${1:-} == version ]]; then
+    printf '%s\n' 'dbtune 0.4.1'
+else
+    exit 64
+fi
+ARTIFACT
+    chmod +x "$RELEASE_DIR/dbtune"
+    if command -v sha256sum >/dev/null 2>&1; then
+        (cd "$RELEASE_DIR" && sha256sum dbtune >dbtune.sha256)
+    else
+        (cd "$RELEASE_DIR" && shasum -a 256 dbtune >dbtune.sha256)
+    fi
+    chmod 0555 "$INSTALL_DIR"
+
+    run env DBTUNE_DOWNLOAD_BASE="file://$RELEASE_DIR" \
+        DBTUNE_INSTALL_DIR="$INSTALL_DIR" \
+        DBTUNE_ALLOW_UNSUPPORTED_OS=1 \
+        STUB_ID_UID=1000 \
+        STUB_STAT_UID=0 \
+        STUB_STAT_MODE=755 \
+        STUB_SUDO_EXEC=1 \
+        sh "$BATS_TEST_DIRNAME/../../install.sh"
+
+    [ "$status" -ne 0 ]
+    [[ "$output" == *'installed dbtune cannot be executed'* ]]
+    if command -v sha256sum >/dev/null 2>&1; then
+        current_hash=$(sha256sum "$INSTALL_DIR/dbtune" | awk '{print $1}')
+    else
+        current_hash=$(shasum -a 256 "$INSTALL_DIR/dbtune" | awk '{print $1}')
+    fi
+    [ "$current_hash" = "$previous_hash" ]
+    ! grep -F -- 'mv -f' "$SUDO_LOG"
+}
+
 @test "installer revalidates a privileged destination immediately before publication" {
     PRIVILEGED_TEST_ROOT=$(mktemp -d "$PROJECT_ROOT/.installer-test.XXXXXX")
     export PRIVILEGED_TEST_ROOT
