@@ -93,7 +93,7 @@ The report retains the source document's philosophy: the "application layer - so
 ## APPLY / VERIFY / ROLLBACK - defense in depth
 
 1. Before writing, validate variable names against live `information_schema`.
-2. Write **only** `/etc/mysql/mariadb.conf.d/99-zz-tuning.cnf` (`runcloud.cnf` is never touched), then run capability-probed `mariadbd --validate-config` with the parser from the Markdown (it ignores lock errors from the running server).
+2. Write **only** `/etc/mysql/mariadb.conf.d/99-zz-tuning.cnf` (`runcloud.cnf` is never touched), then run capability-probed `mariadbd --validate-config` with the parser from the Markdown (it ignores lock errors from the running server). On the `--validate-config` path, validation uses a `root:mysql` mode `0710` parent; root-owned mode `0600` probe and output logs stay outside the only mysql-writable path, a dedicated `mysql:mysql` mode `0700` datadir. The fallback uses the root-owned capture workspace and does not create a mysql-writable datadir.
 3. Guard the unattended-upgrades window (reject apply from 05:30 to 07:30 without `--force`) and check the process list for a running mydumper backup before restart instructions.
 4. Restart is decoupled: apply prints exact RunCloud panel instructions and expectations (a longer first start after a redo-log change), plus **`ROLLBACK.txt` with literal commands** so recovery does not require the tool itself.
 5. `rollback` is a filesystem-only operation (mv plus systemctl start), without SQL, and works while the database is down.

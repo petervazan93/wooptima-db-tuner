@@ -30,6 +30,9 @@ setup() {
     export STUB_FAIL_CP_MATCH=
     export STUB_FAIL_MV_MATCH=
     export STUB_FAIL_CHOWN_MATCH=
+    export STUB_FAIL_CHMOD_MATCH=
+    export STUB_FAIL_MKDIR_MATCH=
+    export STUB_HELP_HAS_VALIDATE_CONFIG=1
     unset DBTUNE_PUBLISH_FAIL_MATCH
     unset DBTUNE_PUBLISH_FAULT_HOOK
     unset DBTUNE_PUBLISH_CRASH_POINT
@@ -116,11 +119,34 @@ esac
 STUB
     cat >"$BATS_TEST_TMPDIR/bin/mariadbd" <<'STUB'
 #!/usr/bin/env bash
+printf '%s\n' "$*" >>"$BATS_TEST_TMPDIR/mariadbd.log"
 case " $* " in
-    *" --help --verbose "*) printf '%s\n' '  --validate-config' ;;
+    *" --help --verbose "*)
+        if [[ $STUB_HELP_HAS_VALIDATE_CONFIG == 1 ]]; then
+            printf '%s\n' '  --validate-config'
+        else
+            printf '%s\n' 'MariaDB server help'
+        fi
+        ;;
     *" --validate-config "*) printf '%s\n' "$STUB_VALIDATE_OUTPUT"; exit "$STUB_VALIDATE_STATUS" ;;
     *) exit 2 ;;
 esac
+STUB
+    cat >"$BATS_TEST_TMPDIR/bin/chmod" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$BATS_TEST_TMPDIR/chmod.log"
+if [[ -n $STUB_FAIL_CHMOD_MATCH && " $* " == *"$STUB_FAIL_CHMOD_MATCH"* ]]; then
+    exit 1
+fi
+exec /bin/chmod "$@"
+STUB
+    cat >"$BATS_TEST_TMPDIR/bin/mkdir" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$BATS_TEST_TMPDIR/mkdir.log"
+if [[ -n $STUB_FAIL_MKDIR_MATCH && " $* " == *"$STUB_FAIL_MKDIR_MATCH"* ]]; then
+    exit 1
+fi
+exec /bin/mkdir "$@"
 STUB
     cat >"$BATS_TEST_TMPDIR/bin/systemctl" <<'STUB'
 #!/usr/bin/env bash
@@ -141,7 +167,15 @@ esac
 STUB
     cat >"$BATS_TEST_TMPDIR/bin/chown" <<'STUB'
 #!/usr/bin/env bash
-if [[ -n $STUB_FAIL_CHOWN_MATCH && " $* " == *"$STUB_FAIL_CHOWN_MATCH"* ]]; then exit 1; fi
+printf '%s\n' "$*" >>"$BATS_TEST_TMPDIR/chown.log"
+if [[ -n $STUB_FAIL_CHOWN_MATCH && " $* " == *"$STUB_FAIL_CHOWN_MATCH"* ]]; then
+    exit 1
+fi
+if [[ ${STUB_CHOWN_SYMLINK_ATTACK:-0} == 1 && $1 == mysql:mysql ]]; then
+    target=${@: -1}
+    ln -sf "$STUB_VALIDATE_HELP_VICTIM" "$target/help.log"
+    ln -sf "$STUB_VALIDATE_OUTPUT_VICTIM" "$target/output.log"
+fi
 exit 0
 STUB
     cat >"$BATS_TEST_TMPDIR/bin/cp" <<'STUB'
@@ -168,9 +202,11 @@ Mem:          16000        8000        1000         100        7000        7000
 Swap:          2000           0        2000
 OUT
 STUB
-    chmod +x "$BATS_TEST_TMPDIR/bin/mariadb" "$BATS_TEST_TMPDIR/bin/mariadbd" \
+    /bin/chmod +x "$BATS_TEST_TMPDIR/bin/mariadb" "$BATS_TEST_TMPDIR/bin/mariadbd" \
         "$BATS_TEST_TMPDIR/bin/systemctl" "$BATS_TEST_TMPDIR/bin/date" "$BATS_TEST_TMPDIR/bin/chown" \
-        "$BATS_TEST_TMPDIR/bin/cp" "$BATS_TEST_TMPDIR/bin/mv" "$BATS_TEST_TMPDIR/bin/free"
+        "$BATS_TEST_TMPDIR/bin/chmod" "$BATS_TEST_TMPDIR/bin/mkdir" "$BATS_TEST_TMPDIR/bin/cp" \
+        "$BATS_TEST_TMPDIR/bin/mv" "$BATS_TEST_TMPDIR/bin/free"
+    hash -r
 }
 
 write_backup_evidence() {
@@ -355,6 +391,88 @@ run_publish_fixture() {
     [ "$status" -eq 65 ]
     [ "$(cat "$DBTUNE_CONFIG_TARGET")" = original ]
     [ "$(cat "$DBTUNE_STATE_DIR/state")" = proposed ]
+}
+
+@test "config validation establishes the split ownership and mode boundary" {
+    export STUB_CHOWN_SYMLINK_ATTACK=1
+    export STUB_VALIDATE_HELP_VICTIM="$BATS_TEST_TMPDIR/help-victim"
+    export STUB_VALIDATE_OUTPUT_VICTIM="$BATS_TEST_TMPDIR/output-victim"
+    printf 'help-safe\n' >"$STUB_VALIDATE_HELP_VICTIM"
+    printf 'output-safe\n' >"$STUB_VALIDATE_OUTPUT_VICTIM"
+
+    run dbtune_lifecycle_validate_config
+
+    [ "$status" -eq 0 ]
+    [ "$(cat "$STUB_VALIDATE_HELP_VICTIM")" = help-safe ]
+    [ "$(cat "$STUB_VALIDATE_OUTPUT_VICTIM")" = output-safe ]
+    chowned_dir=$(awk '$1 == "mysql:mysql" {print $2; exit}' "$BATS_TEST_TMPDIR/chown.log")
+    [[ $chowned_dir == */data ]]
+    validation_parent=${chowned_dir%/data}
+    grep -Fx -- "mysql:mysql $chowned_dir" "$BATS_TEST_TMPDIR/chown.log"
+    grep -Fx -- "root:mysql $validation_parent" "$BATS_TEST_TMPDIR/chown.log"
+    grep -Fx -- "-m 0700 $chowned_dir" "$BATS_TEST_TMPDIR/mkdir.log"
+    grep -Fx -- "0710 $validation_parent" "$BATS_TEST_TMPDIR/chmod.log"
+    grep -E -- "^0600 ${validation_parent}/help[.]log ${validation_parent}/output[.]log$" "$BATS_TEST_TMPDIR/chmod.log"
+    grep -F -- "--datadir=$chowned_dir" "$BATS_TEST_TMPDIR/mariadbd.log"
+}
+
+@test "config validation fallback keeps a root-owned capture workspace without a datadir" {
+    export STUB_HELP_HAS_VALIDATE_CONFIG=0
+
+    run dbtune_lifecycle_validate_config
+
+    [ "$status" -eq 0 ]
+    [ ! -e "$BATS_TEST_TMPDIR/chown.log" ]
+    if [ -e "$BATS_TEST_TMPDIR/mkdir.log" ]; then
+        ! grep -F -- '-m 0700' "$BATS_TEST_TMPDIR/mkdir.log"
+    fi
+    grep -F -- '0600 ' "$BATS_TEST_TMPDIR/chmod.log"
+    ! grep -F -- '--validate-config' "$BATS_TEST_TMPDIR/mariadbd.log"
+}
+
+@test "config validation fails closed when capture file mode cannot be established" {
+    export STUB_FAIL_CHMOD_MATCH=0600
+
+    run dbtune_lifecycle_validate_config
+
+    [ "$status" -ne 0 ]
+    [ ! -e "$BATS_TEST_TMPDIR/mariadbd.log" ]
+}
+
+@test "config validation fails closed when dedicated datadir mode cannot be established" {
+    export STUB_FAIL_MKDIR_MATCH='-m 0700'
+
+    run dbtune_lifecycle_validate_config
+
+    [ "$status" -ne 0 ]
+    ! grep -F -- '--validate-config' "$BATS_TEST_TMPDIR/mariadbd.log"
+}
+
+@test "config validation fails closed when mysql datadir ownership cannot be established" {
+    export STUB_FAIL_CHOWN_MATCH=mysql:mysql
+
+    run dbtune_lifecycle_validate_config
+
+    [ "$status" -ne 0 ]
+    ! grep -F -- '--validate-config' "$BATS_TEST_TMPDIR/mariadbd.log"
+}
+
+@test "config validation fails closed when parent ownership cannot be established" {
+    export STUB_FAIL_CHOWN_MATCH=root:mysql
+
+    run dbtune_lifecycle_validate_config
+
+    [ "$status" -ne 0 ]
+    ! grep -F -- '--validate-config' "$BATS_TEST_TMPDIR/mariadbd.log"
+}
+
+@test "config validation fails closed when parent mode cannot be established" {
+    export STUB_FAIL_CHMOD_MATCH=0710
+
+    run dbtune_lifecycle_validate_config
+
+    [ "$status" -ne 0 ]
+    ! grep -F -- '--validate-config' "$BATS_TEST_TMPDIR/mariadbd.log"
 }
 
 @test "apply accepts an absent target in the explicit allowed directory" {

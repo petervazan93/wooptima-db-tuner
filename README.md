@@ -147,6 +147,7 @@ An authoritative audit requires complete `mariadb`, `hardware`, `applications`, 
 - **Treat backup status independently.** Fresh authoritative backup evidence is checked at apply time. Confirmed missing, stale, future, or malformed evidence blocks apply; only an absent artifact or a valid `unknown` artifact can enter a separate exact TTY confirmation path.
 - **Keep hard stops in force mode.** `--force` can bypass the measurement/analysis-manifest requirement and the local time window, but not live-value validation, Galera, mydumper, backup, target, configuration-validation, or rollback guards.
 - **Publish atomically, then validate and recover.** Before publication, apply checks ownership, modes, links, parent identity, target topology, live values, provenance, and backup evidence. It atomically publishes the complete candidate with Linux rename primitives, then runs daemon configuration validation. A validation failure uses the same guarded atomic path to restore the exact prior target or absent topology; if restoration or bookkeeping cannot complete, durable intent and recovery state preserve the recovery path.
+- **Isolate daemon validation output from `mysql`.** When `--validate-config` is available, configuration validation uses a `root:mysql` mode `0710` parent and keeps probe and validation logs as root-owned mode `0600` files. Only its dedicated MariaDB validation datadir is owned by `mysql:mysql` and writable at mode `0700`. The fallback keeps the root-owned capture workspace and does not create a mysql-writable datadir.
 - **Make restart explicit.** Apply does not restart MariaDB unless `--restart` is supplied. The normal RunCloud workflow uses a manual panel restart followed by `verify --post` and later `verify --24h`.
 
 Read the full operational contract in the [rollout runbook](docs/RUNBOOK.md) before using `apply`.
@@ -178,7 +179,7 @@ curl -fsSL https://github.com/petervazan93/wooptima-db-tuner/releases/download/v
 > [!WARNING]
 > This pipeline trusts the remote `install.sh` before it verifies the downloaded `dbtune` artifact. For the verify-before-run procedure that authenticates and lets you inspect `install.sh` first, follow [Security: Installation](SECURITY.md#installation).
 
-This command installs the published `v0.4.1` release. The installer verifies the selected `dbtune` artifact's SHA-256 checksum, GitHub attestation, fixed upstream repository and owner, signer workflow, exact release source ref, and Bash syntax before atomically publishing it. It does not run an audit or change MariaDB.
+This command installs the published `v0.4.1` release. For a privileged destination, the installer places the artifact in a root-owned mode `0644` non-executable staging inode, then verifies its SHA-256 checksum, GitHub attestation, fixed upstream repository and owner, signer workflow, exact release source ref, Bash syntax, and embedded version. It changes that same inode to mode `0755`, directly executes the staged path for its executable version smoke check, and atomically publishes the same inode only after all checks pass. It does not run an audit or change MariaDB.
 
 ## CLI
 

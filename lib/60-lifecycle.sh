@@ -1116,7 +1116,7 @@ dbtune_lifecycle_validation_has_tolerated_error() {
 }
 
 dbtune_lifecycle_validate_config() {
-    local server validate_dir output_file probe_file command_status=0 probe_status=0
+    local server validate_dir validate_datadir output_file probe_file command_status=0 probe_status=0
 
     if command -v mariadbd >/dev/null 2>&1; then
         server=$(command -v mariadbd)
@@ -1127,13 +1127,27 @@ dbtune_lifecycle_validate_config() {
         return 69
     fi
     validate_dir=$(mktemp -d "${TMPDIR:-/tmp}/dbtune-validate.XXXXXX") || return 1
+    validate_datadir="$validate_dir/data"
     output_file="$validate_dir/output.log"
     probe_file="$validate_dir/help.log"
-    chown mysql:mysql "$validate_dir" 2>/dev/null || true
+
+    if ! : >"$probe_file" || ! : >"$output_file" ||
+        ! chmod 0600 "$probe_file" "$output_file"; then
+        rm -rf "$validate_dir"
+        return 1
+    fi
 
     "$server" --help --verbose >"$probe_file" 2>&1 || probe_status=$?
     if grep -q -- '--validate-config' "$probe_file"; then
-        "$server" --validate-config --user=mysql --datadir="$validate_dir" >"$output_file" 2>&1 || command_status=$?
+        if ! mkdir -m 0700 "$validate_datadir" ||
+            ! chown mysql:mysql "$validate_datadir" ||
+            ! chown root:mysql "$validate_dir" ||
+            ! chmod 0710 "$validate_dir"; then
+            rm -rf "$validate_dir"
+            return 1
+        fi
+        "$server" --validate-config --user=mysql --datadir="$validate_datadir" \
+            >"$output_file" 2>&1 || command_status=$?
     else
         cp "$probe_file" "$output_file" || {
             rm -rf "$validate_dir"

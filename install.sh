@@ -279,6 +279,18 @@ Premenne:
         sk:temporary_target_not_regular)
             INSTALLER_MESSAGE='docasny privilegovany ciel nie je regularny subor: %s'
             ;;
+        en:temporary_target_metadata)
+            INSTALLER_MESSAGE='temporary privileged target has invalid owner or mode: %s'
+            ;;
+        sk:temporary_target_metadata)
+            INSTALLER_MESSAGE='docasny privilegovany ciel ma neplatneho vlastnika alebo rezim: %s'
+            ;;
+        en:temporary_target_hardlinks)
+            INSTALLER_MESSAGE='temporary privileged target has unexpected hardlinks: %s'
+            ;;
+        sk:temporary_target_hardlinks)
+            INSTALLER_MESSAGE='docasny privilegovany ciel ma neocakavane hardlinky: %s'
+            ;;
         en:installed_unusable)
             INSTALLER_MESSAGE='installed dbtune cannot be executed'
             ;;
@@ -398,12 +410,20 @@ find_nearest_existing_parent() {
 STAT_STYLE=
 configure_stat() {
     command -v stat >/dev/null 2>&1 || fail stat_missing
-    if stat -c '%u %a' -- / >/dev/null 2>&1; then
+    if stat -c '%u %g %a' -- / >/dev/null 2>&1; then
         STAT_STYLE=gnu
-    elif stat -f '%u %Lp' / >/dev/null 2>&1; then
+    elif stat -f '%u %g %Lp' / >/dev/null 2>&1; then
         STAT_STYLE=bsd
     else
         fail stat_unsupported
+    fi
+}
+
+staging_metadata() {
+    if [ "$STAT_STYLE" = gnu ]; then
+        stat -c '%u %g %a' -- "$1"
+    else
+        stat -f '%u %g %Lp' "$1"
     fi
 }
 
@@ -413,6 +433,38 @@ directory_metadata() {
     else
         stat -f '%u %Lp' "$1"
     fi
+}
+
+file_link_count() {
+    if [ "$STAT_STYLE" = gnu ]; then
+        stat -c '%h' -- "$1"
+    else
+        stat -f '%l' "$1"
+    fi
+}
+
+validate_privileged_staging() {
+    staging=$1
+    expected_mode=$2
+    if [ -f "$staging" ] && [ ! -L "$staging" ]; then
+        :
+    else
+        fail temporary_target_not_regular "$staging"
+    fi
+    metadata=$(staging_metadata "$staging") ||
+        fail temporary_target_metadata "$staging"
+    owner=${metadata%% *}
+    group_and_mode=${metadata#* }
+    group=${group_and_mode%% *}
+    mode=${group_and_mode#* }
+    if [ "$owner" -eq 0 ] && [ "$group" -eq 0 ] && [ "$mode" = "$expected_mode" ]; then
+        :
+    else
+        fail temporary_target_metadata "$staging"
+    fi
+    links=$(file_link_count "$staging") ||
+        fail temporary_target_metadata "$staging"
+    [ "$links" -eq 1 ] || fail temporary_target_hardlinks "$staging"
 }
 
 validate_trusted_directory() {
@@ -522,6 +574,14 @@ verify_attestation() {
         --deny-self-hosted-runners >/dev/null
 }
 
+run_privileged() {
+    if [ -n "$SUDO" ]; then
+        sudo "$@"
+    else
+        "$@"
+    fi
+}
+
 installer_printf downloading "$REPOSITORY" "$selected_release"
 download dbtune "$temporary/dbtune"
 download dbtune.sha256 "$temporary/dbtune.sha256"
@@ -533,36 +593,7 @@ case $expected in
 esac
 [ "${#expected}" -eq 64 ] || fail checksum_length_invalid
 
-if command -v sha256sum >/dev/null 2>&1; then
-    actual=$(sha256sum "$temporary/dbtune" | awk '{print $1}')
-elif command -v shasum >/dev/null 2>&1; then
-    actual=$(shasum -a 256 "$temporary/dbtune" | awk '{print $1}')
-else
-    fail checksum_tool_missing
-fi
-[ "$actual" = "$expected" ] || fail checksum_failed
-verify_attestation "$temporary/dbtune" "refs/tags/$selected_release" ||
-    fail attestation_failed
-bash -n "$temporary/dbtune" || fail artifact_syntax_invalid
-artifact_version=$(
-    (
-        unset DBTUNE_VERSION DBTUNE_ARTIFACT_VERSION DBTUNE_RELEASE DBTUNE_PROGRAM
-        bash "$temporary/dbtune" version
-    ) | awk 'NF == 2 && $1 == "dbtune" {print $2}'
-)
-[ -n "$artifact_version" ] || fail artifact_version_invalid
-if [ "v$artifact_version" != "$selected_release" ]; then
-    fail artifact_version_mismatch "$artifact_version" "${selected_release#v}"
-fi
-
-run_privileged() {
-    if [ -n "$SUDO" ]; then
-        sudo "$@"
-    else
-        "$@"
-    fi
-}
-
+artifact="$temporary/dbtune"
 if [ "$PRIVILEGED_INSTALL" -eq 1 ]; then
     validate_privileged_install_path
 fi
@@ -572,22 +603,48 @@ if [ "$PRIVILEGED_INSTALL" -eq 1 ]; then
     if [ -e "$target_new" ] || [ -L "$target_new" ]; then
         fail temporary_target_exists "$target_new"
     fi
-    run_privileged install -o root -g root -m 0755 "$temporary/dbtune" "$target_new"
     target_created=1
-else
-    install -m 0755 "$temporary/dbtune" "$target_new"
-    target_created=1
+    run_privileged install -o root -g root -m 0644 "$temporary/dbtune" "$target_new"
+    artifact=$target_new
+    validate_privileged_staging "$artifact" 644
 fi
+
+if command -v sha256sum >/dev/null 2>&1; then
+    actual=$(sha256sum "$artifact" | awk '{print $1}')
+elif command -v shasum >/dev/null 2>&1; then
+    actual=$(shasum -a 256 "$artifact" | awk '{print $1}')
+else
+    fail checksum_tool_missing
+fi
+[ "$actual" = "$expected" ] || fail checksum_failed
+verify_attestation "$artifact" "refs/tags/$selected_release" ||
+    fail attestation_failed
+bash -n "$artifact" || fail artifact_syntax_invalid
+artifact_version=$(
+    (
+        unset DBTUNE_VERSION DBTUNE_ARTIFACT_VERSION DBTUNE_RELEASE DBTUNE_PROGRAM
+        bash "$artifact" version
+    ) | awk 'NF == 2 && $1 == "dbtune" {print $2}'
+)
+[ -n "$artifact_version" ] || fail artifact_version_invalid
+if [ "v$artifact_version" != "$selected_release" ]; then
+    fail artifact_version_mismatch "$artifact_version" "${selected_release#v}"
+fi
+
 if [ "$PRIVILEGED_INSTALL" -eq 1 ]; then
-    if [ ! -f "$target_new" ] || [ -L "$target_new" ]; then
-        fail temporary_target_not_regular "$target_new"
-    fi
+    run_privileged chmod 0755 "$target_new"
+else
+    target_created=1
+    install -m 0755 "$temporary/dbtune" "$target_new"
+fi
+installed_version=$("$target_new" version) || fail installed_unusable
+if [ "$PRIVILEGED_INSTALL" -eq 1 ]; then
+    validate_privileged_staging "$target_new" 755
     validate_privileged_install_path
 fi
 run_privileged mv -f "$target_new" "$INSTALL_DIR/dbtune"
 target_created=0
 
-installed_version=$("$INSTALL_DIR/dbtune" version) || fail installed_unusable
 printf 'Wooptima DB Tuner install: %s\n' "$installed_version"
 installer_printf install_done "$INSTALL_DIR"
 installer_printf next_step
