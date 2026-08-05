@@ -38,6 +38,7 @@ setup() {
     unset DBTUNE_PUBLISH_CRASH_POINT
     unset DBTUNE_PUBLISH_CRASH_MATCH
     export STUB_GLOBAL_NAMES=$'max_connections\nskip_name_resolve'
+    export STUB_GLOBAL_STATUS=0
     export STUB_EFFECTIVE=$'max_connections\t300\nskip_name_resolve\tON'
     export STUB_STATUS=$'uptime\t100\ninnodb_buffer_pool_wait_free\t0\ninnodb_log_waits\t0\naborted_connects\t0'
     export PATH="$BATS_TEST_TMPDIR/bin:$PATH"
@@ -108,8 +109,12 @@ make_stubs() {
     cat >"$BATS_TEST_TMPDIR/bin/mariadb" <<'STUB'
 #!/usr/bin/env bash
 query=$(cat)
+printf '%s\n' "$query" >>"$BATS_TEST_TMPDIR/sql.log"
 case $query in
-    *"SELECT LOWER(VARIABLE_NAME) FROM information_schema.GLOBAL_VARIABLES"*) printf '%s\n' "$STUB_GLOBAL_NAMES" ;;
+    *"SELECT LOWER(VARIABLE_NAME) FROM information_schema.GLOBAL_VARIABLES"*)
+        [[ $STUB_GLOBAL_NAMES == __NO_OUTPUT__ ]] || printf '%s\n' "$STUB_GLOBAL_NAMES"
+        exit "$STUB_GLOBAL_STATUS"
+        ;;
     *"WSREP_ON"*) printf '%s\t%s\n' "$STUB_WSREP_ON" "$STUB_WSREP_ADDRESS" ;;
     *"information_schema.PROCESSLIST"*) printf '%s\n' "$STUB_MYDUMPER" ;;
     *"LOWER(VARIABLE_NAME), VARIABLE_VALUE FROM information_schema.GLOBAL_VARIABLES"*) printf '%s\n' "$STUB_EFFECTIVE" ;;
@@ -257,6 +262,65 @@ write_manifest() {
     } >"$DBTUNE_STATE_DIR/proposal-manifest.tsv"
 }
 
+assert_apply_preflight_unchanged() {
+    [ "$(cat "$DBTUNE_CONFIG_TARGET")" = 'original target' ]
+    [ "$(dbtune_state_read)" = proposed ]
+    [ ! -e "$DBTUNE_STATE_DIR/apply/current" ]
+    [ ! -e "$DBTUNE_STATE_DIR/apply" ]
+    ! compgen -G "$DBTUNE_STATE_DIR/.apply-*" >/dev/null
+}
+
+reset_apply_preflight_fixture() {
+    rm -rf "$DBTUNE_STATE_DIR/apply" "$DBTUNE_STATE_DIR/proposed-99-zz-tuning.cnf"
+    rm -f "$DBTUNE_STATE_DIR"/.apply-* "$BATS_TEST_TMPDIR/sql.log" "$BATS_TEST_TMPDIR/confirmation.log" \
+        "$BATS_TEST_TMPDIR/publisher-replaced"
+    printf 'original target\n' >"$DBTUNE_CONFIG_TARGET"
+    printf 'proposed\n' >"$DBTUNE_STATE_DIR/state"
+    write_proposal
+    write_manifest
+}
+
+write_strict_proposal_case() {
+    local name=${1:-}
+    local proposal="$DBTUNE_STATE_DIR/proposed-99-zz-tuning.cnf"
+
+    rm -rf "$proposal"
+    case $name in
+        empty) : >"$proposal" ;;
+        no-assignment) printf '# comment\n[mysqld]\n; comment\n' >"$proposal" ;;
+        before-section) printf 'max_connections=300\n[mysqld]\nskip_name_resolve=1\n' >"$proposal" ;;
+        second-mysqld) printf '[mysqld]\nmax_connections=300\n[mysqld]\nskip_name_resolve=1\n' >"$proposal" ;;
+        server-section) printf '[server]\nmax_connections=300\n' >"$proposal" ;;
+        client-section) printf '[client]\nmax_connections=300\n' >"$proposal" ;;
+        include) printf '[mysqld]\n!include /tmp/unsafe.cnf\n' >"$proposal" ;;
+        includedir) printf '[mysqld]\n!includedir /tmp/unsafe\n' >"$proposal" ;;
+        bare-option) printf '[mysqld]\nskip_name_resolve\n' >"$proposal" ;;
+        empty-key) printf '[mysqld]\n=300\n' >"$proposal" ;;
+        empty-value) printf '[mysqld]\nmax_connections=\n' >"$proposal" ;;
+        inline-hash) printf '[mysqld]\nmax_connections=300 # comment\n' >"$proposal" ;;
+        inline-semicolon) printf '[mysqld]\nmax_connections=300 ; comment\n' >"$proposal" ;;
+        multiple-equals) printf '[mysqld]\nmax_connections=300=400\n' >"$proposal" ;;
+        canonical-duplicate) printf '[mysqld]\nMax-Connections=300\nmax_connections=400\n' >"$proposal" ;;
+        crlf) printf '[mysqld]\r\nmax_connections=300\r\n' >"$proposal" ;;
+        control) printf '[mysqld]\nmax_connections=30\0010\n' >"$proposal" ;;
+        unsafe-key) printf '[mysqld]\n1unsafe=300\n' >"$proposal" ;;
+        sensitive-key) printf '[mysqld]\npassword=secret\n' >"$proposal" ;;
+        unreadable) printf '[mysqld]\nmax_connections=300\n' >"$proposal"; chmod 000 "$proposal" ;;
+        directory) mkdir "$proposal" ;;
+        symlink) printf '[mysqld]\nmax_connections=300\n' >"$BATS_TEST_TMPDIR/symlink-proposal"; ln -s "$BATS_TEST_TMPDIR/symlink-proposal" "$proposal" ;;
+        *) return 64 ;;
+    esac
+}
+
+replace_apply_snapshot() {
+    local file=${1:-}
+    local replacement="$file.replacement"
+
+    { cat "$file"; printf '# replaced\n'; } >"$replacement"
+    chmod 400 "$replacement"
+    mv "$replacement" "$file"
+}
+
 prepare_apply_a_b() {
     printf 'external\n' >"$DBTUNE_CONFIG_TARGET"
     cmd_apply >/dev/null
@@ -362,6 +426,155 @@ run_publish_fixture() {
     [ "$status" -eq 65 ]
     [[ "$output" == *"skip_name_resolve"* ]]
     [ ! -e "$DBTUNE_CONFIG_TARGET" ]
+}
+
+@test "strict proposal grammar rejects every ambiguous input before apply preflight" {
+    local mode name
+    local cases=(
+        empty no-assignment before-section second-mysqld server-section client-section include includedir
+        bare-option empty-key empty-value inline-hash inline-semicolon multiple-equals canonical-duplicate
+        crlf control unsafe-key sensitive-key unreadable directory symlink
+    )
+    dbtune_lifecycle_confirm_force() {
+        touch "$BATS_TEST_TMPDIR/confirmation.log"
+    }
+
+    for mode in normal force; do
+        for name in "${cases[@]}"; do
+            reset_apply_preflight_fixture
+            write_strict_proposal_case "$name"
+
+            if [[ $mode == force ]]; then
+                run cmd_apply --force
+            else
+                run cmd_apply
+            fi
+
+            [ "$status" -eq 65 ]
+            [ ! -e "$BATS_TEST_TMPDIR/sql.log" ]
+            [ ! -e "$BATS_TEST_TMPDIR/confirmation.log" ]
+            assert_apply_preflight_unchanged
+        done
+    done
+}
+
+@test "partial parser output is never consumed by apply" {
+    reset_apply_preflight_fixture
+    dbtune_cnf_entries_strict() {
+        printf 'max_connections\t300\n'
+        return 65
+    }
+
+    run cmd_apply
+
+    [ "$status" -eq 65 ]
+    [ ! -e "$BATS_TEST_TMPDIR/sql.log" ]
+    assert_apply_preflight_unchanged
+}
+
+@test "exact live variable output rejects malformed and partial SQL responses" {
+    local name
+    local cases=(duplicate extra-key extra-field blank-row control partial-failure)
+
+    for name in "${cases[@]}"; do
+        reset_apply_preflight_fixture
+        export STUB_GLOBAL_STATUS=0
+        case $name in
+            duplicate) export STUB_GLOBAL_NAMES=$'max_connections\nmax_connections\nskip_name_resolve' ;;
+            extra-key) export STUB_GLOBAL_NAMES=$'max_connections\nskip_name_resolve\nunknown_extra' ;;
+            extra-field) export STUB_GLOBAL_NAMES=$'max_connections\textra\nskip_name_resolve' ;;
+            blank-row) export STUB_GLOBAL_NAMES=$'max_connections\n\nskip_name_resolve' ;;
+            control) export STUB_GLOBAL_NAMES=$'max_connections\nskip_name_resolve\001' ;;
+            partial-failure)
+                export STUB_GLOBAL_NAMES=max_connections
+                export STUB_GLOBAL_STATUS=2
+                ;;
+        esac
+
+        run cmd_apply
+
+        [ "$status" -eq 65 ]
+        [ -s "$BATS_TEST_TMPDIR/sql.log" ]
+        assert_apply_preflight_unchanged
+    done
+}
+
+@test "exact live variable command failure without output returns unavailable" {
+    reset_apply_preflight_fixture
+    export STUB_GLOBAL_NAMES=__NO_OUTPUT__
+    export STUB_GLOBAL_STATUS=2
+
+    run cmd_apply
+
+    [ "$status" -eq 69 ]
+    [ -s "$BATS_TEST_TMPDIR/sql.log" ]
+    assert_apply_preflight_unchanged
+}
+
+@test "proposal snapshot mutation is detected at every copy and publication boundary" {
+    local hook
+    local hooks=(after-strict-parse before-history-copy before-target-copy before-publisher)
+
+    for hook in "${hooks[@]}"; do
+        reset_apply_preflight_fixture
+        dbtune_lifecycle_after_strict_parse() { return 0; }
+        dbtune_lifecycle_before_history_copy() { return 0; }
+        dbtune_lifecycle_before_target_copy() { return 0; }
+        dbtune_lifecycle_before_publish() { return 0; }
+        case $hook in
+            after-strict-parse)
+                dbtune_lifecycle_after_strict_parse() { replace_apply_snapshot "$1"; }
+                ;;
+            before-history-copy)
+                dbtune_lifecycle_before_history_copy() { replace_apply_snapshot "$1"; }
+                ;;
+            before-target-copy)
+                dbtune_lifecycle_before_target_copy() { replace_apply_snapshot "$1"; }
+                ;;
+            before-publisher)
+                dbtune_lifecycle_before_publish() {
+                    [[ $2 == *'.99-zz-tuning.cnf.tmp.'* && ! -e $BATS_TEST_TMPDIR/publisher-replaced ]] || return 0
+                    touch "$BATS_TEST_TMPDIR/publisher-replaced"
+                    printf '# replaced\n' >>"$2"
+                }
+                ;;
+        esac
+
+        run cmd_apply
+
+        [ "$status" -eq 65 ]
+        [[ "$output" == *changed* ]]
+        [ "$(cat "$DBTUNE_CONFIG_TARGET")" = 'original target' ]
+        [ "$(dbtune_state_read)" = proposed ]
+        [ ! -e "$DBTUNE_STATE_DIR/apply/current" ]
+    done
+}
+
+@test "proposal manifest exact schema rejects duplicate unknown missing and malformed records" {
+    local name manifest="$DBTUNE_STATE_DIR/proposal-manifest.tsv"
+    local cases=(duplicate-first duplicate-last identical-duplicate unknown missing-schema malformed-hash zero-count extra-fields)
+
+    for name in "${cases[@]}"; do
+        reset_apply_preflight_fixture
+        case $name in
+            duplicate-first)
+                { printf 'schema\t999\n'; cat "$manifest"; } >"$BATS_TEST_TMPDIR/manifest"; mv "$BATS_TEST_TMPDIR/manifest" "$manifest"
+                ;;
+            duplicate-last) printf 'schema\t999\n' >>"$manifest" ;;
+            identical-duplicate) printf 'schema\t1\n' >>"$manifest" ;;
+            unknown) printf 'unexpected\tvalue\n' >>"$manifest" ;;
+            missing-schema) awk -F '\t' '$1 != "schema"' "$manifest" >"$BATS_TEST_TMPDIR/manifest"; mv "$BATS_TEST_TMPDIR/manifest" "$manifest" ;;
+            malformed-hash) awk -F '\t' 'BEGIN {OFS="\t"} $1 == "proposal_hash" {$2="bad"} {print}' "$manifest" >"$BATS_TEST_TMPDIR/manifest"; mv "$BATS_TEST_TMPDIR/manifest" "$manifest" ;;
+            zero-count) awk -F '\t' 'BEGIN {OFS="\t"} $1 == "proposal_count" {$2="0"} {print}' "$manifest" >"$BATS_TEST_TMPDIR/manifest"; mv "$BATS_TEST_TMPDIR/manifest" "$manifest" ;;
+            extra-fields) awk -F '\t' 'BEGIN {OFS="\t"} $1 == "schema" {$3="extra"} {print}' "$manifest" >"$BATS_TEST_TMPDIR/manifest"; mv "$BATS_TEST_TMPDIR/manifest" "$manifest" ;;
+        esac
+
+        run cmd_apply
+
+        [ "$status" -eq 65 ]
+        [ ! -e "$BATS_TEST_TMPDIR/sql.log" ]
+        assert_apply_preflight_unchanged
+    done
 }
 
 @test "apply rejects a proposal changed after manifest creation" {

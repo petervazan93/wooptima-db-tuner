@@ -104,6 +104,9 @@ DBTUNE_APPLY_BACKUP_LAST_SUCCESS	internal
 DBTUNE_APPLY_BACKUP_MAX_AGE_SECONDS	internal
 DBTUNE_APPLY_BACKUP_MODE	internal
 DBTUNE_APPLY_BACKUP_SOURCE	internal
+DBTUNE_APPLY_RECORDS_HASH	internal
+DBTUNE_APPLY_RECORD_COUNT	internal
+DBTUNE_APPLY_SNAPSHOT_HASH	internal
 DBTUNE_APPS_FILE	internal
 DBTUNE_AUDIT_EVIDENCE_ERROR	internal
 DBTUNE_AUDIT_FILE	internal
@@ -515,6 +518,69 @@ dbtune_is_sensitive_key() {
         *) return 1 ;;
     esac
 }
+
+dbtune_proposal_key_is_safe() {
+    local key=${1:-}
+    [[ $key =~ ^[A-Za-z][A-Za-z0-9_-]*$ ]] && ! dbtune_is_sensitive_key "$key"
+}
+
+dbtune_proposal_value_is_safe() {
+    [[ ${1:-} =~ ^[[:alnum:]_./,:+-]+$ ]]
+}
+
+dbtune_cnf_entries_strict() (
+    local file=${1:-}
+    local records key value extra status=0
+
+    umask 077
+    [[ -r $file ]] || return 65
+    dbtune_validate_single_link_file "$file" >/dev/null 2>&1 || return 65
+    records=$(mktemp "${TMPDIR:-/tmp}/dbtune-cnf-records.XXXXXX") || return 1
+    trap 'rm -f "$records"' EXIT HUP INT TERM
+    LC_ALL=C awk -v output="$records" '
+        function trim(value) {
+            sub(/^[[:space:]]+/, "", value)
+            sub(/[[:space:]]+$/, "", value)
+            return value
+        }
+        function reject() { bad=1 }
+        {
+            line=$0
+            if (line ~ /[[:cntrl:]]/) { reject(); next }
+            stripped=trim(line)
+            if (stripped == "" || stripped ~ /^[#;]/) next
+            if (stripped ~ /^\[/) {
+                if (stripped != "[mysqld]" || section_seen) { reject(); next }
+                section_seen=1
+                active=1
+                next
+            }
+            equals=gsub(/=/, "&", stripped)
+            if (!active || stripped ~ /^!/ || equals != 1) { reject(); next }
+            separator=index(stripped, "=")
+            raw_key=trim(substr(stripped, 1, separator - 1))
+            value=trim(substr(stripped, separator + 1))
+            if (raw_key !~ /^[A-Za-z][A-Za-z0-9_-]*$/ || value == "") { reject(); next }
+            canonical=tolower(raw_key)
+            gsub(/-/, "_", canonical)
+            if (canonical in seen) { reject(); next }
+            seen[canonical]=1
+            keys[++count]=canonical
+            values[count]=value
+        }
+        END {
+            if (bad || !section_seen || count < 1) exit 65
+            for (position=1; position<=count; position++) print keys[position] "\t" values[position] > output
+            close(output)
+        }
+    ' "$file" || status=$?
+    ((status == 0)) || return 65
+    while IFS=$'\t' read -r key value extra || [[ -n $key || -n $value || -n $extra ]]; do
+        [[ -n $key && -n $value && -z $extra ]] || return 65
+        dbtune_proposal_key_is_safe "$key" && dbtune_proposal_value_is_safe "$value" || return 65
+    done <"$records"
+    command cat "$records"
+)
 
 dbtune_redact() {
     local value lower key quote char prefix suffix
@@ -1202,6 +1268,32 @@ dbtune_manifest_value() {
     [[ -r $manifest && -n $key ]] || return 1
     awk -F '\t' -v wanted="$key" '$1 == wanted {sub(/^[^\t]*\t/, ""); print; found=1; exit} END {if (!found) exit 1}' "$manifest"
 }
+
+dbtune_manifest_validate_exact() (
+    local manifest=${1:-}
+    local schema=${2:-}
+    local schema_file
+
+    [[ -r $manifest && -n $schema ]] || return 65
+    dbtune_validate_single_link_file "$manifest" >/dev/null 2>&1 || return 65
+    umask 077
+    schema_file=$(mktemp "${TMPDIR:-/tmp}/dbtune-manifest-schema.XXXXXX") || return 1
+    trap 'rm -f "$schema_file"' EXIT HUP INT TERM
+    printf '%s\n' "$schema" >"$schema_file" || return 1
+    LC_ALL=C awk -F '\t' '
+        FILENAME == ARGV[1] {
+            if (NF != 1 || $1 == "" || $1 ~ /[[:cntrl:]]/ || $1 in required) schema_bad=1
+            required[$1]=1
+            next
+        }
+        NF != 2 || $1 ~ /[[:cntrl:]]/ || $2 ~ /[[:cntrl:]]/ || !($1 in required) || ($1 in seen) { bad=1; next }
+        { seen[$1]=1 }
+        END {
+            if (schema_bad || bad) exit 65
+            for (name in required) if (!(name in seen)) exit 65
+        }
+    ' "$schema_file" "$manifest" || return 65
+)
 
 dbtune_audit_manifest_file() {
     dbtune_path audit-manifest.tsv

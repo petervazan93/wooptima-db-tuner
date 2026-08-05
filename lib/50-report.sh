@@ -1058,15 +1058,6 @@ dbtune_cnf_comment() {
     dbtune_report_safe "${1:-}"
 }
 
-dbtune_proposal_key_is_safe() {
-    local key=${1:-}
-    [[ $key =~ ^[A-Za-z][A-Za-z0-9_-]*$ ]] && ! dbtune_is_sensitive_key "$key"
-}
-
-dbtune_proposal_value_is_safe() {
-    [[ ${1:-} =~ ^[[:alnum:]_./,:+-]+$ ]]
-}
-
 dbtune_proposal_parse() {
     local line=${1-}
     local encoded

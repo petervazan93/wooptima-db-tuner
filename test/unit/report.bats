@@ -106,6 +106,26 @@ EOF
     write_analysis_manifest
 }
 
+@test "strict proposal grammar emits canonical records only after complete validation" {
+    local proposal="$BATS_TEST_TMPDIR/proposal.cnf"
+    cat >"$proposal" <<'CNF'
+[mysqld]
+Max-Connections = 300
+skip-name-resolve=ON
+CNF
+
+    run dbtune_cnf_entries_strict "$proposal"
+
+    [ "$status" -eq 0 ]
+    [ "$output" = $'max_connections\t300\nskip_name_resolve\tON' ]
+
+    printf '[mysqld]\nmax_connections=300\ninvalid line\n' >"$proposal"
+    run dbtune_cnf_entries_strict "$proposal"
+
+    [ "$status" -eq 65 ]
+    [ -z "$output" ]
+}
+
 @test "report and proposal command diagnostics follow the selected interface language" {
     DBTUNE_LOG_LEVEL=error
     dbtune_i18n_set en

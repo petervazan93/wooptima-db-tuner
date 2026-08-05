@@ -1713,6 +1713,10 @@ dbtune_i18n_lookup() {
         sk:lifecycle_proposal_hash_missing) DBTUNE_I18N_MESSAGE='Proposal manifest nemá proposal_hash' ;;
         en:lifecycle_proposal_changed) DBTUNE_I18N_MESSAGE='Proposal snapshot changed or does not match the manifest' ;;
         sk:lifecycle_proposal_changed) DBTUNE_I18N_MESSAGE='Proposal snapshot sa zmenil alebo nezodpovedá manifestu' ;;
+        en:lifecycle_proposal_invalid) DBTUNE_I18N_MESSAGE='Configuration proposal does not satisfy the strict [mysqld] grammar' ;;
+        sk:lifecycle_proposal_invalid) DBTUNE_I18N_MESSAGE='Návrh konfigurácie nespĺňa striktnú gramatiku [mysqld]' ;;
+        en:lifecycle_proposal_manifest_invalid) DBTUNE_I18N_MESSAGE='Proposal manifest does not satisfy its exact schema' ;;
+        sk:lifecycle_proposal_manifest_invalid) DBTUNE_I18N_MESSAGE='Proposal manifest nespĺňa svoju presnú schému' ;;
         en:lifecycle_proposal_count_missing) DBTUNE_I18N_MESSAGE='Proposal manifest has no proposal_count' ;;
         sk:lifecycle_proposal_count_missing) DBTUNE_I18N_MESSAGE='Proposal manifest nemá proposal_count' ;;
         en:lifecycle_proposal_records_hash_missing) DBTUNE_I18N_MESSAGE='Proposal manifest has no proposal_records_hash' ;;
