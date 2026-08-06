@@ -887,6 +887,12 @@ dbtune_i18n_lookup() {
         sk:reason_flush_method_deprecated)
             DBTUNE_I18N_MESSAGE='V MariaDB 11.x je flush_method deprecated; existujúcu hodnotu overte a nepridávajte novú naslepo.'
             ;;
+        en:reason_landmine_scan_unknown)
+            DBTUNE_I18N_MESSAGE='Loaded server defaults are unavailable or malformed; no version-safety conclusion is possible.'
+            ;;
+        sk:reason_landmine_scan_unknown)
+            DBTUNE_I18N_MESSAGE='Načítané predvolené nastavenia servera chýbajú alebo sú poškodené; bezpečnosť verzie nemožno vyhodnotiť.'
+            ;;
         en:reason_doublewrite)
             DBTUNE_I18N_MESSAGE='Doublewrite protects pages from torn writes.'
             ;;
@@ -1851,6 +1857,12 @@ dbtune_i18n_lookup() {
         sk:lifecycle_parent_replaced_prepare) DBTUNE_I18N_MESSAGE='Nadradený adresár konfigurácie bol počas prípravy apply vymenený' ;;
         en:lifecycle_original_backup_mismatch) DBTUNE_I18N_MESSAGE='Backup of the original config target does not match its source' ;;
         sk:lifecycle_original_backup_mismatch) DBTUNE_I18N_MESSAGE='Záloha pôvodného cieľa konfigurácie nezodpovedá zdroju' ;;
+        en:lifecycle_landmine_audit_invalid) DBTUNE_I18N_MESSAGE='Apply requires a complete loaded-defaults audit with no critical loaded option' ;;
+        sk:lifecycle_landmine_audit_invalid) DBTUNE_I18N_MESSAGE='Apply vyžaduje úplný audit načítaných predvolených nastavení bez načítanej kritickej voľby' ;;
+        en:lifecycle_landmine_scan_failed) DBTUNE_I18N_MESSAGE='The final loaded-defaults scan failed; apply stopped before durable mutation' ;;
+        sk:lifecycle_landmine_scan_failed) DBTUNE_I18N_MESSAGE='Finálna kontrola načítaných predvolených nastavení zlyhala; apply sa zastavil pred trvalou zmenou' ;;
+        en:lifecycle_landmine_critical) DBTUNE_I18N_MESSAGE='A critical removed server option is currently loaded; apply stopped before durable mutation' ;;
+        sk:lifecycle_landmine_critical) DBTUNE_I18N_MESSAGE='Server má načítanú kritickú odstránenú voľbu; apply sa zastavil pred trvalou zmenou' ;;
         en:lifecycle_publisher_required) DBTUNE_I18N_MESSAGE='Secure config publication requires python3 with dir_fd and atomic rename-exchange support' ;;
         sk:lifecycle_publisher_required) DBTUNE_I18N_MESSAGE='Bezpečné publikovanie konfigurácie vyžaduje python3 s podporou dir_fd a atomického rename exchange' ;;
         en:lifecycle_parent_replaced_validation) DBTUNE_I18N_MESSAGE='Config parent was replaced since the original validation' ;;

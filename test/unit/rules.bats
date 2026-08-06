@@ -10,6 +10,7 @@ setup() {
     source "$BATS_TEST_DIRNAME/../../lib/00-header.sh"
     source "$BATS_TEST_DIRNAME/../../lib/05-i18n.sh"
     source "$BATS_TEST_DIRNAME/../../lib/10-util.sh"
+    source "$BATS_TEST_DIRNAME/../../lib/15-mariadb-safety.sh"
     source "$BATS_TEST_DIRNAME/../../lib/20-audit.sh"
     source "$BATS_TEST_DIRNAME/../../lib/40-rules.sh"
     dbtune_i18n_set sk
@@ -43,6 +44,8 @@ bind_address	127.0.0.1
 wildcard_grants	0
 security.grants_audited	1
 security.hostname_grant_count	0
+landmine.scan.status	complete
+landmine.scan.method	mariadbd_print_defaults
 EOF
 }
 
@@ -511,6 +514,63 @@ EOF
     [ "$output" = "" ]
 }
 
+@test "landmine scan tri-state emits findings only from complete exact loaded evidence" {
+    local case_name verdict
+
+    make_samples "$BATS_TEST_TMPDIR/samples.tsv" 30 2 10
+    for case_name in complete-loaded complete-absent failed missing duplicate conflicting malformed old-config unsupported-failed; do
+        if [[ $case_name == unsupported-failed ]]; then
+            make_audit "$BATS_TEST_TMPDIR/base.tsv" 12.0.0-MariaDB
+        else
+            make_audit "$BATS_TEST_TMPDIR/base.tsv" 11.4.12-MariaDB
+        fi
+        awk -F '\t' '$1 !~ /^landmine[.]scan[.]/ && $1 !~ /^landmine[.]/ && $1 !~ /^finding[.]landmine[.]/' \
+            "$BATS_TEST_TMPDIR/base.tsv" >"$BATS_TEST_TMPDIR/$case_name.tsv"
+        case $case_name in
+            complete-loaded)
+                printf 'landmine.scan.status\tcomplete\nlandmine.scan.method\tmariadbd_print_defaults\nlandmine.innodb_change_buffering.loaded\t1\nlandmine.innodb_change_buffering.severity\tcritical\nfinding.landmine.innodb_change_buffering\tcritical\n' >>"$BATS_TEST_TMPDIR/$case_name.tsv"
+                verdict=REMOVED
+                ;;
+            complete-absent)
+                printf 'landmine.scan.status\tcomplete\nlandmine.scan.method\tmariadbd_print_defaults\n' >>"$BATS_TEST_TMPDIR/$case_name.tsv"
+                verdict=none
+                ;;
+            failed|unsupported-failed)
+                printf 'landmine.scan.status\tfailed\nlandmine.scan.method\tmariadbd_print_defaults\n' >>"$BATS_TEST_TMPDIR/$case_name.tsv"
+                verdict=UNKNOWN
+                ;;
+            missing)
+                verdict=UNKNOWN
+                ;;
+            duplicate)
+                printf 'landmine.scan.status\tcomplete\nlandmine.scan.status\tcomplete\nlandmine.scan.method\tmariadbd_print_defaults\n' >>"$BATS_TEST_TMPDIR/$case_name.tsv"
+                verdict=UNKNOWN
+                ;;
+            conflicting)
+                printf 'landmine.scan.status\tcomplete\nlandmine.scan.status\tfailed\nlandmine.scan.method\tmariadbd_print_defaults\n' >>"$BATS_TEST_TMPDIR/$case_name.tsv"
+                verdict=UNKNOWN
+                ;;
+            malformed)
+                printf 'landmine.scan.status\tcomplete\nlandmine.scan.method\tmariadbd_print_defaults\nlandmine.innodb_change_buffering.loaded\t2\n' >>"$BATS_TEST_TMPDIR/$case_name.tsv"
+                verdict=UNKNOWN
+                ;;
+            old-config)
+                printf 'config_innodb_change_buffering\tall\n' >>"$BATS_TEST_TMPDIR/$case_name.tsv"
+                verdict=UNKNOWN
+                ;;
+        esac
+
+        dbtune_rules_analyze "$BATS_TEST_TMPDIR/$case_name.tsv" "$BATS_TEST_TMPDIR/samples.tsv" "" "" "" 10 >"$BATS_TEST_TMPDIR/$case_name-analysis.tsv"
+
+        if [[ $verdict == none ]]; then
+            [ "$(awk -F '\t' '$1=="R-VERSION" {count++} END {print count+0}' "$BATS_TEST_TMPDIR/$case_name-analysis.tsv")" -eq 0 ]
+        else
+            [ "$(awk -F '\t' '$1=="R-VERSION" {print $4; exit}' "$BATS_TEST_TMPDIR/$case_name-analysis.tsv")" = "$verdict" ]
+        fi
+        [ "$(awk -F '\t' '$1=="R-VERSION" && ($5!="" || $6!="") {bad=1} END {print bad+0}' "$BATS_TEST_TMPDIR/$case_name-analysis.tsv")" -eq 0 ]
+    done
+}
+
 @test "minimum samples rejects analysis and preserves collected state" {
     cp "$BATS_TEST_DIRNAME/../fixtures/audit-10.6.tsv" "$DBTUNE_STATE_DIR/audit.tsv"
     cp "$BATS_TEST_DIRNAME/../fixtures/samples-7d.tsv" "$DBTUNE_STATE_DIR/samples.tsv"
@@ -754,7 +814,11 @@ security.remote_grant_count	1
 security.grants_audited	1
 security.hostname_grant_count	1
 security.port_3306	public
+landmine.scan.status	complete
+landmine.scan.method	mariadbd_print_defaults
+landmine.innodb_change_buffering.loaded	1
 landmine.innodb_change_buffering.severity	critical
+finding.landmine.innodb_change_buffering	critical
 EOF
     make_samples "$BATS_TEST_TMPDIR/samples.tsv" 30 2 10
     cat >"$BATS_TEST_TMPDIR/apps.tsv" <<'EOF'

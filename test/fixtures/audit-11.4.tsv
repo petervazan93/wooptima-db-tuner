@@ -50,5 +50,14 @@ backup.status	verified
 backup.source	test-fixture
 backup.last_success	2026-07-23T02:00:00Z
 backup_interval_hours	6
-config_innodb_change_buffering	all
-config_innodb_log_files_in_group	2
+landmine.scan.status	complete
+landmine.scan.method	mariadbd_print_defaults
+landmine.innodb_log_files_in_group.loaded	1
+landmine.innodb_log_files_in_group.severity	critical
+finding.landmine.innodb_log_files_in_group	critical
+landmine.innodb_change_buffering.loaded	1
+landmine.innodb_change_buffering.severity	critical
+finding.landmine.innodb_change_buffering	critical
+landmine.innodb_flush_method.loaded	1
+landmine.innodb_flush_method.severity	warning
+finding.landmine.innodb_flush_method	warning

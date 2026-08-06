@@ -144,7 +144,7 @@ integration_proposal_records() {
 
 integration_lifecycle() {
     local service=$1
-    local audit_output proposal_en proposal_sk
+    local audit_output proposal_en proposal_sk target_hash_before target_hash_after
 
     printf 'integration: %s dbtune lifecycle\n' "$service"
     integration_compose exec -T "$service" sh -eu -c '
@@ -181,11 +181,13 @@ integration_lifecycle() {
         $1=="audit.section.mariadb.missing_evidence" && $2=="none" {missing=1}
         $1=="audit.section.mariadb.invalid_evidence" && $2=="none" {invalid=1}
         $1=="audit.section.mariadb.conflicting_evidence" && $2=="none" {conflicting=1}
+        $1=="landmine.scan.status" && $2=="complete" {landmine_status=1}
+        $1=="landmine.scan.method" && $2=="mariadbd_print_defaults" {landmine_method=1}
         $1=="hw.storage_class" && $2=="nvme" {storage=1}
-        END {exit !(authoritative && hardware && mariadb && schema && missing && invalid && conflicting && storage)}
+        END {exit !(authoritative && hardware && mariadb && schema && missing && invalid && conflicting && landmine_status && landmine_method && storage)}
     ' /var/lib/dbtune/audit.tsv || return 1
     integration_dbtune "$service" collect start --days 1 >/dev/null || return 1
-    for _ in 1 2 3 4 5; do
+    for _ in 1 2 3 4 5 6; do
         integration_dbtune "$service" _tick >/dev/null || return 1
     done
     integration_dbtune "$service" collect stop >/dev/null || return 1
@@ -202,6 +204,18 @@ integration_lifecycle() {
     integration_dbtune "$service" report >/dev/null || return 1
     integration_assert_report_language "$service" "${DBTUNE_UI_LANG:-en}" || return 1
     integration_dbtune "$service" propose >/dev/null || return 1
+    integration_compose exec -T "$service" sh -eu -c '
+        printf "%s\n" "[mysqld]" "innodb_file_format=Antelope" >/etc/mysql/mariadb.conf.d/98-dbtune-landmine.cnf
+    ' || return 1
+    target_hash_before=$(integration_compose exec -T "$service" sha256sum /etc/mysql/mariadb.conf.d/99-zz-tuning.cnf | awk '{print $1}') || return 1
+    if integration_dbtune "$service" apply >/dev/null 2>&1; then
+        printf 'integration: %s loaded critical option did not block apply\n' "$service" >&2
+        return 1
+    fi
+    target_hash_after=$(integration_compose exec -T "$service" sha256sum /etc/mysql/mariadb.conf.d/99-zz-tuning.cnf | awk '{print $1}') || return 1
+    [[ $target_hash_before == "$target_hash_after" ]] || return 1
+    integration_compose exec -T "$service" test ! -e /var/lib/dbtune/apply || return 1
+    integration_compose exec -T "$service" rm -f /etc/mysql/mariadb.conf.d/98-dbtune-landmine.cnf || return 1
     integration_dbtune "$service" apply >/dev/null || return 1
     integration_compose restart "$service" || return 1
     integration_wait_healthy "$service" || return 1
@@ -214,6 +228,10 @@ integration_lifecycle() {
         test -s /var/lib/dbtune/proposal-manifest.tsv
         test -s /var/lib/dbtune/backup-evidence.tsv
         test -s /etc/mysql/mariadb.conf.d/99-zz-tuning.cnf
+        history=$(cat /var/lib/dbtune/apply/current)
+        test -s "$history/loaded-defaults.tsv"
+        grep -Fx "schema	1" "$history/manifest.tsv" >/dev/null
+        grep -Fx "landmine_scan_method	mariadbd_print_defaults" "$history/manifest.tsv" >/dev/null
     '
 }
 

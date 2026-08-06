@@ -291,34 +291,6 @@ dbtune_audit_verified_owner() {
     printf '%s\n' "$owner"
 }
 
-dbtune_audit_scan_landmines() {
-    local version=${1:-0}
-    local root=${2:-/etc/mysql}
-    local file variable severity gate
-    local -a files=()
-
-    [[ -d $root ]] || return 0
-    while IFS= read -r file; do
-        files+=("$file")
-    done < <(command grep -RIl --include='*.cnf' '' "$root" 2>/dev/null || true)
-    for file in "${files[@]}"; do
-        while IFS=$'\t' read -r variable gate severity; do
-            dbtune_version_at_least "$version" "$gate" || continue
-            if command grep -Eiq "^[[:space:]]*${variable//_/[-_]}[[:space:]]*=" "$file" 2>/dev/null; then
-                printf 'landmine.%s.severity\t%s\n' "$variable" "$severity"
-                printf 'landmine.%s.file\t%s\n' "$variable" "$file"
-            fi
-        done <<'LANDMINES'
-innodb_file_format	10.3	critical
-innodb_file_format_max	10.3	critical
-innodb_buffer_pool_instances	10.6	critical
-innodb_log_files_in_group	10.6	critical
-innodb_change_buffering	11.0	critical
-innodb_flush_method	11.0	warning
-LANDMINES
-    done
-}
-
 dbtune_audit_parse_cnf() {
     local file=${1:-}
     local key value normalized
@@ -1396,13 +1368,21 @@ dbtune_audit_collect_grants() {
 
 dbtune_audit_add_findings() {
     local out=${1:-}
-    local version=${2:-0}
-    local config_root=${DBTUNE_MYSQL_CONFIG_DIR:-/etc/mysql}
-    local key value effective systemd_limit configured_limit
+    local scan scan_status=0 key value effective systemd_limit configured_limit
 
-    while IFS=$'\t' read -r key value; do
-        dbtune_audit_put "$out" "$key" "$value"
-    done < <(dbtune_audit_scan_landmines "$version" "$config_root")
+    scan=$(mktemp "${out%/*}/.landmine-scan.XXXXXX") || return 1
+    dbtune_loaded_defaults_scan "$scan" || scan_status=$?
+    if [[ -r $scan ]]; then
+        while IFS=$'\t' read -r key value; do
+            dbtune_audit_put "$out" "$key" "$value"
+        done <"$scan"
+    else
+        dbtune_audit_put "$out" landmine.scan.status failed
+        dbtune_audit_put "$out" landmine.scan.method mariadbd_print_defaults
+        scan_status=69
+    fi
+    rm -f "$scan"
+    ((scan_status == 0)) || dbtune_audit_put "$out" finding.landmine_scan_failed warning
 
     effective=$(command awk -F '\t' '$1=="mariadb.variable.open_files_limit" { print $2; exit }' "$out")
     systemd_limit=$(command awk -F '\t' '$1=="systemd.limit_nofile" { print $2; exit }' "$out")
@@ -1484,6 +1464,9 @@ dbtune_audit_finalize_status() {
             mariadb_status=partial
         fi
         if [[ -n $mariadb_missing || -n $mariadb_invalid || -n $mariadb_conflicting ]]; then
+            mariadb_status=partial
+        fi
+        if ! dbtune_loaded_defaults_validate "$audit" embedded; then
             mariadb_status=partial
         fi
     fi

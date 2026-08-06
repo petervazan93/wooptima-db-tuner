@@ -50,4 +50,8 @@ backup.status	verified
 backup.source	test-fixture
 backup.last_success	2026-07-23T02:00:00Z
 backup_interval_hours	3
-config_innodb_buffer_pool_instances	8
+landmine.scan.status	complete
+landmine.scan.method	mariadbd_print_defaults
+landmine.innodb_buffer_pool_instances.loaded	1
+landmine.innodb_buffer_pool_instances.severity	critical
+finding.landmine.innodb_buffer_pool_instances	critical

@@ -57,7 +57,7 @@ dbtune_rules_analyze() {
     local min_samples=${6:-288}
     local p95_threads p50_qcache p05_available diagnostics rejected excluded_status excluded_restart
     local too_few_samples_format
-    local normalized_audit result
+    local normalized_audit audit_source sanitized_audit='' landmine_contract=unknown result
 
     [[ -r $audit_file && -r $samples_file ]] || return 66
     diagnostics=$(dbtune_samples_diagnostics "$samples_file") || return 65
@@ -72,12 +72,28 @@ dbtune_rules_analyze() {
     p95_threads=$(dbtune_tsv_percentile "$samples_file" threads_running 8 95) || return 65
     p05_available=$(dbtune_tsv_percentile "$samples_file" mem_available_kb 14 5) || return 65
     p50_qcache=$(dbtune_tsv_percentile "$samples_file" qcache_hit_pct 10 50 qcache-active 2>/dev/null || printf '0')
-    normalized_audit=$(mktemp "${TMPDIR:-/tmp}/dbtune-audit-normalized.XXXXXX") || return 1
-    if ! chmod 600 "$normalized_audit" || ! dbtune_audit_normalize "$audit_file" >"$normalized_audit"; then
-        rm -f "$normalized_audit"
+    audit_source=$audit_file
+    if dbtune_loaded_defaults_validate "$audit_file" embedded; then
+        landmine_contract=complete
+    else
+        sanitized_audit=$(mktemp "${TMPDIR:-/tmp}/dbtune-audit-without-landmines.XXXXXX") || return 1
+        if ! chmod 600 "$sanitized_audit" || ! command awk -F '\t' \
+            '$1 !~ /^landmine[.]/ && $1 !~ /^finding[.]landmine([.]|_)/' "$audit_file" >"$sanitized_audit"; then
+            rm -f "$sanitized_audit"
+            return 1
+        fi
+        audit_source=$sanitized_audit
+    fi
+    normalized_audit=$(mktemp "${TMPDIR:-/tmp}/dbtune-audit-normalized.XXXXXX") || {
+        rm -f "$sanitized_audit"
+        return 1
+    }
+    if ! chmod 600 "$normalized_audit" || ! dbtune_audit_normalize "$audit_source" >"$normalized_audit"; then
+        rm -f "$normalized_audit" "$sanitized_audit"
         return 65
     fi
     awk -v audit_file="$normalized_audit" -v samples_file=<(dbtune_samples_valid_rows "$samples_file") \
+        -v landmine_catalog_file=<(dbtune_landmine_catalog) -v landmine_contract="$landmine_contract" \
         -v dbsize_file="$dbsize_file" -v apps_file="$apps_file" \
         -v databases_file="$databases_file" -v min_samples="$min_samples" \
         -v shared_p95_threads="$p95_threads" -v shared_p50_qcache="$p50_qcache" \
@@ -89,6 +105,7 @@ dbtune_rules_analyze() {
         gib = 1073741824
         mib = 1048576
         load_audit(audit_file)
+        load_landmine_catalog(landmine_catalog_file)
         load_samples(samples_file)
         if (sample_count < min_samples) {
             printf "%s\n", sprintf(too_few_samples_format, sample_count, min_samples) > "/dev/stderr"
@@ -155,6 +172,18 @@ dbtune_rules_analyze() {
             if (key == "key" && norm(value) == "value") continue
             audit[key] = value
             present[key] = 1
+        }
+        close(file)
+    }
+
+    function load_landmine_catalog(file, line, fields, count, name) {
+        while ((getline line < file) > 0) {
+            count = split(line, fields, "\t")
+            if (count != 4) continue
+            name = fields[1]
+            landmine_names[++landmine_count] = name
+            landmine_severity[name] = fields[3]
+            landmine_reason[name] = fields[4]
         }
         close(file)
     }
@@ -645,18 +674,22 @@ dbtune_rules_analyze() {
     }
 
     function gate_rules() {
+        if (landmine_contract != "complete") {
+            emit("R-VERSION", "server", "medium", "UNKNOWN", "", "", "landmine_scan_status=unknown", "reason_landmine_scan_unknown")
+            return
+        }
         if (version_family == "unsupported") {
             emit("R-VERSION", "server", "critical", "UNSUPPORTED", "", "", "version=" ag("mariadb_version", "unknown"), "reason_version_unsupported")
             return
         }
-        if (version_major >= 11 && (present["config_innodb_change_buffering"] || present["landmine_innodb_change_buffering_severity"] || truth(ag("landmine_innodb_change_buffering", ""))))
-            emit("R-VERSION", "server", "critical", "REMOVED", "", "", "innodb_change_buffering; family=" version_family, "reason_variable_removed_startup")
-        if (present["config_innodb_buffer_pool_instances"] || present["landmine_innodb_buffer_pool_instances_severity"] || truth(ag("landmine_innodb_buffer_pool_instances", "")))
-            emit("R-VERSION", "server", "critical", "REMOVED", "", "", "innodb_buffer_pool_instances; family=" version_family, "reason_variable_removed_config")
-        if (present["config_innodb_log_files_in_group"] || present["landmine_innodb_log_files_in_group_severity"] || truth(ag("landmine_innodb_log_files_in_group", "")))
-            emit("R-VERSION", "server", "critical", "REMOVED", "", "", "innodb_log_files_in_group; family=" version_family, "reason_variable_removed_config")
-        if (version_major >= 11)
-            emit("R-VERSION", "server", "medium", "DEPRECATED", "", "", "innodb_flush_method; family=" version_family, "reason_flush_method_deprecated")
+        for (landmine_index = 1; landmine_index <= landmine_count; landmine_index++) {
+            landmine_name = landmine_names[landmine_index]
+            if (!present["landmine_" landmine_name "_loaded"]) continue
+            if (landmine_severity[landmine_name] == "critical")
+                emit("R-VERSION", "server", "critical", "REMOVED", "", "", landmine_name "; family=" version_family, landmine_reason[landmine_name])
+            else
+                emit("R-VERSION", "server", "medium", "DEPRECATED", "", "", landmine_name "; family=" version_family, landmine_reason[landmine_name])
+        }
     }
 
     function pinned_rules() {
@@ -859,7 +892,7 @@ dbtune_rules_analyze() {
     }
     ' </dev/null
     result=$?
-    rm -f "$normalized_audit"
+    rm -f "$normalized_audit" "$sanitized_audit"
     return "$result"
 }
 

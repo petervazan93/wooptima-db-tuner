@@ -33,6 +33,9 @@ setup() {
     export STUB_FAIL_CHMOD_MATCH=
     export STUB_FAIL_MKDIR_MATCH=
     export STUB_HELP_HAS_VALIDATE_CONFIG=1
+    export STUB_DEFAULTS_OUTPUT=
+    export STUB_DEFAULTS_ERROR=
+    export STUB_DEFAULTS_STATUS=0
     unset DBTUNE_PUBLISH_FAIL_MATCH
     unset DBTUNE_PUBLISH_FAULT_HOOK
     unset DBTUNE_PUBLISH_CRASH_POINT
@@ -48,6 +51,7 @@ setup() {
     source "$BATS_TEST_DIRNAME/../../lib/00-header.sh"
     source "$BATS_TEST_DIRNAME/../../lib/05-i18n.sh"
     source "$BATS_TEST_DIRNAME/../../lib/10-util.sh"
+    source "$BATS_TEST_DIRNAME/../../lib/15-mariadb-safety.sh"
     source "$BATS_TEST_DIRNAME/../../lib/20-audit.sh"
     source "$BATS_TEST_DIRNAME/../../lib/60-lifecycle.sh"
     source "$BATS_TEST_DIRNAME/../../lib/50-report.sh"
@@ -62,6 +66,8 @@ setup() {
 audit.hostname	test
 mariadb.variable.max_connections	200
 mariadb.variable.skip_name_resolve	OFF
+landmine.scan.status	complete
+landmine.scan.method	mariadbd_print_defaults
 EOF
     : >"$DBTUNE_STATE_DIR/apps.tsv"
     : >"$DBTUNE_STATE_DIR/databases.tsv"
@@ -127,6 +133,13 @@ STUB
 #!/usr/bin/env bash
 printf '%s\n' "$*" >>"$BATS_TEST_TMPDIR/mariadbd.log"
 case " $* " in
+    *" --version "*) printf '%s\n' 'mariadbd  Ver 15.1 Distrib 11.4.12-MariaDB' ;;
+    *" --print-defaults "*)
+        printf '%s\n' scan >>"$BATS_TEST_TMPDIR/landmine-scan.log"
+        [[ -z $STUB_DEFAULTS_OUTPUT ]] || printf '%b' "$STUB_DEFAULTS_OUTPUT"
+        [[ -z $STUB_DEFAULTS_ERROR ]] || printf '%b' "$STUB_DEFAULTS_ERROR" >&2
+        exit "$STUB_DEFAULTS_STATUS"
+        ;;
     *" --help --verbose "*)
         if [[ $STUB_HELP_HAS_VALIDATE_CONFIG == 1 ]]; then
             printf '%s\n' '  --validate-config'
@@ -264,8 +277,10 @@ write_manifest() {
 }
 
 assert_apply_preflight_unchanged() {
+    local expected_state=${1:-proposed}
+
     [ "$(cat "$DBTUNE_CONFIG_TARGET")" = 'original target' ]
-    [ "$(dbtune_state_read)" = proposed ]
+    [ "$(dbtune_state_read)" = "$expected_state" ]
     [ ! -e "$DBTUNE_STATE_DIR/apply/current" ]
     [ ! -e "$DBTUNE_STATE_DIR/apply" ]
     ! compgen -G "$DBTUNE_STATE_DIR/.apply-*" >/dev/null
@@ -981,6 +996,166 @@ STUB
     run cmd_apply
     [ "$status" -eq 65 ]
     [ ! -e "$DBTUNE_CONFIG_TARGET" ]
+}
+
+@test "force cannot bypass live landmine critical or failed scans in every permitted state" {
+    local mode state failure
+
+    dbtune_lifecycle_confirm_force() { :; }
+    for mode in normal force; do
+        for state in audited analyzed proposed; do
+            [[ $mode == force || $state == proposed ]] || continue
+            for failure in critical failed; do
+                reset_apply_preflight_fixture
+                printf '%s\n' "$state" >"$DBTUNE_STATE_DIR/state"
+                : >"$BATS_TEST_TMPDIR/landmine-scan.log"
+                if [[ $failure == critical ]]; then
+                    export STUB_DEFAULTS_OUTPUT='--innodb-change-buffering=all\n'
+                    export STUB_DEFAULTS_STATUS=0
+                else
+                    export STUB_DEFAULTS_OUTPUT=
+                    export STUB_DEFAULTS_STATUS=7
+                fi
+
+                if [[ $mode == force ]]; then
+                    run cmd_apply --force
+                else
+                    run cmd_apply
+                fi
+
+                [ "$status" -eq 65 ]
+                [ "$(wc -l <"$BATS_TEST_TMPDIR/landmine-scan.log" | tr -d ' ')" -eq 1 ]
+                assert_apply_preflight_unchanged "$state"
+                [ ! -e "$DBTUNE_STATE_DIR/systemctl.log" ]
+            done
+        done
+    done
+}
+
+@test "live landmine preflight rejects an old audit before scanning or durable mutation" {
+    printf 'original target\n' >"$DBTUNE_CONFIG_TARGET"
+    awk -F '\t' '$1 !~ /^landmine[.]scan[.]/' "$DBTUNE_STATE_DIR/audit.tsv" >"$BATS_TEST_TMPDIR/old-audit.tsv"
+    mv "$BATS_TEST_TMPDIR/old-audit.tsv" "$DBTUNE_STATE_DIR/audit.tsv"
+    dbtune_provenance_write_audit_manifest "$DBTUNE_STATE_DIR/audit-manifest.tsv" \
+        lifecycle-run "$DBTUNE_STATE_DIR/audit.tsv" "$DBTUNE_STATE_DIR/apps.tsv" "$DBTUNE_STATE_DIR/databases.tsv"
+    write_manifest
+
+    run cmd_apply
+
+    [ "$status" -eq 65 ]
+    [ ! -e "$BATS_TEST_TMPDIR/landmine-scan.log" ]
+    assert_apply_preflight_unchanged
+}
+
+@test "live landmine scan observes defaults changed after proposal validation" {
+    printf 'original target\n' >"$DBTUNE_CONFIG_TARGET"
+    export STUB_DEFAULTS_OUTPUT=
+    dbtune_lifecycle_after_manifest_check() {
+        export STUB_DEFAULTS_OUTPUT='--innodb-change-buffering=all\n'
+    }
+
+    run cmd_apply
+
+    [ "$status" -eq 65 ]
+    [ "$(wc -l <"$BATS_TEST_TMPDIR/landmine-scan.log" | tr -d ' ')" -eq 1 ]
+    assert_apply_preflight_unchanged
+}
+
+@test "live landmine warning is bound into new history without bypassing other checks" {
+    local history expected_fingerprint
+
+    printf 'original target\n' >"$DBTUNE_CONFIG_TARGET"
+    export STUB_DEFAULTS_OUTPUT='--innodb-flush-method=O_DIRECT\n'
+    expected_fingerprint=$(printf 'innodb_flush_method\twarning\n' | dbtune_sha256_stream)
+
+    run cmd_apply
+
+    [ "$status" -eq 0 ]
+    history=$(cat "$DBTUNE_STATE_DIR/apply/current")
+    grep -Fx $'schema\t1' "$history/manifest.tsv"
+    grep -Fx $'landmine_scan_timestamp\t2026-07-31T12:00:00Z' "$history/manifest.tsv"
+    grep -Fx $'landmine_scan_method\tmariadbd_print_defaults' "$history/manifest.tsv"
+    grep -Fx $'landmine_loaded_fingerprint\t'"$expected_fingerprint" "$history/manifest.tsv"
+    grep -Fx $'force\t0' "$history/manifest.tsv"
+    [ "$(dbtune_lifecycle_manifest_value "$history" landmine_scan_hash)" = "$(dbtune_sha256_file "$history/loaded-defaults.tsv")" ]
+    grep -Fx $'landmine.innodb_flush_method.loaded\t1' "$history/loaded-defaults.tsv"
+
+    reset_apply_preflight_fixture
+    export STUB_DEFAULTS_OUTPUT='--innodb-flush-method=O_DIRECT\n'
+    export STUB_WSREP_ON=ON
+    run cmd_apply
+    [ "$status" -eq 65 ]
+    assert_apply_preflight_unchanged
+}
+
+@test "rollback ignores landmine scanner failure corrupt audit and unsafe current defaults" {
+    local history scans_before
+
+    printf 'original target\n' >"$DBTUNE_CONFIG_TARGET"
+    cmd_apply >/dev/null
+    history=$(cat "$DBTUNE_STATE_DIR/apply/current")
+    scans_before=$(wc -l <"$BATS_TEST_TMPDIR/landmine-scan.log" | tr -d ' ')
+    printf 'landmine.scan.status\tfailed\nlandmine.innodb_change_buffering.loaded\t2\n' >>"$DBTUNE_STATE_DIR/audit.tsv"
+    export STUB_DEFAULTS_OUTPUT='--innodb-change-buffering=all\n'
+    export STUB_DEFAULTS_STATUS=7
+    awk -F '\t' '$1 != "schema" && $1 !~ /^landmine_/' "$history/manifest.tsv" >"$BATS_TEST_TMPDIR/old-manifest.tsv"
+    mv "$BATS_TEST_TMPDIR/old-manifest.tsv" "$history/manifest.tsv"
+
+    run cmd_rollback
+
+    [ "$status" -eq 0 ]
+    [ "$(cat "$DBTUNE_CONFIG_TARGET")" = 'original target' ]
+    [ "$(wc -l <"$BATS_TEST_TMPDIR/landmine-scan.log" | tr -d ' ')" -eq "$scans_before" ]
+}
+
+@test "new history schema requires exact live landmine metadata" {
+    local history
+
+    printf 'original target\n' >"$DBTUNE_CONFIG_TARGET"
+    cmd_apply >/dev/null
+    history=$(cat "$DBTUNE_STATE_DIR/apply/current")
+    awk -F '\t' '$1 != "landmine_scan_hash"' "$history/manifest.tsv" >"$BATS_TEST_TMPDIR/incomplete-manifest.tsv"
+    mv "$BATS_TEST_TMPDIR/incomplete-manifest.tsv" "$history/manifest.tsv"
+
+    run cmd_rollback
+
+    [ "$status" -eq 65 ]
+    [ "$(dbtune_state_read)" = applied ]
+    cmp "$DBTUNE_CONFIG_TARGET" "$history/proposed.cnf"
+}
+
+@test "rollback ignores landmine scanner during failed apply recovery and interrupted continuation" {
+    local scans_before
+
+    printf 'original target\n' >"$DBTUNE_CONFIG_TARGET"
+    dbtune_lifecycle_before_publish() {
+        export STUB_DEFAULTS_OUTPUT='--innodb-change-buffering=all\n'
+        export STUB_DEFAULTS_STATUS=7
+    }
+    export STUB_RESTART_FAIL=1
+
+    run cmd_apply --restart
+
+    [ "$status" -ne 0 ]
+    [ "$(cat "$DBTUNE_CONFIG_TARGET")" = 'original target' ]
+    [ "$(wc -l <"$BATS_TEST_TMPDIR/landmine-scan.log" | tr -d ' ')" -eq 1 ]
+
+    dbtune_lifecycle_before_publish() { :; }
+    export STUB_RESTART_FAIL=0 STUB_DEFAULTS_STATUS=0 STUB_DEFAULTS_OUTPUT=
+    prepare_apply_a_b
+    export DBTUNE_FAULT_INJECT=after_rollback_intent
+    run cmd_rollback
+    [ "$status" -eq 99 ]
+    unset DBTUNE_FAULT_INJECT
+    scans_before=$(wc -l <"$BATS_TEST_TMPDIR/landmine-scan.log" | tr -d ' ')
+    printf 'landmine.scan.status\tfailed\n' >>"$DBTUNE_STATE_DIR/audit.tsv"
+    export STUB_DEFAULTS_OUTPUT='--innodb-change-buffering=all\n' STUB_DEFAULTS_STATUS=7
+
+    run dbtune_lifecycle_recover_if_needed
+
+    [ "$status" -eq 0 ]
+    assert_apply_a_restored_from_b
+    [ "$(wc -l <"$BATS_TEST_TMPDIR/landmine-scan.log" | tr -d ' ')" -eq "$scans_before" ]
 }
 
 @test "apply rejects critical version and missing-backup findings" {

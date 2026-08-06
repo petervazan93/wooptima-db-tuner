@@ -451,7 +451,7 @@ dbtune_lifecycle_check_apply_inputs() {
     local force=${1:-0}
     local proposal=${2:-}
     local records=${3:-}
-    local analysis state
+    local analysis audit state
 
     [[ -n $proposal ]] || proposal=$(dbtune_lifecycle_proposal)
     state=$(dbtune_state_read) || return
@@ -477,6 +477,11 @@ dbtune_lifecycle_check_apply_inputs() {
     fi
     if ((force == 0)); then
         dbtune_lifecycle_validate_proposal_manifest "$proposal" "$records" || return
+    fi
+    audit=$(dbtune_path audit.tsv) || return
+    if ! dbtune_loaded_defaults_assert_safe "$audit" embedded; then
+        dbtune_log error "$(dbtune_msg lifecycle_landmine_audit_invalid)"
+        return 65
     fi
 }
 
@@ -727,6 +732,12 @@ dbtune_lifecycle_prepare_history() {
     local expected_proposal_hash=${11:-}
     local expected_records_hash=${12:-}
     local expected_record_count=${13:-}
+    local live_scan=${14:-}
+    local live_scan_hash=${15:-}
+    local live_scan_timestamp=${16:-}
+    local live_scan_method=${17:-}
+    local loaded_fingerprint=${18:-}
+    local force=${19:-0}
     local had_original=0 original_hash=absent proposal_hash expected_hash run_id=unmeasured audit_hash=unmeasured
     local backup_hash=interactive
     local cycle_id original_source=absent original_cycle_id=- original_cycle_history=- original_backup=absent
@@ -737,6 +748,10 @@ dbtune_lifecycle_prepare_history() {
     cycle_id=${history##*/}
     [[ ${history%/*} == "$DBTUNE_STATE_DIR/apply" && $cycle_id =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || return 65
     [[ $expected_records_hash =~ ^[0-9a-f]{64}$ && $expected_record_count =~ ^[1-9][0-9]*$ ]] || return 65
+    [[ $live_scan_hash =~ ^[0-9a-f]{64}$ && $loaded_fingerprint =~ ^[0-9a-f]{64}$ &&
+        $live_scan_timestamp =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ &&
+        $live_scan_method =~ ^(mariadbd_print_defaults|mysqld_print_defaults)$ && $force =~ ^[01]$ ]] || return 65
+    [[ -f $live_scan && ! -L $live_scan && $(dbtune_sha256_file "$live_scan") == "$live_scan_hash" ]] || return 65
     dbtune_lifecycle_validate_target_path "$target" "$expected_topology" \
         "$expected_directory_identity" "$expected_target_identity" "$expected_target_hash" || return
     if [[ $DBTUNE_LIFECYCLE_PARENT_IDENTITIES != "$expected_parent_identities" ]]; then
@@ -776,6 +791,9 @@ dbtune_lifecycle_prepare_history() {
     dbtune_lifecycle_require_snapshot_hash "$proposal" "$expected_proposal_hash" || return
     cp "$proposal" "$history/proposed.cnf" || return 1
     chmod 600 "$history/proposed.cnf" || return 1
+    cp "$live_scan" "$history/loaded-defaults.tsv" || return 1
+    chmod 600 "$history/loaded-defaults.tsv" || return 1
+    [[ $(dbtune_sha256_file "$history/loaded-defaults.tsv") == "$live_scan_hash" ]] || return 65
     if [[ $DBTUNE_APPLY_BACKUP_MODE == artifact ]]; then
         cp "$backup_evidence" "$history/backup-evidence.tsv" || return 1
         chmod 600 "$history/backup-evidence.tsv" || return 1
@@ -804,6 +822,7 @@ dbtune_lifecycle_prepare_history() {
         audit_hash=$(dbtune_manifest_value "$proposal_manifest" audit_hash 2>/dev/null || printf unknown)
     fi
     {
+        printf 'schema\t1\n'
         printf 'cycle_id\t%s\n' "$cycle_id"
         printf 'target\t%s\n' "$target"
         printf 'directory_identity\t%s\n' "$expected_directory_identity"
@@ -820,6 +839,11 @@ dbtune_lifecycle_prepare_history() {
         printf 'proposal_hash\t%s\n' "$proposal_hash"
         printf 'proposal_records_hash\t%s\n' "$expected_records_hash"
         printf 'proposal_count\t%s\n' "$expected_record_count"
+        printf 'landmine_scan_hash\t%s\n' "$live_scan_hash"
+        printf 'landmine_scan_timestamp\t%s\n' "$live_scan_timestamp"
+        printf 'landmine_scan_method\t%s\n' "$live_scan_method"
+        printf 'landmine_loaded_fingerprint\t%s\n' "$loaded_fingerprint"
+        printf 'force\t%s\n' "$force"
         printf 'backup_guard\t%s\n' "$DBTUNE_APPLY_BACKUP_MODE"
         printf 'backup_source\t%s\n' "$DBTUNE_APPLY_BACKUP_SOURCE"
         printf 'backup_last_success\t%s\n' "$DBTUNE_APPLY_BACKUP_LAST_SUCCESS"
@@ -1301,6 +1325,38 @@ dbtune_lifecycle_manifest_value() {
     awk -F '\t' -v wanted="$key" '$1 == wanted {sub(/^[^\t]*\t/, ""); print; exit}' "$history/manifest.tsv"
 }
 
+dbtune_lifecycle_validate_history_manifest() {
+    local history=${1:-}
+    local manifest="$history/manifest.tsv"
+    local key count value scan_hash fingerprint
+
+    [[ -f $manifest && ! -L $manifest ]] || return 65
+    count=$(command awk -F '\t' '$1=="schema" {count++} END {print count+0}' "$manifest") || return 65
+    ((count > 0)) || return 0
+    [[ $count == 1 && $(dbtune_lifecycle_manifest_value "$history" schema) == 1 ]] || return 65
+    for key in cycle_id run_id audit_hash proposal_hash proposal_records_hash proposal_count \
+        landmine_scan_hash landmine_scan_timestamp landmine_scan_method landmine_loaded_fingerprint force; do
+        count=$(command awk -F '\t' -v wanted="$key" '$1==wanted && NF==2 {count++} END {print count+0}' "$manifest") || return 65
+        [[ $count == 1 ]] || return 65
+    done
+    [[ $(dbtune_lifecycle_manifest_value "$history" proposal_hash) =~ ^[0-9a-f]{64}$ &&
+        $(dbtune_lifecycle_manifest_value "$history" proposal_records_hash) =~ ^[0-9a-f]{64}$ &&
+        $(dbtune_lifecycle_manifest_value "$history" proposal_count) =~ ^[1-9][0-9]*$ &&
+        $(dbtune_lifecycle_manifest_value "$history" landmine_scan_timestamp) =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ &&
+        $(dbtune_lifecycle_manifest_value "$history" landmine_scan_method) =~ ^(mariadbd_print_defaults|mysqld_print_defaults)$ &&
+        $(dbtune_lifecycle_manifest_value "$history" force) =~ ^[01]$ ]] || return 65
+    scan_hash=$(dbtune_lifecycle_manifest_value "$history" landmine_scan_hash) || return 65
+    fingerprint=$(dbtune_lifecycle_manifest_value "$history" landmine_loaded_fingerprint) || return 65
+    [[ $scan_hash =~ ^[0-9a-f]{64}$ && $fingerprint =~ ^[0-9a-f]{64}$ &&
+        -f $history/loaded-defaults.tsv && ! -L $history/loaded-defaults.tsv ]] || return 65
+    [[ $(dbtune_sha256_file "$history/loaded-defaults.tsv") == "$scan_hash" &&
+        $(dbtune_loaded_defaults_fingerprint "$history/loaded-defaults.tsv") == "$fingerprint" ]] || return 65
+    value=$(dbtune_lifecycle_manifest_value "$history" run_id) || return 65
+    [[ -n $value ]] || return 65
+    value=$(dbtune_lifecycle_manifest_value "$history" audit_hash) || return 65
+    [[ -n $value ]] || return 65
+}
+
 dbtune_lifecycle_cycle_id() {
     local history=${1:-}
     local cycle_id
@@ -1310,6 +1366,7 @@ dbtune_lifecycle_cycle_id() {
         dbtune_log error "$(dbtune_printf lifecycle_history_identity_invalid "${history:-$(dbtune_msg core_value_empty)}")"
         return 65
     fi
+    dbtune_lifecycle_validate_history_manifest "$history" || return 65
     cycle_id=$(dbtune_lifecycle_manifest_value "$history" cycle_id)
     [[ -n $cycle_id ]] || cycle_id=${history##*/}
     if [[ $cycle_id != "${history##*/}" ]]; then
@@ -1801,6 +1858,7 @@ dbtune_lifecycle_read_current() {
         dbtune_log error "$(dbtune_printf lifecycle_history_invalid "${history:-$(dbtune_msg core_value_empty)}")"
         return 65
     fi
+    dbtune_lifecycle_validate_history_manifest "$history" || return 65
     printf '%s\n' "$history"
 }
 
@@ -2130,6 +2188,7 @@ dbtune_lifecycle_apply_snapshot() {
     local records=${4:-}
     local backup_evidence=${5:-}
     local target history had_original previous_state previous_current='' unmeasured=0
+    local live_scan='' live_scan_hash live_scan_timestamp live_scan_method loaded_fingerprint
     local target_topology directory_identity target_identity target_hash parent_identities
     local systemctl_command=${DBTUNE_SYSTEMCTL:-systemctl}
     local status=0
@@ -2160,7 +2219,37 @@ dbtune_lifecycle_apply_snapshot() {
         dbtune_lifecycle_reject_critical_analysis || return
     fi
 
-    history=$(dbtune_lifecycle_new_history) || return
+    live_scan=$(mktemp "$DBTUNE_STATE_DIR/.apply-landmine-scan.XXXXXX") || return 1
+    if ! dbtune_loaded_defaults_scan "$live_scan"; then
+        dbtune_log error "$(dbtune_msg lifecycle_landmine_scan_failed)"
+        rm -f "$live_scan"
+        return 65
+    fi
+    live_scan_hash=$(dbtune_sha256_file "$live_scan") || {
+        rm -f "$live_scan"
+        return 1
+    }
+    live_scan_timestamp=$(dbtune_now) || {
+        rm -f "$live_scan"
+        return 1
+    }
+    loaded_fingerprint=$(dbtune_loaded_defaults_fingerprint "$live_scan") || {
+        rm -f "$live_scan"
+        return 65
+    }
+    live_scan_method=$(command awk -F '\t' '$1=="landmine.scan.method" {print $2; exit}' "$live_scan") || {
+        rm -f "$live_scan"
+        return 65
+    }
+    if ! dbtune_loaded_defaults_assert_safe "$live_scan"; then
+        dbtune_log error "$(dbtune_msg lifecycle_landmine_critical)"
+        rm -f "$live_scan"
+        return 65
+    fi
+    history=$(dbtune_lifecycle_new_history) || {
+        rm -f "$live_scan"
+        return 1
+    }
     previous_state=$(dbtune_state_read) || return
     if [[ -r $(dbtune_lifecycle_current_file) ]]; then
         IFS= read -r previous_current <"$(dbtune_lifecycle_current_file)" || previous_current=''
@@ -2168,13 +2257,16 @@ dbtune_lifecycle_apply_snapshot() {
     if had_original=$(dbtune_lifecycle_prepare_history "$history" "$target" "$proposal" "$backup_evidence" \
         "$target_topology" "$directory_identity" "$target_identity" "$target_hash" \
         "$parent_identities" "$previous_current" "$DBTUNE_APPLY_SNAPSHOT_HASH" \
-        "$DBTUNE_APPLY_RECORDS_HASH" "$DBTUNE_APPLY_RECORD_COUNT"); then
+        "$DBTUNE_APPLY_RECORDS_HASH" "$DBTUNE_APPLY_RECORD_COUNT" "$live_scan" "$live_scan_hash" \
+        "$live_scan_timestamp" "$live_scan_method" "$loaded_fingerprint" "$force"); then
         :
     else
         status=$?
+        rm -f "$live_scan"
         dbtune_lifecycle_discard_uncommitted_history "$history" || return
         return "$status"
     fi
+    rm -f "$live_scan"
     dbtune_lifecycle_capture_baseline "$history" || {
         dbtune_log error "$(dbtune_msg lifecycle_baseline_failed)"
         return 1

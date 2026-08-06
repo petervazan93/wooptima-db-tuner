@@ -20,6 +20,7 @@ setup() {
     source "$BATS_TEST_DIRNAME/../../lib/00-header.sh"
     source "$BATS_TEST_DIRNAME/../../lib/05-i18n.sh"
     source "$BATS_TEST_DIRNAME/../../lib/10-util.sh"
+    source "$BATS_TEST_DIRNAME/../../lib/15-mariadb-safety.sh"
     source "$BATS_TEST_DIRNAME/../../lib/20-audit.sh"
 }
 
@@ -74,6 +75,8 @@ mariadb.variable.wsrep_on	OFF
 mariadb.status.uptime	86400
 mariadb.status.max_used_connections	120
 mariadb.status.key_read_requests	0
+landmine.scan.status	complete
+landmine.scan.method	mariadbd_print_defaults
 EOF
     printf '%s\t\n' mariadb.variable.log_slow_verbosity mariadb.variable.bind_address >>"$file"
 }
@@ -321,23 +324,182 @@ EOF
     done
 }
 
-@test "landmine scan applies MariaDB version gates" {
-    cat >"$DBTUNE_MYSQL_CONFIG_DIR/99-old.cnf" <<'EOF'
-[mysqld]
-innodb_change_buffering = all
-innodb_buffer_pool_instances = 8
-innodb_log_files_in_group = 2
+write_defaults_daemon() {
+    local name=$1
+    local version=$2
+    local print_status=${3:-0}
+    local stdout=${4-}
+    local stderr=${5-}
+
+    cat >"$BATS_TEST_TMPDIR/$name" <<'STUB'
+#!/usr/bin/env bash
+case $1 in
+    --version) printf '%s\n' "$STUB_VERSION" ;;
+    --print-defaults)
+        [[ -z ${STUB_STDOUT:-} ]] || printf '%b' "$STUB_STDOUT"
+        [[ -z ${STUB_STDERR:-} ]] || printf '%b' "$STUB_STDERR" >&2
+        exit "${STUB_PRINT_STATUS:-0}"
+        ;;
+    *) exit 64 ;;
+esac
+STUB
+    chmod +x "$BATS_TEST_TMPDIR/$name"
+    export STUB_VERSION="$version" STUB_PRINT_STATUS="$print_status" STUB_STDOUT="$stdout" STUB_STDERR="$stderr"
+}
+
+@test "loaded defaults catalog is the single exact landmine definition" {
+    run dbtune_landmine_catalog
+
+    [ "$status" -eq 0 ]
+    [ "$output" = $'innodb_file_format\t10.3\tcritical\treason_variable_removed_startup\ninnodb_file_format_max\t10.3\tcritical\treason_variable_removed_startup\ninnodb_buffer_pool_instances\t10.6\tcritical\treason_variable_removed_config\ninnodb_log_files_in_group\t10.6\tcritical\treason_variable_removed_config\ninnodb_change_buffering\t11.0\tcritical\treason_variable_removed_startup\ninnodb_flush_method\t11.0\twarning\treason_flush_method_deprecated' ]
+}
+
+@test "loaded defaults uses mysqld only when mariadbd is absent" {
+    rm -f "$BATS_TEST_TMPDIR/mariadbd"
+    write_defaults_daemon mysqld 'mysqld  Ver 15.1 Distrib 11.4.12-MariaDB' 0 \
+        '--innodb-change-buffering=all --unknown-valid=value\n'
+    PATH="$BATS_TEST_TMPDIR:/usr/bin:/bin"
+
+    run dbtune_loaded_defaults_scan "$BATS_TEST_TMPDIR/scan.tsv"
+
+    [ "$status" -eq 0 ]
+    [ "$(cat "$BATS_TEST_TMPDIR/scan.tsv")" = $'landmine.scan.status\tcomplete\nlandmine.scan.method\tmysqld_print_defaults\nlandmine.innodb_change_buffering.loaded\t1\nlandmine.innodb_change_buffering.severity\tcritical\nfinding.landmine.innodb_change_buffering\tcritical' ]
+}
+
+@test "loaded defaults does not hide a failing mariadbd behind mysqld" {
+    write_defaults_daemon mariadbd 'mariadbd  Ver 15.1 Distrib 11.4.12-MariaDB' 7 '' 'diagnostic only\n'
+    cp "$BATS_TEST_TMPDIR/mariadbd" "$BATS_TEST_TMPDIR/mysqld"
+    PATH="$BATS_TEST_TMPDIR:/usr/bin:/bin"
+
+    run dbtune_loaded_defaults_scan "$BATS_TEST_TMPDIR/scan.tsv"
+
+    [ "$status" -eq 69 ]
+    [ "$(cat "$BATS_TEST_TMPDIR/scan.tsv")" = $'landmine.scan.status\tfailed\nlandmine.scan.method\tmariadbd_print_defaults' ]
+}
+
+@test "loaded defaults publishes failed evidence when no daemon command is available" {
+    rm -f "$BATS_TEST_TMPDIR/mariadbd" "$BATS_TEST_TMPDIR/mysqld"
+    PATH="$BATS_TEST_TMPDIR:/usr/bin:/bin"
+
+    run dbtune_loaded_defaults_scan "$BATS_TEST_TMPDIR/scan.tsv"
+
+    [ "$status" -eq 69 ]
+    [ "$(cat "$BATS_TEST_TMPDIR/scan.tsv")" = $'landmine.scan.status\tfailed\nlandmine.scan.method\tmariadbd_print_defaults' ]
+}
+
+@test "loaded defaults accepts empty success and ignores stderr diagnostics" {
+    write_defaults_daemon mariadbd 'mariadbd  Ver 15.1 Distrib 11.4.12-MariaDB' 0 '' \
+        '--innodb-change-buffering=stderr-is-not-evidence\n'
+    PATH="$BATS_TEST_TMPDIR:/usr/bin:/bin"
+
+    run dbtune_loaded_defaults_scan "$BATS_TEST_TMPDIR/scan.tsv"
+
+    [ "$status" -eq 0 ]
+    [ "$(cat "$BATS_TEST_TMPDIR/scan.tsv")" = $'landmine.scan.status\tcomplete\nlandmine.scan.method\tmariadbd_print_defaults' ]
+    run dbtune_loaded_defaults_assert_safe "$BATS_TEST_TMPDIR/scan.tsv"
+    [ "$status" -eq 0 ]
+}
+
+@test "landmine scan normalizes exact forms collapses duplicates and applies version gates" {
+    write_defaults_daemon mariadbd 'mariadbd  Ver 15.1 Distrib 10.6.18-MariaDB' 0 \
+        'mariadbd would have been started with the following arguments:\n--innodb-buffer-pool-instances --innodb_buffer_pool_instances=8 --innodb-log-files-in-group=2 --innodb-change-buffering=all --innodb-flush-method=O_DIRECT\n'
+    PATH="$BATS_TEST_TMPDIR:/usr/bin:/bin"
+
+    run dbtune_loaded_defaults_scan "$BATS_TEST_TMPDIR/scan.tsv"
+
+    [ "$status" -eq 0 ]
+    [ "$(awk -F '\t' '$1=="landmine.innodb_buffer_pool_instances.loaded" {count++} END {print count+0}' "$BATS_TEST_TMPDIR/scan.tsv")" -eq 1 ]
+    grep -Fx $'landmine.innodb_log_files_in_group.loaded\t1' "$BATS_TEST_TMPDIR/scan.tsv"
+    ! grep -F 'innodb_change_buffering' "$BATS_TEST_TMPDIR/scan.tsv"
+    ! grep -F 'innodb_flush_method' "$BATS_TEST_TMPDIR/scan.tsv"
+}
+
+@test "landmine scan rejects malformed and control output with valid failed evidence" {
+    local payload
+
+    for payload in 'not-an-option\n' $'--innodb-change-buffering=all\t--innodb-flush-method=fsync\n' '--=value\n'; do
+        write_defaults_daemon mariadbd 'mariadbd  Ver 15.1 Distrib 11.4.12-MariaDB' 0 "$payload"
+        PATH="$BATS_TEST_TMPDIR:/usr/bin:/bin"
+
+        run dbtune_loaded_defaults_scan "$BATS_TEST_TMPDIR/scan.tsv"
+
+        [ "$status" -eq 65 ]
+        [ "$(cat "$BATS_TEST_TMPDIR/scan.tsv")" = $'landmine.scan.status\tfailed\nlandmine.scan.method\tmariadbd_print_defaults' ]
+    done
+}
+
+@test "loaded defaults ignores unused files client sections and comments" {
+    cat >"$DBTUNE_MYSQL_CONFIG_DIR/unused.cnf" <<'EOF'
+[client]
+innodb_change_buffering=all
+# --innodb-buffer-pool-instances=8
 EOF
+    write_defaults_daemon mariadbd 'mariadbd  Ver 15.1 Distrib 11.4.12-MariaDB' 0 '--max-connections=200\n'
+    PATH="$BATS_TEST_TMPDIR:/usr/bin:/bin"
 
-    run dbtune_audit_scan_landmines 10.6.18 "$DBTUNE_MYSQL_CONFIG_DIR"
-    [ "$status" -eq 0 ]
-    [[ "$output" == *'landmine.innodb_buffer_pool_instances.severity'* ]]
-    [[ "$output" == *'landmine.innodb_log_files_in_group.severity'* ]]
-    [[ "$output" != *'landmine.innodb_change_buffering.severity'* ]]
+    run dbtune_loaded_defaults_scan "$BATS_TEST_TMPDIR/scan.tsv"
 
-    run dbtune_audit_scan_landmines 11.4.12 "$DBTUNE_MYSQL_CONFIG_DIR"
     [ "$status" -eq 0 ]
-    [[ "$output" == *$'landmine.innodb_change_buffering.severity\tcritical'* ]]
+    [ "$(cat "$BATS_TEST_TMPDIR/scan.tsv")" = $'landmine.scan.status\tcomplete\nlandmine.scan.method\tmariadbd_print_defaults' ]
+}
+
+@test "landmine scan tri-state makes incomplete audit evidence partial" {
+    local case_name expected
+
+    for case_name in complete-absent complete-loaded failed missing duplicate conflicting malformed old-config; do
+        cat >"$BATS_TEST_TMPDIR/status-audit.tsv" <<'EOF'
+mariadb.available	1
+hw.cpu_count	8
+hw.ram_bytes	17179869184
+hw.storage_class	nvme
+app.discovery_status	complete
+app.count	0
+security.grants_audited	1
+security.hostname_grant_count	0
+security.port_3306	local
+EOF
+        append_complete_mariadb_evidence "$BATS_TEST_TMPDIR/complete-audit.tsv"
+        awk -F '\t' '$1 !~ /^landmine[.]scan[.]/' "$BATS_TEST_TMPDIR/complete-audit.tsv" >>"$BATS_TEST_TMPDIR/status-audit.tsv"
+        case $case_name in
+            complete-absent)
+                printf 'landmine.scan.status\tcomplete\nlandmine.scan.method\tmariadbd_print_defaults\n' >>"$BATS_TEST_TMPDIR/status-audit.tsv"
+                expected=complete
+                ;;
+            complete-loaded)
+                printf 'landmine.scan.status\tcomplete\nlandmine.scan.method\tmariadbd_print_defaults\nlandmine.innodb_change_buffering.loaded\t1\nlandmine.innodb_change_buffering.severity\tcritical\nfinding.landmine.innodb_change_buffering\tcritical\n' >>"$BATS_TEST_TMPDIR/status-audit.tsv"
+                expected=complete
+                ;;
+            failed)
+                printf 'landmine.scan.status\tfailed\nlandmine.scan.method\tmariadbd_print_defaults\n' >>"$BATS_TEST_TMPDIR/status-audit.tsv"
+                expected=partial
+                ;;
+            missing)
+                expected=partial
+                ;;
+            duplicate)
+                printf 'landmine.scan.status\tcomplete\nlandmine.scan.status\tcomplete\nlandmine.scan.method\tmariadbd_print_defaults\n' >>"$BATS_TEST_TMPDIR/status-audit.tsv"
+                expected=partial
+                ;;
+            conflicting)
+                printf 'landmine.scan.status\tcomplete\nlandmine.scan.status\tfailed\nlandmine.scan.method\tmariadbd_print_defaults\n' >>"$BATS_TEST_TMPDIR/status-audit.tsv"
+                expected=partial
+                ;;
+            malformed)
+                printf 'landmine.scan.status\tcomplete\nlandmine.scan.method\tmariadbd_print_defaults\nlandmine.innodb_change_buffering.loaded\t2\n' >>"$BATS_TEST_TMPDIR/status-audit.tsv"
+                expected=partial
+                ;;
+            old-config)
+                printf 'config_innodb_change_buffering\tall\n' >>"$BATS_TEST_TMPDIR/status-audit.tsv"
+                expected=partial
+                ;;
+        esac
+        : >"$BATS_TEST_TMPDIR/status-apps.tsv"
+        : >"$BATS_TEST_TMPDIR/status-databases.tsv"
+
+        dbtune_audit_finalize_status "$BATS_TEST_TMPDIR/status-audit.tsv" "$BATS_TEST_TMPDIR/status-apps.tsv" "$BATS_TEST_TMPDIR/status-databases.tsv"
+
+        [ "$(awk -F '\t' '$1=="audit.section.mariadb.status" {print $2}' "$BATS_TEST_TMPDIR/status-audit.tsv")" = "$expected" ]
+    done
 }
 
 @test "hardware audit ignores unrelated NVMe and classifies the datadir HDD RAID" {
@@ -1128,6 +1290,9 @@ EOF
             *"COUNT(*) FROM information_schema.TABLES"*) printf '0\n' ;;
             *) printf '' ;;
         esac
+    }
+    dbtune_loaded_defaults_scan() {
+        printf 'landmine.scan.status\tcomplete\nlandmine.scan.method\tmariadbd_print_defaults\n' >"$1"
     }
 
     run cmd_audit --json
