@@ -39,6 +39,62 @@ file_mode() {
     fi
 }
 
+make_fast_bats_stub() {
+    local stub="$BATS_TEST_TMPDIR/bats-fast-stub"
+
+    cat >"$stub" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$STUB_FAST_LOG"
+if [[ $1 == --count ]]; then
+    printf '%s\n' "${STUB_FAST_COUNT:-8}"
+    exit 0
+fi
+printf '%s\n' '1..8'
+exit 0
+STUB
+    chmod +x "$stub"
+    printf '%s\n' "$stub"
+}
+
+@test "fast test runner rejects a missing Bats executable" {
+    run env BATS_BIN="$BATS_TEST_TMPDIR/missing-bats" \
+        "$PROJECT_ROOT/test/support/run-fast-tests.sh"
+
+    [ "$status" -eq 69 ]
+    [[ $output == *'Bats is required'* ]]
+}
+
+@test "fast test runner rejects stale selected counts before execution" {
+    local stub count
+    stub=$(make_fast_bats_stub)
+    export STUB_FAST_LOG="$BATS_TEST_TMPDIR/fast.log"
+
+    for count in 7 9; do
+        : >"$STUB_FAST_LOG"
+        run env BATS_BIN="$stub" STUB_FAST_COUNT="$count" \
+            "$PROJECT_ROOT/test/support/run-fast-tests.sh"
+        [ "$status" -eq 65 ]
+        [[ $output == *"selected $count tests; expected 8"* ]]
+        [ "$(wc -l <"$STUB_FAST_LOG" | tr -d ' ')" -eq 1 ]
+    done
+}
+
+@test "fast test runner executes the exact guarded smoke filter" {
+    local stub
+    stub=$(make_fast_bats_stub)
+    export STUB_FAST_LOG="$BATS_TEST_TMPDIR/fast.log"
+
+    run env BATS_BIN="$stub" STUB_FAST_COUNT=8 \
+        "$PROJECT_ROOT/test/support/run-fast-tests.sh"
+
+    [ "$status" -eq 0 ]
+    [ "$(wc -l <"$STUB_FAST_LOG" | tr -d ' ')" -eq 2 ]
+    grep -F -- '--count --filter ^(' "$STUB_FAST_LOG"
+    grep -F -- 'CLI help and version are always available' "$STUB_FAST_LOG"
+    grep -F -- 'runtime and POSIX installer catalogs are complete' "$STUB_FAST_LOG"
+    grep -F -- "$PROJECT_ROOT/test/unit" "$STUB_FAST_LOG"
+}
+
 @test "state initialization rejects a symlinked state directory" {
     export DBTUNE_LOG_LEVEL=error
     mkdir "$BATS_TEST_TMPDIR/real-state"
