@@ -48,6 +48,7 @@ setup() {
     source "$BATS_TEST_DIRNAME/../../lib/00-header.sh"
     source "$BATS_TEST_DIRNAME/../../lib/05-i18n.sh"
     source "$BATS_TEST_DIRNAME/../../lib/10-util.sh"
+    source "$BATS_TEST_DIRNAME/../../lib/20-audit.sh"
     source "$BATS_TEST_DIRNAME/../../lib/60-lifecycle.sh"
     source "$BATS_TEST_DIRNAME/../../lib/50-report.sh"
     dbtune_i18n_set en

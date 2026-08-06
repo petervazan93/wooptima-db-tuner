@@ -2384,7 +2384,7 @@ dbtune_lifecycle_verify_target() {
 
 dbtune_lifecycle_verify_values() {
     local proposal=${1:-}
-    local names='' separator='' name expected actual output_file query
+    local requested_names='' separator='' name expected actual output_file query
     local -A expected_values=() actual_values=()
     local failures=0 missing missing_upper
 
@@ -2394,10 +2394,10 @@ dbtune_lifecycle_verify_values() {
     while IFS=$'\t' read -r name expected; do
         [[ -n $name ]] || continue
         expected_values["$name"]=$expected
-        names+="${separator}'$name'"
+        requested_names+="${separator}'$name'"
         separator=,
     done < <(dbtune_lifecycle_config_entries "$proposal")
-    query="SELECT LOWER(VARIABLE_NAME), VARIABLE_VALUE FROM information_schema.GLOBAL_VARIABLES WHERE LOWER(VARIABLE_NAME) IN ($names)"
+    query="SELECT LOWER(VARIABLE_NAME), VARIABLE_VALUE FROM information_schema.GLOBAL_VARIABLES WHERE LOWER(VARIABLE_NAME) IN ($requested_names)"
     output_file=$(mktemp "$DBTUNE_STATE_DIR/.effective.XXXXXX") || return 1
     if ! dbtune_sql "$query" >"$output_file"; then
         rm -f "$output_file"

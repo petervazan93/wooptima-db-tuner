@@ -1038,10 +1038,10 @@ dbtune_uint64_add() {
 
 dbtune_status_snapshot_exact() {
     local raw=${1-} line key value normalized expected_key
-    local -a expected=("${@:2}")
+    local -a expected_keys=("${@:2}")
     local -A allowed=() seen=() values=()
 
-    for expected_key in "${expected[@]}"; do
+    for expected_key in "${expected_keys[@]}"; do
         allowed[$expected_key]=1
     done
     while IFS= read -r line || [[ -n $line ]]; do
@@ -1055,10 +1055,10 @@ dbtune_status_snapshot_exact() {
         seen[$normalized]=1
         values[$normalized]=$value
     done <<<"$raw"
-    for expected_key in "${expected[@]}"; do
+    for expected_key in "${expected_keys[@]}"; do
         [[ -n ${seen[$expected_key]+x} ]] || return 65
     done
-    for expected_key in "${expected[@]}"; do
+    for expected_key in "${expected_keys[@]}"; do
         printf '%s\t%s\n' "$expected_key" "${values[$expected_key]}"
     done
 }

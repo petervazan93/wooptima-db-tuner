@@ -485,7 +485,7 @@ dbtune_collect_guards() {
 
 dbtune_collect_status_snapshot() {
     local raw validated line
-    local -a values=()
+    local -a snapshot_values=()
 
     raw=$(dbtune_sql "SHOW GLOBAL STATUS WHERE Variable_name IN ('Uptime','Innodb_buffer_pool_reads','Innodb_buffer_pool_read_requests','Innodb_data_read','Handler_read_rnd_next','Created_tmp_disk_tables','Created_tmp_tables','Threads_running','Threads_connected','Qcache_hits','Com_select','Innodb_log_waits','Innodb_buffer_pool_wait_free');") || return
     validated=$(dbtune_status_snapshot_exact "$raw" uptime innodb_buffer_pool_reads \
@@ -493,9 +493,9 @@ dbtune_collect_status_snapshot() {
         created_tmp_disk_tables created_tmp_tables threads_running threads_connected \
         qcache_hits com_select innodb_log_waits innodb_buffer_pool_wait_free) || return 65
     while IFS=$'\t' read -r _ line; do
-        values+=("$line")
+        snapshot_values+=("$line")
     done <<<"$validated"
-    (IFS=$'\t'; printf '%s\n' "${values[*]}")
+    (IFS=$'\t'; printf '%s\n' "${snapshot_values[*]}")
 }
 
 dbtune_collect_cpu_snapshot() {
