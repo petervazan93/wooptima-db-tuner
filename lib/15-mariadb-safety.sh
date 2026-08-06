@@ -44,18 +44,24 @@ dbtune_loaded_defaults_scan() {
         method=mysqld_print_defaults
     fi
 
-    stdout_file=$(mktemp "${TMPDIR:-/tmp}/dbtune-loaded-defaults-out.XXXXXX") || return 1
+    stdout_file=$(mktemp "${TMPDIR:-/tmp}/dbtune-loaded-defaults-out.XXXXXX") || {
+        dbtune_loaded_defaults_publish_failed "$output" "$method" || return 1
+        return 69
+    }
     stderr_file=$(mktemp "${TMPDIR:-/tmp}/dbtune-loaded-defaults-err.XXXXXX") || {
         rm -f "$stdout_file"
-        return 1
+        dbtune_loaded_defaults_publish_failed "$output" "$method" || return 1
+        return 69
     }
     snapshot=$(mktemp "${TMPDIR:-/tmp}/dbtune-loaded-defaults-snapshot.XXXXXX") || {
         rm -f "$stdout_file" "$stderr_file"
-        return 1
+        dbtune_loaded_defaults_publish_failed "$output" "$method" || return 1
+        return 69
     }
     chmod 600 "$stdout_file" "$stderr_file" "$snapshot" || {
         rm -f "$stdout_file" "$stderr_file" "$snapshot"
-        return 1
+        dbtune_loaded_defaults_publish_failed "$output" "$method" || return 1
+        return 69
     }
 
     if ! version_output=$("$daemon" --version 2>"$stderr_file"); then
@@ -124,10 +130,11 @@ dbtune_loaded_defaults_scan() {
     return "$status"
 }
 
-dbtune_loaded_defaults_validate() {
+dbtune_loaded_defaults_normalize() {
     local file=${1:-}
     local embedded=${2:-snapshot}
-    local key value rest name status='' method='' severity _reason
+    local line key value name status='' method='' severity _reason
+    local -a records=()
     local -A known=() severities=() seen=() loaded=() evidence_severity=() findings=()
 
     [[ -r $file ]] || return 65
@@ -135,14 +142,23 @@ dbtune_loaded_defaults_validate() {
         known["$name"]=1
         severities["$name"]=$severity
     done < <(dbtune_landmine_catalog)
-    while IFS=$'\t' read -r key value rest || [[ -n ${key:-} ]]; do
-        value=${value%$'\r'}
+    while IFS= read -r line || [[ -n $line ]]; do
+        if [[ $line != *$'\t'* ]]; then
+            if [[ $embedded == embedded && $line != landmine.* && $line != finding.landmine.* ]]; then
+                continue
+            fi
+            return 65
+        fi
+        key=${line%%$'\t'*}
+        value=${line#*$'\t'}
         if [[ $key != landmine.* && $key != finding.landmine.* ]]; then
             [[ $embedded == embedded ]] && continue
             return 65
         fi
-        [[ -n $key && -z $rest && -z ${seen[$key]+x} ]] || return 65
+        [[ -n $key && $key != *[[:cntrl:]]* && $value != *[[:cntrl:]]* &&
+            -z ${seen[$key]+x} ]] || return 65
         seen["$key"]=1
+        records+=("$key"$'\t'"$value")
         case $key in
             landmine.scan.status)
                 [[ $value == complete || $value == failed ]] || return 65
@@ -181,17 +197,22 @@ dbtune_loaded_defaults_validate() {
             return 65
         fi
     done
+    printf '%s\n' "${records[@]}"
+}
+
+dbtune_loaded_defaults_validate() {
+    dbtune_loaded_defaults_normalize "${1:-}" "${2:-snapshot}" >/dev/null
 }
 
 dbtune_loaded_defaults_assert_safe() {
     local file=${1:-}
     local embedded=${2:-snapshot}
-    local name _gate severity _reason
+    local normalized name _gate severity _reason
 
-    dbtune_loaded_defaults_validate "$file" "$embedded" || return 65
+    normalized=$(dbtune_loaded_defaults_normalize "$file" "$embedded") || return 65
     while IFS=$'\t' read -r name _gate severity _reason; do
         [[ $severity == critical ]] || continue
-        if command awk -F '\t' -v key="landmine.$name.loaded" '$1==key && $2=="1" {found=1} END {exit !found}' "$file"; then
+        if command awk -F '\t' -v key="landmine.$name.loaded" '$1==key && $2=="1" {found=1} END {exit !found}' <<<"$normalized"; then
             return 65
         fi
     done < <(dbtune_landmine_catalog)
@@ -199,8 +220,9 @@ dbtune_loaded_defaults_assert_safe() {
 
 dbtune_loaded_defaults_fingerprint() {
     local file=${1:-}
+    local normalized
 
-    dbtune_loaded_defaults_validate "$file" "${2:-snapshot}" || return 65
+    normalized=$(dbtune_loaded_defaults_normalize "$file" "${2:-snapshot}") || return 65
     command awk -F '\t' '
         $1 ~ /^landmine[.][a-z0-9_]+[.]loaded$/ && $2=="1" {
             name=$1
@@ -215,5 +237,5 @@ dbtune_loaded_defaults_fingerprint() {
             severity[name]=$2
         }
         END {for (name in loaded) print name "\t" severity[name]}
-    ' "$file" | LC_ALL=C sort | dbtune_sha256_stream
+    ' <<<"$normalized" | LC_ALL=C sort | dbtune_sha256_stream
 }

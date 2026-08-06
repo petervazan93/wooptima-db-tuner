@@ -400,6 +400,33 @@ STUB
     [ "$status" -eq 0 ]
 }
 
+@test "loaded defaults exact contract rejects CRLF in validation assertion and fingerprint" {
+    local validate_status assert_status fingerprint_status
+
+    printf 'landmine.scan.status\tcomplete\r\nlandmine.scan.method\tmariadbd_print_defaults\r\nlandmine.innodb_change_buffering.loaded\t1\r\nlandmine.innodb_change_buffering.severity\tcritical\r\nfinding.landmine.innodb_change_buffering\tcritical\r\n' \
+        >"$BATS_TEST_TMPDIR/crlf-scan.tsv"
+
+    run dbtune_loaded_defaults_validate "$BATS_TEST_TMPDIR/crlf-scan.tsv"
+    validate_status=$status
+    run dbtune_loaded_defaults_assert_safe "$BATS_TEST_TMPDIR/crlf-scan.tsv"
+    assert_status=$status
+    run dbtune_loaded_defaults_fingerprint "$BATS_TEST_TMPDIR/crlf-scan.tsv"
+    fingerprint_status=$status
+
+    [ "$validate_status $assert_status $fingerprint_status" = '65 65 65' ]
+}
+
+@test "landmine scan publishes failed evidence when helper TMPDIR is unavailable" {
+    write_defaults_daemon mariadbd 'mariadbd  Ver 15.1 Distrib 11.4.12-MariaDB' 0 ''
+    PATH="$BATS_TEST_TMPDIR:/usr/bin:/bin"
+    TMPDIR="$BATS_TEST_TMPDIR/missing/helpers"
+
+    run dbtune_loaded_defaults_scan "$BATS_TEST_TMPDIR/scan.tsv"
+
+    [ "$status" -eq 69 ]
+    [ "$(cat "$BATS_TEST_TMPDIR/scan.tsv")" = $'landmine.scan.status\tfailed\nlandmine.scan.method\tmariadbd_print_defaults' ]
+}
+
 @test "landmine scan normalizes exact forms collapses duplicates and applies version gates" {
     write_defaults_daemon mariadbd 'mariadbd  Ver 15.1 Distrib 10.6.18-MariaDB' 0 \
         'mariadbd would have been started with the following arguments:\n--innodb-buffer-pool-instances --innodb_buffer_pool_instances=8 --innodb-log-files-in-group=2 --innodb-change-buffering=all --innodb-flush-method=O_DIRECT\n'
