@@ -39,6 +39,79 @@ file_mode() {
     fi
 }
 
+make_fast_bats_stub() {
+    local stub="$BATS_TEST_TMPDIR/bats-fast-stub"
+
+    cat >"$stub" <<'STUB'
+#!/usr/bin/env bash
+{
+    printf '%s\0' "$@"
+    printf '\0'
+} >>"$STUB_FAST_LOG"
+if [[ $1 == --count ]]; then
+    printf '%s\n' "${STUB_FAST_COUNT:-8}"
+    exit 0
+fi
+printf '%s\n' '1..8'
+exit 0
+STUB
+    chmod +x "$stub"
+    printf '%s\n' "$stub"
+}
+
+fast_test_filter() {
+    printf '%s\n' '^(CLI help and version are always available|delta metrics use counter differences|loaded defaults catalog is the single exact landmine definition|audit effective variables exactly cover the rules proposal contract|strict proposal grammar emits canonical records only after complete validation|apply rejects an unknown live variable before writing|installer rejects an unsupported interface language before trust checks|runtime and POSIX installer catalogs are complete)$'
+}
+
+@test "fast test runner rejects a missing Bats executable" {
+    run env BATS_BIN="$BATS_TEST_TMPDIR/missing-bats" \
+        "$PROJECT_ROOT/test/support/run-fast-tests.sh"
+
+    [ "$status" -eq 69 ]
+    [[ $output == *'Bats is required'* ]]
+}
+
+@test "fast test runner rejects stale selected counts before execution" {
+    local stub count expected expected_filter
+    stub=$(make_fast_bats_stub)
+    export STUB_FAST_LOG="$BATS_TEST_TMPDIR/fast.log"
+    expected="$BATS_TEST_TMPDIR/fast-expected.log"
+    expected_filter=$(fast_test_filter)
+    {
+        printf '%s\0' --count --filter "$expected_filter" "$PROJECT_ROOT/test/unit"
+        printf '\0'
+    } >"$expected"
+
+    for count in 7 9; do
+        : >"$STUB_FAST_LOG"
+        run env BATS_BIN="$stub" STUB_FAST_COUNT="$count" \
+            "$PROJECT_ROOT/test/support/run-fast-tests.sh"
+        [ "$status" -eq 65 ]
+        [[ $output == *"selected $count tests; expected 8"* ]]
+        cmp "$expected" "$STUB_FAST_LOG"
+    done
+}
+
+@test "fast test runner executes the exact guarded smoke filter" {
+    local stub expected expected_filter
+    stub=$(make_fast_bats_stub)
+    export STUB_FAST_LOG="$BATS_TEST_TMPDIR/fast.log"
+    expected="$BATS_TEST_TMPDIR/fast-expected.log"
+    expected_filter=$(fast_test_filter)
+    {
+        printf '%s\0' --count --filter "$expected_filter" "$PROJECT_ROOT/test/unit"
+        printf '\0'
+        printf '%s\0' --filter "$expected_filter" "$PROJECT_ROOT/test/unit"
+        printf '\0'
+    } >"$expected"
+
+    run env BATS_BIN="$stub" STUB_FAST_COUNT=8 \
+        "$PROJECT_ROOT/test/support/run-fast-tests.sh"
+
+    [ "$status" -eq 0 ]
+    cmp "$expected" "$STUB_FAST_LOG"
+}
+
 @test "state initialization rejects a symlinked state directory" {
     export DBTUNE_LOG_LEVEL=error
     mkdir "$BATS_TEST_TMPDIR/real-state"

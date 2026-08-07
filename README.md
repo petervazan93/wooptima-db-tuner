@@ -211,13 +211,15 @@ The v0.4.1 executable and installer default to English. Slovak is selected expli
 ## Development
 
 ```bash
+make fast
 make build
 make check
 make test
+make test-timing
 make integration
 ```
 
-`make check` validates shell syntax and uses ShellCheck when available. `make test` builds the single `dist/dbtune` artifact and runs the Bats unit suite when Bats is installed. Docker integration exercises the real artifact against MariaDB 10.6 and 11.4; unavailable Docker is a failure when integration is required by CI.
+`make fast` is an eight-test local smoke gate. `make check` validates shell syntax and uses ShellCheck when available. `make test` builds the single `dist/dbtune` artifact and runs the Bats unit suite when Bats is installed. `make test-timing` runs the complete timed unit suite. Full unit and integration gates remain required before review and release. Docker integration exercises the real artifact against MariaDB 10.6 and 11.4; unavailable Docker is a failure when integration is required by CI.
 
 ## Security
 
