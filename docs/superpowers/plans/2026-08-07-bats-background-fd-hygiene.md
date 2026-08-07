@@ -4,16 +4,16 @@
 
 **Goal:** Make the complete Bats suite terminate reliably on GitHub Actions after all tests pass by preventing background test jobs from inheriting formatter-pipe descriptors.
 
-**Architecture:** A test-only support helper enumerates and closes open non-standard descriptors inside each background subshell before the command under test starts. The four existing background launch sites retain their PID, output, lock, and exit-status assertions; production code, `make test`, and CI test selection remain unchanged.
+**Architecture:** A test-only support helper enumerates and closes open non-standard descriptors inside each background subshell before the command under test starts. Lock FD validation uses `BASHPID` so Linux procfs resolves descriptors opened by that subshell rather than same-numbered parent descriptors. The four existing background launch sites retain their PID, output, lock, and exit-status assertions; `make test` and CI test selection remain unchanged.
 
 **Tech Stack:** Bash 4+, Bats 1.10+, GNU/Linux GitHub Actions, macOS local test environment.
 
 ## Global Constraints
 
-- Modify test code only; do not change production libraries, `Makefile`, or workflow structure.
+- Modify test code plus the current-process procfs lookup in `dbtune_open_state_lock`; do not change other production behavior, `Makefile`, or workflow structure.
 - Preserve descriptors 0, 1, and 2, exclude Bash-reserved descriptor 255, and avoid probing closed descriptors individually under Bats' DEBUG trap.
 - Apply the helper to all four explicit background launches in the unit suite.
-- Preserve existing `wait`, `kill -0`, marker, lock, output-file, and state assertions; marker polling may allow up to 10 seconds for CI startup and must break immediately on success.
+- Preserve existing `wait`, `kill -0`, lock, output-file, and state assertions.
 - Keep `make test` as one complete `bats test/unit` invocation.
 - The two hanging PR #49 quality attempts are RED evidence; GREEN requires a fresh quality job to exit normally without cancellation or retry.
 - Do not weaken, skip, split, or time-limit the complete unit gate.
@@ -25,6 +25,7 @@
 ### Task 1: Close Inherited Bats Descriptors in Background Jobs
 
 **Files:**
+- Modify: `lib/10-util.sh:1820-1823`
 - Create: `test/support/bats-fd-hygiene.bash`
 - Modify: `test/unit/core.bats:3-15,115`
 - Modify: `test/unit/collect.bats:608-640`
@@ -153,10 +154,22 @@ apply_pid=$!
 propose_pid=$!
 ```
 
-Keep the existing `kill -0`, release-file, `wait`, state, and snapshot
-assertions around these launches. Extend only the marker polling loops from
-approximately 2 seconds to 10 seconds; each loop must still break immediately
-when its marker appears and retain the mandatory marker assertion afterward.
+Do not alter the existing polling, `kill -0`, release-file, `wait`, state, or
+snapshot assertions around these launches.
+
+In `dbtune_open_state_lock`, make Linux FD identity validation inspect the
+current Bash process:
+
+```bash
+if [[ -e /proc/$BASHPID/fd/$opened_fd ]]; then
+    fd_inode=$(dbtune_file_inode "/proc/$BASHPID/fd/$opened_fd") || fd_inode=
+else
+    fd_inode=$(dbtune_file_inode "/dev/fd/$opened_fd") || fd_inode=
+fi
+```
+
+Do not change the identity comparison, fail-closed status, or `/dev/fd`
+fallback.
 
 - [ ] **Step 6: Run the focused concurrency and helper tests**
 
@@ -165,9 +178,14 @@ Run:
 ```bash
 bats --filter 'background FD helper|stop disables activations and waits for an active tick lock|paused apply deploys its verified snapshot' \
   test/unit/core.bats test/unit/collect.bats test/unit/lifecycle.bats
+
+docker run --rm -v "$PWD:/workspace" -w /workspace ubuntu:24.04 bash -lc \
+  "apt-get update >/dev/null && apt-get install -y bats coreutils >/dev/null && \
+   bats --filter 'background FD helper|stop disables activations and waits for an active tick lock|paused apply deploys its verified snapshot' test/unit"
 ```
 
-Expected: `3/3` passes and the Bats process exits immediately.
+Expected: both native and Ubuntu 24.04 runs pass `3/3`, and each Bats process
+exits immediately.
 
 - [ ] **Step 7: Run the complete local verification gate**
 
@@ -184,14 +202,16 @@ git status --short
 
 Expected: every command exits 0, all current unit tests pass, both MariaDB
 integration versions pass, and status contains only the intended tracked
-test/support changes before commit.
+implementation, test, and documentation changes before commit.
 
 - [ ] **Step 8: Commit the FD hygiene fix**
 
 ```bash
-git add test/support/bats-fd-hygiene.bash test/unit/core.bats \
-  test/unit/collect.bats test/unit/lifecycle.bats
-git commit -m "test: close inherited FDs in background jobs"
+git add lib/10-util.sh test/support/bats-fd-hygiene.bash test/unit/core.bats \
+  test/unit/collect.bats test/unit/lifecycle.bats \
+  docs/superpowers/specs/2026-08-07-bats-background-fd-hygiene-design.md \
+  docs/superpowers/plans/2026-08-07-bats-background-fd-hygiene.md
+git commit -m "fix: validate lock FDs in current process"
 ```
 
 - [ ] **Step 9: Push and verify PR #49 CI**

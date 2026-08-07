@@ -17,11 +17,18 @@ The suite has four explicit background launches:
 - `dbtune_dispatch apply` and `dbtune_dispatch propose` in
   `test/unit/lifecycle.bats`.
 
+Closing inherited descriptors also exposes a current-process identity bug in
+`dbtune_open_state_lock`: Bash keeps `$$` bound to the parent in a subshell, so
+`/proc/$$/fd` can resolve an unrelated parent descriptor whose number was
+reused by the child. `BASHPID` identifies the process that actually opened the
+lock descriptor.
+
 ## Scope
 
-Add test-only file-descriptor hygiene to all four background launch sites.
-Do not change production code, `Makefile`, CI workflow structure, test
-selection, or application behavior.
+Add test-only file-descriptor hygiene to all four background launch sites and
+make lock descriptor identity validation inspect the current Bash process.
+Do not change `Makefile`, CI workflow structure, test selection, or lifecycle
+behavior beyond correcting that process identity lookup.
 
 ## Design
 
@@ -38,6 +45,10 @@ trap hundreds of times for descriptors that were never open. Descriptors 0, 1,
 and 2 remain available for normal command input and captured test output.
 Descriptor 255 is excluded because Bash may reserve it for script input.
 
+`dbtune_open_state_lock` uses `/proc/$BASHPID/fd/$opened_fd` on Linux and keeps
+the existing `/dev/fd/$opened_fd` fallback. In the main shell `BASHPID` equals
+`$$`; in a subshell it correctly tracks the child that opened the descriptor.
+
 Each affected test sources the helper and wraps its background command in a
 subshell:
 
@@ -48,10 +59,6 @@ subshell:
 ) >"$output_file" 2>&1 &
 pid=$!
 ```
-
-Marker polling allows up to 10 seconds for the added descriptor discovery and
-command startup on GitHub-hosted runners, while still breaking immediately on
-success. The marker assertion remains mandatory after the polling loop.
 
 The test continues to wait for the subshell PID and assert its existing
 behavior. Closing inherited Bats descriptors changes only formatter-pipe
@@ -73,8 +80,9 @@ successful tests and fail to terminate.
 Add a focused helper contract test that opens a non-standard descriptor,
 invokes the helper in a subshell, and proves that descriptor is unavailable
 while standard output still works. Run the two existing concurrency tests,
-the complete local unit suite, and required integration. The two concurrency
-tests retain hard marker assertions after their bounded startup polling.
+the complete local unit suite, and required integration. Run the focused gate
+in Ubuntu 24.04 with the distribution Bats 1.10 package to cover Linux procfs
+and subshell lock identity resolution.
 
 Push the fix to PR #49. GREEN requires both GitHub `quality` and `integration`
 jobs to complete successfully without cancellation or retry. In particular,

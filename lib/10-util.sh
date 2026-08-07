@@ -1817,8 +1817,8 @@ dbtune_open_state_lock() {
         rm -f "$temporary"
         return 1
     fi
-    if [[ -e /proc/$$/fd/$opened_fd ]]; then
-        fd_inode=$(dbtune_file_inode "/proc/$$/fd/$opened_fd") || fd_inode=
+    if [[ -e /proc/$BASHPID/fd/$opened_fd ]]; then
+        fd_inode=$(dbtune_file_inode "/proc/$BASHPID/fd/$opened_fd") || fd_inode=
     else
         fd_inode=$(dbtune_file_inode "/dev/fd/$opened_fd") || fd_inode=
     fi
