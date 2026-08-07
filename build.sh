@@ -127,7 +127,7 @@ build() {
     fi
     if [[ $profile == production ]]; then
         version_output=$(bash "$temporary" version) || version_status=$?
-        [[ $version_status == 0 && $version_output == "dbtune 0.4.1" ]] ||
+        [[ $version_status == 0 && $version_output == "dbtune 0.4.2" ]] ||
             fail "artifact version self-test failed (status $version_status)"
         for function_name in cmd_audit cmd_collect cmd_tick cmd_analyze cmd_report cmd_propose cmd_apply cmd_verify cmd_rollback cmd_status; do
             grep -q "^${function_name}()" "$temporary" || fail "artifact is missing $function_name"

@@ -357,11 +357,11 @@ fast_test_filter() {
 
     run dbtune_main version
     [ "$status" -eq 0 ]
-    [ "$output" = 'dbtune 0.4.1' ]
+    [ "$output" = 'dbtune 0.4.2' ]
 
     run env DBTUNE_VERSION=9.9.9 "$BATS_TEST_DIRNAME/../../dist/dbtune" version
     [ "$status" -eq 0 ]
-    [ "$output" = 'dbtune 0.4.1' ]
+    [ "$output" = 'dbtune 0.4.2' ]
 }
 
 @test "internal tick always exits zero" {
@@ -469,7 +469,7 @@ STUB
 
     run env DBTUNE_PROGRAM=attacker "$fixture/dist/dbtune" version
     [ "$status" -eq 0 ]
-    [ "$output" = 'dbtune 0.4.1' ]
+    [ "$output" = 'dbtune 0.4.2' ]
 
     bash_env="$BATS_TEST_TMPDIR/runtime-dump-env"
     runtime_dump="$BATS_TEST_TMPDIR/runtime-dump"
@@ -504,7 +504,7 @@ ENV
 
     run bash "$fixture/dist/dbtune" version
     [ "$status" -eq 0 ]
-    [ "$output" = 'dbtune 0.4.1' ]
+    [ "$output" = 'dbtune 0.4.2' ]
 }
 
 @test "environment cannot switch production profile or freeze sanitization" {
@@ -548,7 +548,7 @@ ENV
         exec "$ARTIFACT" version
     '
     [ "$status" -eq 0 ]
-    [ "$output" = 'dbtune 0.4.1' ]
+    [ "$output" = 'dbtune 0.4.2' ]
     [ ! -e "$marker" ]
 
     run env ARTIFACT="$fixture/dist/dbtune" bash -c '
@@ -557,7 +557,7 @@ ENV
         exec "$ARTIFACT" version
     '
     [ "$status" -eq 0 ]
-    [ "$output" = 'dbtune 0.4.1' ]
+    [ "$output" = 'dbtune 0.4.2' ]
 }
 
 @test "runtime environment contract classifies every production symbol" {
