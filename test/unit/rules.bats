@@ -44,6 +44,7 @@ bind_address	127.0.0.1
 wildcard_grants	0
 security.grants_audited	1
 security.hostname_grant_count	0
+security.remote_grant_count	0
 landmine.scan.status	complete
 landmine.scan.method	mariadbd_print_defaults
 EOF
@@ -788,6 +789,36 @@ EOF
             [ "$status" -eq 0 ]
             [ "$output" = "$expected_verdict"$'\t'"$expected_key"$'\t'"$expected_value" ]
         done
+    done
+}
+
+@test "R-SEC uses independent remote grant evidence and fails closed" {
+    local name file
+    make_audit "$BATS_TEST_TMPDIR/base.tsv"
+    make_samples "$BATS_TEST_TMPDIR/samples.tsv" 30 2 10
+
+    awk -F '\t' '$1 != "security.remote_grant_count" {print}' "$BATS_TEST_TMPDIR/base.tsv" >"$BATS_TEST_TMPDIR/remote.tsv"
+    printf 'security.remote_grant_count\t1\n' >>"$BATS_TEST_TMPDIR/remote.tsv"
+    dbtune_rules_analyze "$BATS_TEST_TMPDIR/remote.tsv" "$BATS_TEST_TMPDIR/samples.tsv" "" "" "" 10 >"$BATS_TEST_TMPDIR/remote-analysis.tsv"
+
+    run awk -F '\t' '$1=="R-SEC" {print $3 "\t" $4 "\t" $7; exit}' "$BATS_TEST_TMPDIR/remote-analysis.tsv"
+    [ "$status" -eq 0 ]
+    [[ "$output" == high$'\t'EXPOSED$'\t'*'remote_grants=1'* ]]
+
+    for name in missing malformed incomplete; do
+        file="$BATS_TEST_TMPDIR/$name.tsv"
+        awk -F '\t' '$1 != "security.grants_audited" && $1 != "security.remote_grant_count" {print}' \
+            "$BATS_TEST_TMPDIR/base.tsv" >"$file"
+        case $name in
+            missing) printf 'security.grants_audited\t1\n' >>"$file" ;;
+            malformed) printf 'security.grants_audited\t1\nsecurity.remote_grant_count\tbad\n' >>"$file" ;;
+            incomplete) printf 'security.grants_audited\t0\nsecurity.remote_grant_count\t0\n' >>"$file" ;;
+        esac
+
+        dbtune_rules_analyze "$file" "$BATS_TEST_TMPDIR/samples.tsv" "" "" "" 10 >"$file.analysis"
+        run awk -F '\t' '$1=="R-SEC" {print $3 "\t" $4; exit}' "$file.analysis"
+        [ "$status" -eq 0 ]
+        [ "$output" = medium$'\t'UNKNOWN ]
     done
 }
 

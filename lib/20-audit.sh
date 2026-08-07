@@ -1299,10 +1299,27 @@ dbtune_grant_host_classify() {
         }
         BEGIN {
             host = ARGV[1]
-            if (host == "localhost" || host == "%" || ipv4(host) || ipv4_wildcard(host) ||
+            if (tolower(host) == "localhost" || host == "%" || ipv4(host) || ipv4_wildcard(host) ||
                 ipv4_netmask(host) || ipv6(host) || ipv6_wildcard(host)) print "address"
             else print "hostname"
             exit
+        }
+    ' "$host"
+}
+
+dbtune_grant_host_is_local() {
+    local host=${1-}
+
+    [[ ${host,,} == localhost || $host == ::1 ]] && return 0
+    command awk '
+        function canonical_octet(value) {
+            return value ~ /^(0|[1-9][0-9]{0,2})$/ && value + 0 <= 255
+        }
+        BEGIN {
+            count = split(ARGV[1], parts, ".")
+            if (count != 4 || parts[1] != "127") exit 1
+            for (i = 1; i <= count; i++) if (!canonical_octet(parts[i])) exit 1
+            exit 0
         }
     ' "$host"
 }
@@ -1322,7 +1339,7 @@ dbtune_grant_hex_decode() {
 
 dbtune_audit_collect_grants() {
     local out=${1:-}
-    local grants_file='' line user_hex host_hex host class key hostname_count=0 failed=0
+    local grants_file='' line user_hex host_hex host class key hostname_count=0 remote_count=0 failed=0
     local -A seen=()
 
     if ! grants_file=$(mktemp "${TMPDIR:-/tmp}/dbtune-grants.XXXXXX") || ! chmod 600 "$grants_file"; then
@@ -1350,6 +1367,7 @@ dbtune_audit_collect_grants() {
                 break
             fi
             [[ $class != hostname ]] || hostname_count=$((hostname_count + 1))
+            dbtune_grant_host_is_local "$host" || remote_count=$((remote_count + 1))
         done <"$grants_file"
     fi
     [[ -z $grants_file ]] || rm -f "$grants_file"
@@ -1362,7 +1380,7 @@ dbtune_audit_collect_grants() {
     else
         dbtune_audit_put "$out" security.grants_audited 1
         dbtune_audit_put "$out" security.hostname_grant_count "$hostname_count"
-        dbtune_audit_put "$out" security.remote_grant_count "$hostname_count"
+        dbtune_audit_put "$out" security.remote_grant_count "$remote_count"
     fi
 }
 

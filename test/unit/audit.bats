@@ -653,7 +653,7 @@ EOF
 @test "grant host classifier accepts only exact address forms" {
     local host
     local addresses=(
-        localhost % 0.0.0.0 255.255.255.255 192.168.% 10.%
+        localhost LOCALHOST LocalHost % 0.0.0.0 255.255.255.255 192.168.% 10.%
         192.0.2.1/255.255.255.0 192.0.2.1/255.255.255.255 192.0.2.1/0.0.0.0
         2001:db8:0:0:0:0:0:1 2001:db8::1 ::1 ::ffff:192.0.2.128
         2001:db8:% ABCD:%
@@ -681,12 +681,26 @@ EOF
     done
 }
 
-@test "hostname grant collection validates and decodes exact HEX account rows" {
+@test "remote numeric grant is hostname independent but remotely exposed" {
+    dbtune_audit_sql() { printf '%s\n' $'6E756D65726963\t3139322E302E322E3130'; }
+
+    dbtune_audit_collect_platform "$BATS_TEST_TMPDIR/numeric.tsv"
+
+    grep -F $'security.grants_audited\t1' "$BATS_TEST_TMPDIR/numeric.tsv"
+    grep -F $'security.hostname_grant_count\t0' "$BATS_TEST_TMPDIR/numeric.tsv"
+    grep -F $'security.remote_grant_count\t1' "$BATS_TEST_TMPDIR/numeric.tsv"
+}
+
+@test "grant collection independently counts local wildcard netmask and hostname account hosts" {
     dbtune_audit_sql() {
         printf '%s\n' "$1" >"$BATS_TEST_TMPDIR/grants-query.sql"
         printf '%s\n' \
             $'726F6F74\t6C6F63616C686F7374' \
+            $'63617365\t4C4F43414C484F5354' \
+            $'6C6F6F70\t3132372E3235352E3235352E323535' \
+            $'6C6F6F7036\t3A3A31' \
             $'617070\t3139322E3136382E25' \
+            $'6D61736B\t3139322E302E322E312F3235352E3235352E3235352E30' \
             $'617070\t64622E6578616D706C652E636F6D' \
             $'61707032\t64622E6578616D706C652E636F6D'
     }
@@ -696,6 +710,7 @@ EOF
     grep -F 'HEX(USER), HEX(HOST)' "$BATS_TEST_TMPDIR/grants-query.sql"
     grep -F $'security.grants_audited\t1' "$BATS_TEST_TMPDIR/platform.tsv"
     grep -F $'security.hostname_grant_count\t2' "$BATS_TEST_TMPDIR/platform.tsv"
+    grep -F $'security.remote_grant_count\t4' "$BATS_TEST_TMPDIR/platform.tsv"
     run grep -F 'db.example.com' "$BATS_TEST_TMPDIR/platform.tsv"
     [ "$status" -ne 0 ]
     run grep -F 'security.remote_grant.' "$BATS_TEST_TMPDIR/platform.tsv"
@@ -720,8 +735,10 @@ EOF
 
         [ "$(awk -F '\t' '$1=="security.grants_audited" {print $2}' "$BATS_TEST_TMPDIR/$name.tsv")" = 0 ]
         [ "$(awk -F '\t' '$1=="security.hostname_grant_count" {print $2}' "$BATS_TEST_TMPDIR/$name.tsv")" = unknown ]
+        [ "$(awk -F '\t' '$1=="security.remote_grant_count" {print $2}' "$BATS_TEST_TMPDIR/$name.tsv")" = unknown ]
         [ "$(awk -F '\t' '$1=="security.grants_audited" {count++} END {print count+0}' "$BATS_TEST_TMPDIR/$name.tsv")" = 1 ]
         [ "$(awk -F '\t' '$1=="security.hostname_grant_count" {count++} END {print count+0}' "$BATS_TEST_TMPDIR/$name.tsv")" = 1 ]
+        [ "$(awk -F '\t' '$1=="security.remote_grant_count" {count++} END {print count+0}' "$BATS_TEST_TMPDIR/$name.tsv")" = 1 ]
         [[ -z $GRANT_ROWS ]] || ! grep -F "$GRANT_ROWS" "$BATS_TEST_TMPDIR/$name.tsv"
     done
 }
@@ -758,14 +775,15 @@ EOF
     done
 }
 
-@test "grant query failure emits one failed status and unknown hostname count" {
+@test "grant query failure emits one failed status and both unknown counts" {
     dbtune_audit_sql() { return 1; }
 
     dbtune_audit_collect_platform "$BATS_TEST_TMPDIR/platform.tsv"
 
     [ "$(awk -F '\t' '$1=="security.grants_audited" {print $2}' "$BATS_TEST_TMPDIR/platform.tsv")" = 0 ]
     [ "$(awk -F '\t' '$1=="security.hostname_grant_count" {print $2}' "$BATS_TEST_TMPDIR/platform.tsv")" = unknown ]
-    [ "$(awk -F '\t' '$1 ~ /^security[.](grants_audited|hostname_grant_count)$/ {count++} END {print count+0}' "$BATS_TEST_TMPDIR/platform.tsv")" = 2 ]
+    [ "$(awk -F '\t' '$1=="security.remote_grant_count" {print $2}' "$BATS_TEST_TMPDIR/platform.tsv")" = unknown ]
+    [ "$(awk -F '\t' '$1 ~ /^security[.](grants_audited|hostname_grant_count|remote_grant_count)$/ {count++} END {print count+0}' "$BATS_TEST_TMPDIR/platform.tsv")" = 3 ]
 }
 
 @test "shared database metrics cron and multisite remain app scoped" {

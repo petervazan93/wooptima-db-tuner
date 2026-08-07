@@ -724,7 +724,7 @@ dbtune_rules_analyze() {
         }
     }
 
-    function operational_rules(key_reads, backup_interval, bind, wildcard, configured, effective, backup_status, backup_source, backup_success, backup_evidence) {
+    function operational_rules(key_reads, backup_interval, bind, remote_count, configured, effective, backup_status, backup_source, backup_success, backup_evidence) {
         key_reads = ag("key_read_requests", "")
         if (!("key_read_requests" in present) || !uint64_text(key_reads))
             emit("R-MYISAM", "server", "low", "UNKNOWN", "", "", "Key_read_requests=" (key_reads == "" ? "missing" : key_reads) "; proposal_blocked=missing-or-invalid-metric", "reason_myisam_unknown")
@@ -748,12 +748,12 @@ dbtune_rules_analyze() {
             emit("R-OPENFILES", "server", "medium", "SYSTEMD-LIMIT", "", "", "configured=" configured "; effective=" effective "; LimitNOFILE=" ag("systemd_limit_nofile", "unknown"), "reason_open_files_systemd_limit")
         else emit("R-OPENFILES", "server", "info", "OK", "", "", "effective=" effective, "reason_open_files_ok")
 
-        bind = tolower(ag("bind_address", "")); wildcard = ag("hostname_grant_count", "")
-        if (ag("grants_audited", "") != "1" || !uint64_text(wildcard))
+        bind = tolower(ag("bind_address", "")); remote_count = ag("remote_grant_count", "")
+        if (ag("grants_audited", "") != "1" || !uint64_text(remote_count))
             emit("R-SEC", "server", "medium", "UNKNOWN", "", "", "grant_evidence=invalid; listener=" ag("port_3306", "unknown"), "reason_security_unknown")
-        else if (bind == "0.0.0.0" || bind == "*" || tolower(ag("port_3306", "")) == "public" || wildcard != "0")
-            emit("R-SEC", "server", "high", "EXPOSED", "", "", "bind_address=" bind "; remote_grants=" wildcard "; listener=" ag("port_3306", "unknown"), "reason_security_exposed")
-        else emit("R-SEC", "server", "info", "OK", "", "", "bind_address=" bind "; remote_grants=" wildcard, "reason_security_ok")
+        else if (bind == "0.0.0.0" || bind == "*" || tolower(ag("port_3306", "")) == "public" || remote_count != "0")
+            emit("R-SEC", "server", "high", "EXPOSED", "", "", "bind_address=" bind "; remote_grants=" remote_count "; listener=" ag("port_3306", "unknown"), "reason_security_exposed")
+        else emit("R-SEC", "server", "info", "OK", "", "", "bind_address=" bind "; remote_grants=" remote_count, "reason_security_ok")
         if (truth(ag("root_cnf_present", "")) || truth(ag("root_cnf_has_password", ag("root_cnf_plaintext_password", ""))))
             emit("R-SEC", "server", "low", "CREDENTIAL-NOTE", "", "", "root.cnf contains a managed credential", "reason_root_cnf_credential")
 
