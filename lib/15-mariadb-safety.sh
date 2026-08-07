@@ -76,6 +76,12 @@ dbtune_loaded_defaults_scan() {
     if ((status == 0)) && ! "$daemon" --print-defaults >"$stdout_file" 2>"$stderr_file"; then
         status=69
     fi
+    if ((status == 0)); then
+        if ! LC_ALL=C tr -d '\000' <"$stdout_file" >"$snapshot" ||
+            ! command cmp -s "$stdout_file" "$snapshot"; then
+            status=65
+        fi
+    fi
 
     if ((status == 0)); then
         while IFS=$'\t' read -r option gate severity _reason; do

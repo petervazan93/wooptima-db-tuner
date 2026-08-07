@@ -1091,6 +1091,9 @@ STUB
 @test "forced apply binds current audit identity without a valid proposal manifest" {
     local history expected_run_id expected_audit_hash
 
+    printf 'audit.run_id\tartifact-run\n' >>"$DBTUNE_STATE_DIR/audit.tsv"
+    dbtune_provenance_write_audit_manifest "$DBTUNE_STATE_DIR/audit-manifest.tsv" \
+        lifecycle-run "$DBTUNE_STATE_DIR/audit.tsv" "$DBTUNE_STATE_DIR/apps.tsv" "$DBTUNE_STATE_DIR/databases.tsv"
     expected_run_id=$(dbtune_manifest_value "$DBTUNE_STATE_DIR/audit-manifest.tsv" run_id)
     expected_audit_hash=$(dbtune_manifest_value "$DBTUNE_STATE_DIR/audit-manifest.tsv" audit_hash)
     rm -f "$DBTUNE_STATE_DIR/proposal-manifest.tsv"
@@ -1103,6 +1106,57 @@ STUB
     [ "$(dbtune_lifecycle_manifest_value "$history" run_id)" = "$expected_run_id" ]
     [ "$(dbtune_lifecycle_manifest_value "$history" audit_hash)" = "$expected_audit_hash" ]
     [ "$(dbtune_lifecycle_manifest_value "$history" force)" = 1 ]
+}
+
+@test "force requires an audit manifest authenticating every audit artifact" {
+    local case_name state expected_status artifact
+
+    dbtune_lifecycle_confirm_force() { :; }
+    cp "$DBTUNE_STATE_DIR/audit.tsv" "$BATS_TEST_TMPDIR/authenticated-audit.tsv"
+    cp "$DBTUNE_STATE_DIR/apps.tsv" "$BATS_TEST_TMPDIR/authenticated-apps.tsv"
+    cp "$DBTUNE_STATE_DIR/databases.tsv" "$BATS_TEST_TMPDIR/authenticated-databases.tsv"
+    cp "$DBTUNE_STATE_DIR/audit-manifest.tsv" "$BATS_TEST_TMPDIR/authenticated-audit-manifest.tsv"
+    for state in audited analyzed proposed; do
+        for case_name in absent audit-mismatch apps-mismatch databases-mismatch; do
+            cp "$BATS_TEST_TMPDIR/authenticated-audit.tsv" "$DBTUNE_STATE_DIR/audit.tsv"
+            cp "$BATS_TEST_TMPDIR/authenticated-apps.tsv" "$DBTUNE_STATE_DIR/apps.tsv"
+            cp "$BATS_TEST_TMPDIR/authenticated-databases.tsv" "$DBTUNE_STATE_DIR/databases.tsv"
+            cp "$BATS_TEST_TMPDIR/authenticated-audit-manifest.tsv" "$DBTUNE_STATE_DIR/audit-manifest.tsv"
+            reset_apply_preflight_fixture
+            printf '%s\n' "$state" >"$DBTUNE_STATE_DIR/state"
+            expected_status=65
+            case $case_name in
+                absent)
+                    rm -f "$DBTUNE_STATE_DIR/audit-manifest.tsv"
+                    expected_status=66
+                    ;;
+                audit-mismatch) artifact=audit.tsv ;;
+                apps-mismatch) artifact=apps.tsv ;;
+                databases-mismatch) artifact=databases.tsv ;;
+            esac
+            if [[ $case_name != absent ]]; then
+                printf 'stale\tevidence\n' >>"$DBTUNE_STATE_DIR/$artifact"
+            fi
+
+            run cmd_apply --force
+
+            [ "$status" -eq "$expected_status" ]
+            assert_apply_preflight_unchanged "$state"
+        done
+    done
+}
+
+@test "force revalidates audit provenance at final history preparation" {
+    dbtune_lifecycle_confirm_force() { :; }
+    printf 'original target\n' >"$DBTUNE_CONFIG_TARGET"
+    dbtune_lifecycle_after_manifest_check() {
+        printf 'stale\tevidence\n' >>"$DBTUNE_STATE_DIR/apps.tsv"
+    }
+
+    run cmd_apply --force
+
+    [ "$status" -eq 65 ]
+    assert_apply_preflight_unchanged
 }
 
 @test "rollback ignores landmine scanner failure corrupt audit and unsafe current defaults" {

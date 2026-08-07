@@ -336,7 +336,11 @@ write_defaults_daemon() {
 case $1 in
     --version) printf '%s\n' "$STUB_VERSION" ;;
     --print-defaults)
-        [[ -z ${STUB_STDOUT:-} ]] || printf '%b' "$STUB_STDOUT"
+        if [[ ${STUB_STDOUT:-} == __NUL__ ]]; then
+            printf '%b' '--max-connections=200\0\n'
+        else
+            [[ -z ${STUB_STDOUT:-} ]] || printf '%b' "$STUB_STDOUT"
+        fi
         [[ -z ${STUB_STDERR:-} ]] || printf '%b' "$STUB_STDERR" >&2
         exit "${STUB_PRINT_STATUS:-0}"
         ;;
@@ -453,6 +457,16 @@ STUB
         [ "$status" -eq 65 ]
         [ "$(cat "$BATS_TEST_TMPDIR/scan.tsv")" = $'landmine.scan.status\tfailed\nlandmine.scan.method\tmariadbd_print_defaults' ]
     done
+}
+
+@test "landmine scan rejects raw NUL output before shell parsing" {
+    write_defaults_daemon mariadbd 'mariadbd  Ver 15.1 Distrib 11.4.12-MariaDB' 0 '__NUL__'
+    PATH="$BATS_TEST_TMPDIR:/usr/bin:/bin"
+
+    run dbtune_loaded_defaults_scan "$BATS_TEST_TMPDIR/scan.tsv"
+
+    [ "$status" -eq 65 ]
+    [ "$(cat "$BATS_TEST_TMPDIR/scan.tsv")" = $'landmine.scan.status\tfailed\nlandmine.scan.method\tmariadbd_print_defaults' ]
 }
 
 @test "loaded defaults ignores unused files client sections and comments" {

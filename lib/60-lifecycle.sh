@@ -478,6 +478,7 @@ dbtune_lifecycle_check_apply_inputs() {
     if ((force == 0)); then
         dbtune_lifecycle_validate_proposal_manifest "$proposal" "$records" || return
     fi
+    dbtune_provenance_validate_audit || return
     audit=$(dbtune_path audit.tsv) || return
     if ! dbtune_loaded_defaults_assert_safe "$audit" embedded; then
         dbtune_log error "$(dbtune_msg lifecycle_landmine_audit_invalid)"
@@ -742,7 +743,7 @@ dbtune_lifecycle_prepare_history() {
     local backup_hash=interactive
     local cycle_id original_source=absent original_cycle_id=- original_cycle_history=- original_backup=absent
     local source_target source_hash source_snapshot_hash
-    local audit audit_manifest apps databases audit_file_hash apps_hash databases_hash audit_run_count audit_run_id
+    local audit_manifest
 
     cycle_id=${history##*/}
     [[ ${history%/*} == "$DBTUNE_STATE_DIR/apply" && $cycle_id =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || return 65
@@ -751,6 +752,11 @@ dbtune_lifecycle_prepare_history() {
         $live_scan_timestamp =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ &&
         $live_scan_method =~ ^(mariadbd_print_defaults|mysqld_print_defaults)$ && $force =~ ^[01]$ ]] || return 65
     [[ -f $live_scan && ! -L $live_scan && $(dbtune_sha256_file "$live_scan") == "$live_scan_hash" ]] || return 65
+    dbtune_provenance_validate_audit || return
+    audit_manifest=$(dbtune_audit_manifest_file) || return
+    run_id=$(dbtune_manifest_value "$audit_manifest" run_id) || return 65
+    audit_hash=$(dbtune_manifest_value "$audit_manifest" audit_hash) || return 65
+    [[ $run_id =~ ^[A-Za-z0-9._-]+$ && $audit_hash =~ ^[0-9a-f]{64}$ ]] || return 65
     dbtune_lifecycle_validate_target_path "$target" "$expected_topology" \
         "$expected_directory_identity" "$expected_target_identity" "$expected_target_hash" || return
     if [[ $DBTUNE_LIFECYCLE_PARENT_IDENTITIES != "$expected_parent_identities" ]]; then
@@ -812,25 +818,6 @@ dbtune_lifecycle_prepare_history() {
         dbtune_log error "$(dbtune_msg lifecycle_proposal_changed)"
         return 65
     }
-    audit=$(dbtune_path audit.tsv) || return
-    apps=$(dbtune_path apps.tsv) || return
-    databases=$(dbtune_path databases.tsv) || return
-    audit_manifest=$(dbtune_audit_manifest_file) || return
-    IFS=$'\t' read -r audit_run_count audit_run_id < <(command awk -F '\t' '
-        $1=="audit.run_id" {count++; if (count==1) value=$2}
-        END {print count+0 "\t" value}
-    ' "$audit") || return 65
-    if [[ $audit_run_count == 1 && $audit_run_id =~ ^[A-Za-z0-9._-]+$ ]]; then
-        run_id=$audit_run_id
-    else
-        run_id=$(dbtune_manifest_value "$audit_manifest" run_id 2>/dev/null || true)
-    fi
-    [[ $run_id =~ ^[A-Za-z0-9._-]+$ ]] || return 65
-    audit_file_hash=$(dbtune_sha256_file "$audit") || return
-    apps_hash=$(dbtune_sha256_file "$apps") || return
-    databases_hash=$(dbtune_sha256_file "$databases") || return
-    audit_hash=$(dbtune_provenance_audit_hash "$audit_file_hash" "$apps_hash" "$databases_hash") || return
-    [[ $audit_hash =~ ^[0-9a-f]{64}$ ]] || return 65
     {
         printf 'schema\t1\n'
         printf 'cycle_id\t%s\n' "$cycle_id"
