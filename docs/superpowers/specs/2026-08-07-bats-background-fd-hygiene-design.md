@@ -49,6 +49,10 @@ subshell:
 pid=$!
 ```
 
+Marker polling allows up to 10 seconds for the added descriptor discovery and
+command startup on GitHub-hosted runners, while still breaking immediately on
+success. The marker assertion remains mandatory after the polling loop.
+
 The test continues to wait for the subshell PID and assert its existing
 behavior. Closing inherited Bats descriptors changes only formatter-pipe
 ownership; it does not detach the process, hide its exit status, or weaken
@@ -69,7 +73,8 @@ successful tests and fail to terminate.
 Add a focused helper contract test that opens a non-standard descriptor,
 invokes the helper in a subshell, and proves that descriptor is unavailable
 while standard output still works. Run the two existing concurrency tests,
-the complete local unit suite, and required integration.
+the complete local unit suite, and required integration. The two concurrency
+tests retain hard marker assertions after their bounded startup polling.
 
 Push the fix to PR #49. GREEN requires both GitHub `quality` and `integration`
 jobs to complete successfully without cancellation or retry. In particular,

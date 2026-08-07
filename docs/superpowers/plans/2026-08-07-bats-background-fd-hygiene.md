@@ -13,7 +13,7 @@
 - Modify test code only; do not change production libraries, `Makefile`, or workflow structure.
 - Preserve descriptors 0, 1, and 2, exclude Bash-reserved descriptor 255, and avoid probing closed descriptors individually under Bats' DEBUG trap.
 - Apply the helper to all four explicit background launches in the unit suite.
-- Preserve existing `wait`, `kill -0`, lock, output-file, and state assertions.
+- Preserve existing `wait`, `kill -0`, marker, lock, output-file, and state assertions; marker polling may allow up to 10 seconds for CI startup and must break immediately on success.
 - Keep `make test` as one complete `bats test/unit` invocation.
 - The two hanging PR #49 quality attempts are RED evidence; GREEN requires a fresh quality job to exit normally without cancellation or retry.
 - Do not weaken, skip, split, or time-limit the complete unit gate.
@@ -153,8 +153,10 @@ apply_pid=$!
 propose_pid=$!
 ```
 
-Do not alter the existing polling, `kill -0`, release-file, `wait`, state, or
-snapshot assertions around these launches.
+Keep the existing `kill -0`, release-file, `wait`, state, and snapshot
+assertions around these launches. Extend only the marker polling loops from
+approximately 2 seconds to 10 seconds; each loop must still break immediately
+when its marker appears and retain the mandatory marker assertion afterward.
 
 - [ ] **Step 6: Run the focused concurrency and helper tests**
 

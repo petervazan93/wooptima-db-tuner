@@ -622,7 +622,7 @@ source_tick_dispatch() {
         cmd_tick
     ) >"$BATS_TEST_TMPDIR/tick.out" &
     tick_pid=$!
-    for _ in {1..200}; do
+    for _ in {1..1000}; do
         [[ -e $BATS_TEST_TMPDIR/tick-entered ]] && break
         sleep 0.01
     done
@@ -633,7 +633,7 @@ source_tick_dispatch() {
         cmd_collect stop
     ) >"$BATS_TEST_TMPDIR/stop.out" &
     stop_pid=$!
-    for _ in {1..200}; do
+    for _ in {1..1000}; do
         [[ -e $BATS_TEST_TMPDIR/systemctl.log ]] && grep -q 'disable --now dbtune-collect.timer' "$BATS_TEST_TMPDIR/systemctl.log" && break
         sleep 0.01
     done
