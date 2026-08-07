@@ -463,6 +463,8 @@ dbtune audit scans the effective daemon startup arguments with `mariadbd --print
 
 Interactive `--force` bypasses only measurement/analysis and proposal-manifest provenance, including its analysis-derived proposal mapping, the normal `proposed` state requirement (force permits `audited|analyzed|proposed`), and the 05:30-07:30 local window. It does not bypass strict proposal grammar and exact bytes, authenticated audit evidence, loaded-default checks, live variable-name existence, blocking findings in any present analysis, Galera, mydumper, backup, target/topology/ownership, atomic publication, daemon validation, restart, rollback, or recovery guards.
 
+Backup handling is the same with or without force. A missing artifact or a valid `status=unknown` artifact requires a separate TTY and the exact active-language phrase `I CONFIRM A RESTORABLE BACKUP` or `POTVRDZUJEM OBNOVITELNU ZALOHU`; confirmed `missing`, malformed, stale, or future evidence blocks apply instead of entering that confirmation path.
+
 ```bash
 sudo install -d -o mysql -g mysql /tmp/mdb-validate
 sudo mariadbd --validate-config --user=mysql --datadir=/tmp/mdb-validate 2>&1 \
