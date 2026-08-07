@@ -101,6 +101,13 @@ dbtune_analysis_verdict_is_valid() {
     esac
 }
 
+dbtune_analysis_verdict_can_propose() {
+    case ${1:-} in
+        CHANGE|REDUCE) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 dbtune_analysis_load() {
     local file=${1:-}
     local line header=1
@@ -951,6 +958,8 @@ dbtune_render_json() {
     dbtune_json_add_audit_value audit.section.hardware.status audit.section.hardware.status
     dbtune_json_add_audit_value audit.section.applications.status audit.section.applications.status
     dbtune_json_add_audit_value audit.section.security.status audit.section.security.status
+    dbtune_json_add_audit_value security.grants_audited security.grants_audited
+    dbtune_json_add_audit_value security.hostname_grant_count security.hostname_grant_count
     dbtune_json_add_audit_value server.hostname audit.hostname hostname host.name server.hostname
     dbtune_json_add_audit_value server.mariadb_version mariadb_version mariadb.version server.mariadb_version
     dbtune_json_add_audit_value server.os os os_version server.os
@@ -1058,15 +1067,6 @@ dbtune_cnf_comment() {
     dbtune_report_safe "${1:-}"
 }
 
-dbtune_proposal_key_is_safe() {
-    local key=${1:-}
-    [[ $key =~ ^[A-Za-z][A-Za-z0-9_-]*$ ]] && ! dbtune_is_sensitive_key "$key"
-}
-
-dbtune_proposal_value_is_safe() {
-    [[ ${1:-} =~ ^[[:alnum:]_./,:+-]+$ ]]
-}
-
 dbtune_proposal_parse() {
     local line=${1-}
     local encoded
@@ -1085,9 +1085,23 @@ dbtune_proposal_parse() {
         _dbtune_proposal_end <<<"${encoded}"$'\034_'
 }
 
+dbtune_proposal_current_validator() {
+    local proposed_key=${1:-}
+    local schema_key validator _requirement role
+    local target="mariadb.variable.$proposed_key"
+
+    while IFS=$'\t' read -r schema_key validator _requirement role; do
+        if [[ $schema_key == "$target" && $role == proposal ]]; then
+            printf '%s\n' "$validator"
+            return 0
+        fi
+    done < <(dbtune_audit_mariadb_evidence_schema)
+    return 1
+}
+
 dbtune_proposals_load() {
     local audit_file=${1:-}
-    local line canonical current index
+    local line canonical current index validator
     local -A seen=()
 
     [[ -r $audit_file ]] || return 66
@@ -1095,6 +1109,11 @@ dbtune_proposals_load() {
     if [[ ${DBTUNE_SERVER_SUPPORT:-supported} == unsupported ]]; then
         for line in "${DBTUNE_ANALYSIS_LINES[@]}"; do
             dbtune_analysis_parse "$line" || return 65
+            if ! dbtune_analysis_verdict_can_propose "$DBTUNE_ANALYSIS_VERDICT" &&
+                [[ -n $DBTUNE_ANALYSIS_PROPOSED_KEY || -n $DBTUNE_ANALYSIS_PROPOSED_VALUE ]]; then
+                dbtune_log error "$(dbtune_printf proposal_verdict_fields "$DBTUNE_ANALYSIS_RULE_ID" "$DBTUNE_ANALYSIS_VERDICT")"
+                return 65
+            fi
             if [[ -n $DBTUNE_ANALYSIS_PROPOSED_KEY || -n $DBTUNE_ANALYSIS_PROPOSED_VALUE ]]; then
                 dbtune_log error "$(dbtune_msg proposal_unsupported_analysis)"
                 return 65
@@ -1105,6 +1124,11 @@ dbtune_proposals_load() {
     for index in "${!DBTUNE_ANALYSIS_LINES[@]}"; do
         line=${DBTUNE_ANALYSIS_LINES[$index]}
         dbtune_analysis_parse "$line" || return 65
+        if ! dbtune_analysis_verdict_can_propose "$DBTUNE_ANALYSIS_VERDICT" &&
+            [[ -n $DBTUNE_ANALYSIS_PROPOSED_KEY || -n $DBTUNE_ANALYSIS_PROPOSED_VALUE ]]; then
+            dbtune_log error "$(dbtune_printf proposal_verdict_fields "$DBTUNE_ANALYSIS_RULE_ID" "$DBTUNE_ANALYSIS_VERDICT")"
+            return 65
+        fi
         if [[ -z $DBTUNE_ANALYSIS_PROPOSED_KEY && -z $DBTUNE_ANALYSIS_PROPOSED_VALUE ]]; then
             continue
         fi
@@ -1126,6 +1150,17 @@ dbtune_proposals_load() {
         if [[ -z $current || ${current,,} == unknown || ${current,,} == unresolved ]]; then
             dbtune_log error "$(dbtune_printf proposal_current_unknown "$canonical")"
             return 65
+        fi
+        validator=$(dbtune_proposal_current_validator "$canonical" 2>/dev/null || true)
+        if [[ -z $validator ]] || ! dbtune_audit_mariadb_evidence_valid "$validator" "$current"; then
+            dbtune_log error "$(dbtune_printf proposal_current_invalid "$canonical")"
+            return 65
+        fi
+        if [[ $validator == bool ]]; then
+            case ${current^^} in
+                ON|1) current=1 ;;
+                OFF|0) current=0 ;;
+            esac
         fi
         seen["$canonical"]=1
         line=$(printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s' \
@@ -1176,11 +1211,9 @@ dbtune_render_proposal_header() {
         '# innodb_max_dirty_pages_pct = 60' \
         '# innodb_max_dirty_pages_pct_lwm = 10' \
         '# innodb_lock_wait_timeout = 30' \
-        '# skip_name_resolve = 1' \
         '# thread_cache_size = 64' \
         '# tmp_table_size = 64M' \
         '# max_heap_table_size = 64M' \
-        '# key_buffer_size = 32M' \
         '# table_definition_cache = 2000' \
         '# slow_query_log = 1' \
         '# slow_query_log_file = /var/log/mysql/slow.log' \

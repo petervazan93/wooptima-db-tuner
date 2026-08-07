@@ -83,12 +83,16 @@ The rules engine combines those samples with the current MariaDB variables, data
 | Buffer pool | Starts from `min((dataset + growth180) x 1.3, RAM x 0.5)`, rounds in 256 MiB steps, applies the p05 available-memory guard with `max(1 GiB, RAM x 0.1)` reserved, and never proposes an automatic shrink. |
 | Maximum connections | Uses `max(100, ceil(workers x 1.25 + 20), ceil(measured_peak x 1.25))`, where workers are summed PHP-FPM limits and the peak includes measured concurrent connections. |
 | Storage I/O matrix | Maps NVMe to `2000 / 6000 / 8 / 0`, SSD/SATA to `1000 / 2000 / 4 / 0`, and HDD to `200 / 400 / 4 / 1` for I/O capacity, capacity maximum, each read/write thread count, and flush neighbors. |
-| Query cache | Requires the configured minimum of active query-cache windows, 288 by default. It proposes disabling both type and size when p50 hit rate is below 20% **or** p95 running threads is above 8; otherwise it keeps the current setting. |
+| Query cache | Uses `100 * Qcache_hits_delta / Com_select_delta`, never `Qcache_hits / (Qcache_hits + Com_select)`. It requires the configured minimum of active windows (`com_select_delta > 0`), 288 by default. It proposes disabling both type and size when p50 hit rate is below 20% **or** p95 running threads is above 8; otherwise it keeps the current setting. |
 | Redo log buffer | Selects 64 MiB when any valid sampled log wait exists; otherwise selects 32 MiB. |
 | Redo log file | Selects 1 GiB when the dataset is above 10 GiB; otherwise selects 512 MiB. |
 | Durability | When binary logging is disabled, may propose `innodb_flush_log_at_trx_commit=1`; `innodb_doublewrite=1` remains the pinned durability target. |
 
 Some collected metrics are diagnostic only. A value becomes proposal-driving evidence only where an executable rule consumes it. An unsupported MariaDB family blocks all server proposals; an unknown required current value or conflicting evidence blocks the affected key; malformed, degraded, and restart windows are excluded; and insufficient valid evidence prevents evidence-dependent changes.
+
+Status counters are accepted only as canonical decimal uint64 values from `0` through `18446744073709551615`; signs, decimals, leading zeroes, duplicates, omissions, unexpected rows, and overflow are rejected without numeric coercion. The collector computes exact differences, including above AWK's exact-integer range. Any decrease in a cumulative status counter or CPU ticks yields `degraded_counter_reset`; impossible relationships yield `degraded_counter_inconsistent`: buffer-pool reads may not exceed read requests, disk temporary tables may not exceed all temporary tables, and query-cache hits may not exceed `Com_select`.
+
+The current 20-column sample schema stores `com_select_delta`, the query-cache denominator, plus the measured monotonic `interval_seconds` and one of `ok`, `degraded_interval`, `degraded_counter_reset`, `degraded_counter_inconsistent`, or `degraded_restart_identity`. A restart is established from the mariadbd PID and `/proc` start-time identity, not uptime alone; an identified restart sets `restart_flag=1` and zeroes deltas. Every non-`ok` or restart row is excluded from proposal evidence. Active v0.4.1 20-column files using `qcache_queries_delta` and legacy 17-column files are never appended or migrated: stop collection and start a fresh audit and collection cycle. Existing apply and rollback history remains usable.
 
 <details>
 <summary><strong>All 29 version-gated proposal keys</strong></summary>
@@ -121,7 +125,7 @@ audit -> collect -> analyze -> report -> propose -> apply -> verify
 | `collect` | Samples workload behavior for 7 days by default and preserves the selected interface language for unattended completion. |
 | `analyze` | Evaluates valid samples and current values against the versioned tuning rules. |
 | `report` / `propose` | Produces operator-reviewable findings, read-only diagnostic actions, and a hash-bound CNF proposal. |
-| `apply` | Runs pre-publication live-value, provenance, backup, target, and topology checks; atomically publishes the candidate, then runs daemon configuration validation. A validation failure restores the exact prior target or absent topology, or enters recovery if restoration cannot complete. |
+| `apply` | Runs pre-publication live-variable-name, provenance, backup, target, topology, and loaded-default checks; captures a baseline, atomically publishes the candidate, then runs daemon configuration validation. A validation failure restores the exact prior target or absent topology, or enters recovery if restoration cannot complete. |
 | `verify` / `rollback` | Checks the deployed snapshot after restart or restores the prior filesystem state without requiring SQL. |
 
 Every successful audit creates a new `run_id`, archives the previous active cycle, and invalidates its downstream measurement and proposal artifacts. Existing apply and recovery history remains available.
@@ -145,8 +149,11 @@ An authoritative audit requires complete `mariadb`, `hardware`, `applications`, 
 - **Bind recommendations to evidence.** Audit, sample, analysis, and proposal hashes prevent mixing artifacts across runs or changing a reviewed proposal before normal apply.
 - **Require measurements for normal apply.** The normal path expects state `proposed`, at least 288 valid samples, and a matching proposal manifest.
 - **Treat backup status independently.** Fresh authoritative backup evidence is checked at apply time. Confirmed missing, stale, future, or malformed evidence blocks apply; only an absent artifact or a valid `unknown` artifact can enter a separate exact TTY confirmation path.
-- **Keep hard stops in force mode.** `--force` can bypass the measurement/analysis-manifest requirement and the local time window, but not live-value validation, Galera, mydumper, backup, target, configuration-validation, or rollback guards.
-- **Publish atomically, then validate and recover.** Before publication, apply checks ownership, modes, links, parent identity, target topology, live values, provenance, and backup evidence. It atomically publishes the complete candidate with Linux rename primitives, then runs daemon configuration validation. A validation failure uses the same guarded atomic path to restore the exact prior target or absent topology; if restoration or bookkeeping cannot complete, durable intent and recovery state preserve the recovery path.
+- **Keep hard stops in force mode.** Interactive `--force` can bypass only measurement/analysis and proposal-manifest provenance, including its analysis-derived proposal mapping, the normal `proposed` state requirement (it permits `audited`, `analyzed`, or `proposed`), and the 05:30-07:30 local time window. It cannot bypass strict proposal grammar and its exact snapshot, authenticated audit provenance, loaded-default scans, live variable-name existence, blocking findings in any present analysis, Galera, mydumper, backup, target/topology/ownership, atomic publication, daemon validation, restart, rollback, or recovery guards.
+- **Scan the daemon's effective startup arguments.** Audit obtains loaded options from `mariadbd --print-defaults`, falling back to `mysqld --print-defaults` only when `mariadbd` is absent. Apply requires complete safe audit evidence and performs a final fresh scan immediately before creating forward apply history and mutation intent. Failed scans and loaded critical removed options block normal and forced apply.
+- **Keep recovery independent.** Rollback and crash recovery never run or depend on the current audit or loaded-default scanner. Old apply/rollback history remains usable; new history additionally binds the final scan snapshot, hash, method, timestamp, and loaded-option fingerprint.
+- **Require complete grants before `skip_name_resolve`.** The rule can propose enabling it only when the complete `mysql.user` account-host result was decoded and validated, `security.grants_audited=1`, and `security.hostname_grant_count=0`. Missing, duplicate, malformed, or hostname-dependent evidence blocks the change.
+- **Publish atomically, then validate and recover.** Before publication, apply checks ownership, modes, links, parent identity, target topology, live variable names, provenance, and backup evidence, then captures the health baseline. It atomically publishes the complete candidate with Linux rename primitives, then runs daemon configuration validation. A validation failure uses the same guarded atomic path to restore the exact prior target or absent topology; if restoration or bookkeeping cannot complete, durable intent and recovery state preserve the recovery path.
 - **Isolate daemon validation output from `mysql`.** When `--validate-config` is available, configuration validation uses a `root:mysql` mode `0710` parent and keeps probe and validation logs as root-owned mode `0600` files. Only its dedicated MariaDB validation datadir is owned by `mysql:mysql` and writable at mode `0700`. The fallback keeps the root-owned capture workspace and does not create a mysql-writable datadir.
 - **Make restart explicit.** Apply does not restart MariaDB unless `--restart` is supplied. The normal RunCloud workflow uses a manual panel restart followed by `verify --post` and later `verify --24h`.
 
@@ -168,6 +175,12 @@ Read the full operational contract in the [rollout runbook](docs/RUNBOOK.md) bef
 
 CI coverage does not imply that every Ubuntu release or every MariaDB 11.x minor version has been integration-tested. Galera/wsrep nodes are detected and blocked from apply.
 
+### Production artifact contract
+
+Source modules, production, and integration artifacts embed immutable `source-test`, `production`, and `integration-test` profiles respectively; the environment cannot switch them. The production artifact is executable with Bash but deliberately cannot be sourced. Its complete operator `DBTUNE_*` allowlist is `DBTUNE_UI_LANG`, `DBTUNE_STATE_DIR`, `DBTUNE_CONFIG_TARGET`, `DBTUNE_CONFIG_ALLOWED_DIR`, `DBTUNE_ROOT_CNF`, `DBTUNE_LOG_LEVEL`, and `DBTUNE_MAX_BACKUP_AGE_SECONDS`. It removes every other exported `DBTUNE_*` value, including test command/path, authentication, clock, ownership, fault-injection, and sample-threshold overrides, before dispatch.
+
+The default build and release workflow produce only the production profile. Integration uses the separate `dist/dbtune-integration` artifact without changing production hashes; the installer and release gate reject source-test or integration-test artifacts.
+
 ## Pinned installation
 
 Prerequisites: Linux, Bash 4+, `curl`, `gh`, and permission to write the installation destination.
@@ -179,7 +192,7 @@ curl -fsSL https://github.com/petervazan93/wooptima-db-tuner/releases/download/v
 > [!WARNING]
 > This pipeline trusts the remote `install.sh` before it verifies the downloaded `dbtune` artifact. For the verify-before-run procedure that authenticates and lets you inspect `install.sh` first, follow [Security: Installation](SECURITY.md#installation).
 
-This command installs the published `v0.4.1` release. For a privileged destination, the installer places the artifact in a root-owned mode `0644` non-executable staging inode, then verifies its SHA-256 checksum, GitHub attestation, fixed upstream repository and owner, signer workflow, exact release source ref, Bash syntax, and embedded version. It changes that same inode to mode `0755`, directly executes the staged path for its executable version smoke check, and atomically publishes the same inode only after all checks pass. It does not run an audit or change MariaDB.
+This command installs the published `v0.4.1` release. For a privileged destination, the installer places the artifact in a root-owned mode `0644` non-executable staging inode, then verifies its SHA-256 checksum, GitHub attestation, fixed upstream repository and owner, signer workflow, exact release source ref, Bash syntax, embedded production profile, and embedded version. It rejects source-test and integration-test profiles. It changes that same inode to mode `0755`, directly executes the staged path for its executable version smoke check, and atomically publishes the same inode only after all checks pass. It does not run an audit or change MariaDB.
 
 ## CLI
 
@@ -211,13 +224,15 @@ The v0.4.1 executable and installer default to English. Slovak is selected expli
 ## Development
 
 ```bash
+make fast
 make build
 make check
 make test
+make test-timing
 make integration
 ```
 
-`make check` validates shell syntax and uses ShellCheck when available. `make test` builds the single `dist/dbtune` artifact and runs the Bats unit suite when Bats is installed. Docker integration exercises the real artifact against MariaDB 10.6 and 11.4; unavailable Docker is a failure when integration is required by CI.
+`make fast` is an eight-test local smoke gate. `make check` validates shell syntax and uses ShellCheck when available. `make test` builds the single `dist/dbtune` artifact and runs the Bats unit suite when Bats is installed. `make test-timing` runs the complete timed unit suite. Full unit and integration gates remain required before review and release. Docker integration exercises the real artifact against MariaDB 10.6 and 11.4; unavailable Docker is a failure when integration is required by CI.
 
 ## Security
 

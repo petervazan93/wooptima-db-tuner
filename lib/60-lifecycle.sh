@@ -314,15 +314,67 @@ dbtune_lifecycle_manifest_value_from() {
     awk -F '\t' -v wanted="$key" '$1==wanted {print $2; found=1; exit} END {if (!found) exit 1}' "$manifest"
 }
 
+dbtune_lifecycle_proposal_manifest_schema() {
+    printf '%s\n' schema run_id audit_hash samples_hash analysis_hash analysis_fingerprint \
+        proposal_hash proposal_count proposal_records_hash
+}
+
+dbtune_lifecycle_require_snapshot_hash() {
+    local snapshot=${1:-}
+    local expected_hash=${2:-}
+    local actual_hash
+
+    [[ $expected_hash =~ ^[0-9a-f]{64}$ ]] || return 65
+    actual_hash=$(dbtune_sha256_file "$snapshot") || return 65
+    if [[ $actual_hash != "$expected_hash" ]]; then
+        dbtune_log error "$(dbtune_msg lifecycle_proposal_changed)"
+        return 65
+    fi
+}
+
+dbtune_lifecycle_prepare_proposal_snapshot() {
+    local source=${1:-}
+    local snapshot=${2:-}
+    local records=${3:-}
+    local status=0
+
+    [[ -n $snapshot && -n $records && $snapshot != "$records" ]] || return 64
+    [[ -r $source ]] || return 65
+    dbtune_validate_single_link_file "$source" >/dev/null 2>&1 || return 65
+    if ! command cp "$source" "$snapshot" || ! command chmod 400 "$snapshot"; then
+        return 1
+    fi
+    dbtune_validate_single_link_file "$snapshot" >/dev/null 2>&1 || return 65
+    dbtune_cnf_entries_strict "$snapshot" >"$records" || status=$?
+    if ((status != 0)); then
+        dbtune_log error "$(dbtune_msg lifecycle_proposal_invalid)"
+        return 65
+    fi
+    command chmod 400 "$records" || return 1
+    DBTUNE_APPLY_RECORD_COUNT=$(LC_ALL=C awk 'NF {count++} END {print count+0}' "$records") || return
+    ((DBTUNE_APPLY_RECORD_COUNT > 0)) || return 65
+    DBTUNE_APPLY_SNAPSHOT_HASH=$(dbtune_sha256_file "$snapshot") || return
+    DBTUNE_APPLY_RECORDS_HASH=$(dbtune_sha256_file "$records") || return
+    [[ $DBTUNE_APPLY_SNAPSHOT_HASH =~ ^[0-9a-f]{64}$ &&
+        $DBTUNE_APPLY_RECORDS_HASH =~ ^[0-9a-f]{64}$ ]] || return 65
+}
+
 dbtune_lifecycle_validate_proposal_manifest() {
     local manifest="$DBTUNE_STATE_DIR/proposal-manifest.tsv"
     local proposal=${1:-$DBTUNE_STATE_DIR/proposed-99-zz-tuning.cnf}
+    local records=${2:-}
     local analysis_manifest analysis key expected actual proposal_count proposal_records_hash
+    local schema
 
     [[ -r $manifest ]] || {
         dbtune_log error "$(dbtune_printf lifecycle_proposal_manifest_missing "$manifest")"
         return 66
     }
+    schema=$(dbtune_lifecycle_proposal_manifest_schema) || return
+    if ! dbtune_manifest_validate_exact "$manifest" "$schema"; then
+        dbtune_log error "$(dbtune_msg lifecycle_proposal_manifest_invalid)"
+        return 65
+    fi
     dbtune_provenance_validate_analysis || return
     analysis_manifest=$(dbtune_analysis_manifest_file) || return
     for key in run_id audit_hash samples_hash analysis_hash analysis_fingerprint; do
@@ -341,8 +393,7 @@ dbtune_lifecycle_validate_proposal_manifest() {
         return 65
     }
     [[ $expected =~ ^[0-9a-f]{64}$ && -r $proposal ]] || return 65
-    actual=$(dbtune_sha256_file "$proposal") || return
-    if [[ $actual != "$expected" ]]; then
+    if [[ $expected != "$DBTUNE_APPLY_SNAPSHOT_HASH" ]]; then
         dbtune_log error "$(dbtune_msg lifecycle_proposal_changed)"
         return 65
     fi
@@ -354,7 +405,7 @@ dbtune_lifecycle_validate_proposal_manifest() {
         dbtune_log error "$(dbtune_msg lifecycle_proposal_records_hash_missing)"
         return 65
     }
-    [[ $proposal_count =~ ^[0-9]+$ && $proposal_records_hash =~ ^[0-9a-f]{64}$ ]] || return 65
+    [[ $proposal_count =~ ^[1-9][0-9]*$ && $proposal_records_hash =~ ^[0-9a-f]{64}$ ]] || return 65
     DBTUNE_AUDIT_FILE=$(dbtune_path audit.tsv) || return
     analysis=$(dbtune_path analysis.tsv) || return
     dbtune_analysis_load "$analysis" || return
@@ -364,11 +415,11 @@ dbtune_lifecycle_validate_proposal_manifest() {
         dbtune_log error "$(dbtune_msg lifecycle_proposal_records_mismatch)"
         return 65
     fi
-    dbtune_lifecycle_validate_proposal_records "$proposal" || return
+    dbtune_lifecycle_validate_proposal_records "$records" || return
 }
 
 dbtune_lifecycle_validate_proposal_records() {
-    local proposal=${1:-}
+    local records=${1:-}
     local line key value
     local -A expected=() actual=()
 
@@ -383,7 +434,7 @@ dbtune_lifecycle_validate_proposal_records() {
             return 65
         fi
         actual["$key"]=$value
-    done < <(dbtune_lifecycle_config_entries "$proposal")
+    done <"$records"
     if ((${#expected[@]} != ${#actual[@]})); then
         dbtune_log error "$(dbtune_msg lifecycle_cnf_count_mismatch)"
         return 65
@@ -399,7 +450,8 @@ dbtune_lifecycle_validate_proposal_records() {
 dbtune_lifecycle_check_apply_inputs() {
     local force=${1:-0}
     local proposal=${2:-}
-    local analysis state
+    local records=${3:-}
+    local analysis audit state
 
     [[ -n $proposal ]] || proposal=$(dbtune_lifecycle_proposal)
     state=$(dbtune_state_read) || return
@@ -424,7 +476,13 @@ dbtune_lifecycle_check_apply_inputs() {
         return 65
     fi
     if ((force == 0)); then
-        dbtune_lifecycle_validate_proposal_manifest "$proposal" || return
+        dbtune_lifecycle_validate_proposal_manifest "$proposal" "$records" || return
+    fi
+    dbtune_provenance_validate_audit || return
+    audit=$(dbtune_path audit.tsv) || return
+    if ! dbtune_loaded_defaults_assert_safe "$audit" embedded; then
+        dbtune_log error "$(dbtune_msg lifecycle_landmine_audit_invalid)"
+        return 65
     fi
 }
 
@@ -485,23 +543,23 @@ dbtune_lifecycle_config_entries() {
     ' "$proposal"
 }
 
-dbtune_lifecycle_variable_names() {
-    local proposal=${1:-}
-
-    dbtune_lifecycle_config_entries "$proposal" | awk -F '\t' '{print $1}'
-}
-
 dbtune_lifecycle_validate_variable_names() {
-    local proposal=${1:-}
-    local query list='' separator='' name output_file
+    local records=${1:-}
+    local expected_records_hash=${2:-}
+    local records_capture records_hash query list='' separator='' name value extra output_file command_status=0 malformed=0
     local -A requested=() found=()
 
-    while IFS= read -r name; do
-        [[ -n $name ]] || continue
+    records_capture=$(command cat "$records") || return 65
+    [[ -n $records_capture && $expected_records_hash =~ ^[0-9a-f]{64}$ ]] || return 65
+    records_hash=$(printf '%s\n' "$records_capture" | dbtune_sha256_stream) || return
+    [[ $records_hash == "$expected_records_hash" ]] || return 65
+    dbtune_lifecycle_after_records_hash "$records" || return
+    while IFS=$'\t' read -r name value extra; do
+        [[ -n $name && -n $value && -z $extra ]] || return 65
         requested["$name"]=1
         list+="${separator}'$name'"
         separator=,
-    done < <(dbtune_lifecycle_variable_names "$proposal")
+    done <<<"$records_capture"
     if ((${#requested[@]} == 0)); then
         dbtune_log error "$(dbtune_msg lifecycle_no_active_variables)"
         return 65
@@ -509,17 +567,44 @@ dbtune_lifecycle_validate_variable_names() {
 
     query="SELECT LOWER(VARIABLE_NAME) FROM information_schema.GLOBAL_VARIABLES WHERE LOWER(VARIABLE_NAME) IN ($list)"
     output_file=$(mktemp "$DBTUNE_STATE_DIR/.variables.XXXXXX") || return 1
-    if ! dbtune_sql "$query" >"$output_file"; then
+    dbtune_sql "$query" >"$output_file" || command_status=$?
+    if ! LC_ALL=C awk -F '\t' 'NF != 1 || $0 == "" || $0 ~ /[[:cntrl:]]/ {exit 1}' "$output_file"; then
+        rm -f "$output_file"
+        dbtune_log error "$(dbtune_msg lifecycle_live_variable_check_failed)"
+        return 65
+    fi
+    if ((command_status != 0)) && [[ ! -s $output_file ]]; then
         rm -f "$output_file"
         dbtune_log error "$(dbtune_msg lifecycle_live_variable_check_failed)"
         return 69
     fi
     while IFS= read -r name; do
         name=${name,,}
-        [[ -n $name ]] && found["$name"]=1
+        if ! dbtune_proposal_key_is_safe "$name" || [[ -z ${requested[$name]+x} || -n ${found[$name]+x} ]]; then
+            malformed=1
+            break
+        fi
+        found["$name"]=1
     done <"$output_file"
     rm -f "$output_file"
+    if ((malformed == 1)); then
+        dbtune_log error "$(dbtune_msg lifecycle_live_variable_check_failed)"
+        return 65
+    fi
 
+    if ((${#requested[@]} != ${#found[@]})); then
+        for name in "${!requested[@]}"; do
+            if [[ -z ${found[$name]+x} ]]; then
+                dbtune_log error "$(dbtune_printf lifecycle_unknown_variable "$name")"
+                return 65
+            fi
+        done
+        return 65
+    fi
+    if ((command_status != 0)); then
+        dbtune_log error "$(dbtune_msg lifecycle_live_variable_check_failed)"
+        return 69
+    fi
     for name in "${!requested[@]}"; do
         if [[ -z ${found[$name]+x} ]]; then
             dbtune_log error "$(dbtune_printf lifecycle_unknown_variable "$name")"
@@ -591,6 +676,17 @@ dbtune_lifecycle_new_history() {
     printf '%s\n' "$history"
 }
 
+dbtune_lifecycle_discard_uncommitted_history() {
+    local history=${1:-}
+    local root="$DBTUNE_STATE_DIR/apply"
+    local cycle_id=${history##*/}
+
+    [[ ${history%/*} == "$root" && $cycle_id =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ &&
+        -d $history && ! -L $history ]] || return 65
+    rm -rf "$history" || return 1
+    rmdir "$root" 2>/dev/null || true
+}
+
 dbtune_lifecycle_shell_quote() {
     local value=${1-}
 
@@ -634,14 +730,33 @@ dbtune_lifecycle_prepare_history() {
     local expected_target_hash=${8:-}
     local expected_parent_identities=${9:-}
     local previous_current=${10:-}
-    local had_original=0 original_hash=absent proposal_hash expected_hash run_id=unmeasured audit_hash=unmeasured
+    local expected_proposal_hash=${11:-}
+    local expected_records_hash=${12:-}
+    local expected_record_count=${13:-}
+    local live_scan=${14:-}
+    local live_scan_hash=${15:-}
+    local live_scan_timestamp=${16:-}
+    local live_scan_method=${17:-}
+    local loaded_fingerprint=${18:-}
+    local force=${19:-0}
+    local had_original=0 original_hash=absent proposal_hash run_id audit_hash
     local backup_hash=interactive
     local cycle_id original_source=absent original_cycle_id=- original_cycle_history=- original_backup=absent
     local source_target source_hash source_snapshot_hash
-    local proposal_manifest="$DBTUNE_STATE_DIR/proposal-manifest.tsv"
+    local audit_manifest
 
     cycle_id=${history##*/}
     [[ ${history%/*} == "$DBTUNE_STATE_DIR/apply" && $cycle_id =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || return 65
+    [[ $expected_records_hash =~ ^[0-9a-f]{64}$ && $expected_record_count =~ ^[1-9][0-9]*$ ]] || return 65
+    [[ $live_scan_hash =~ ^[0-9a-f]{64}$ && $loaded_fingerprint =~ ^[0-9a-f]{64}$ &&
+        $live_scan_timestamp =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ &&
+        $live_scan_method =~ ^(mariadbd_print_defaults|mysqld_print_defaults)$ && $force =~ ^[01]$ ]] || return 65
+    [[ -f $live_scan && ! -L $live_scan && $(dbtune_sha256_file "$live_scan") == "$live_scan_hash" ]] || return 65
+    dbtune_provenance_validate_audit || return
+    audit_manifest=$(dbtune_audit_manifest_file) || return
+    run_id=$(dbtune_manifest_value "$audit_manifest" run_id) || return 65
+    audit_hash=$(dbtune_manifest_value "$audit_manifest" audit_hash) || return 65
+    [[ $run_id =~ ^[A-Za-z0-9._-]+$ && $audit_hash =~ ^[0-9a-f]{64}$ ]] || return 65
     dbtune_lifecycle_validate_target_path "$target" "$expected_topology" \
         "$expected_directory_identity" "$expected_target_identity" "$expected_target_hash" || return
     if [[ $DBTUNE_LIFECYCLE_PARENT_IDENTITIES != "$expected_parent_identities" ]]; then
@@ -677,8 +792,13 @@ dbtune_lifecycle_prepare_history() {
             fi
         fi
     fi
+    dbtune_lifecycle_before_history_copy "$proposal" || return
+    dbtune_lifecycle_require_snapshot_hash "$proposal" "$expected_proposal_hash" || return
     cp "$proposal" "$history/proposed.cnf" || return 1
     chmod 600 "$history/proposed.cnf" || return 1
+    cp "$live_scan" "$history/loaded-defaults.tsv" || return 1
+    chmod 600 "$history/loaded-defaults.tsv" || return 1
+    [[ $(dbtune_sha256_file "$history/loaded-defaults.tsv") == "$live_scan_hash" ]] || return 65
     if [[ $DBTUNE_APPLY_BACKUP_MODE == artifact ]]; then
         cp "$backup_evidence" "$history/backup-evidence.tsv" || return 1
         chmod 600 "$history/backup-evidence.tsv" || return 1
@@ -694,12 +814,12 @@ dbtune_lifecycle_prepare_history() {
         } | dbtune_atomic_write "$history/backup-confirmation.tsv" 600 || return 1
     fi
     proposal_hash=$(dbtune_sha256_file "$history/proposed.cnf") || return
-    expected_hash=$(dbtune_manifest_value "$proposal_manifest" proposal_hash 2>/dev/null || true)
-    if [[ $expected_hash == "$proposal_hash" ]]; then
-        run_id=$(dbtune_manifest_value "$proposal_manifest" run_id 2>/dev/null || printf unknown)
-        audit_hash=$(dbtune_manifest_value "$proposal_manifest" audit_hash 2>/dev/null || printf unknown)
-    fi
+    [[ $proposal_hash == "$expected_proposal_hash" ]] || {
+        dbtune_log error "$(dbtune_msg lifecycle_proposal_changed)"
+        return 65
+    }
     {
+        printf 'schema\t1\n'
         printf 'cycle_id\t%s\n' "$cycle_id"
         printf 'target\t%s\n' "$target"
         printf 'directory_identity\t%s\n' "$expected_directory_identity"
@@ -714,6 +834,13 @@ dbtune_lifecycle_prepare_history() {
         printf 'run_id\t%s\n' "$run_id"
         printf 'audit_hash\t%s\n' "$audit_hash"
         printf 'proposal_hash\t%s\n' "$proposal_hash"
+        printf 'proposal_records_hash\t%s\n' "$expected_records_hash"
+        printf 'proposal_count\t%s\n' "$expected_record_count"
+        printf 'landmine_scan_hash\t%s\n' "$live_scan_hash"
+        printf 'landmine_scan_timestamp\t%s\n' "$live_scan_timestamp"
+        printf 'landmine_scan_method\t%s\n' "$live_scan_method"
+        printf 'landmine_loaded_fingerprint\t%s\n' "$loaded_fingerprint"
+        printf 'force\t%s\n' "$force"
         printf 'backup_guard\t%s\n' "$DBTUNE_APPLY_BACKUP_MODE"
         printf 'backup_source\t%s\n' "$DBTUNE_APPLY_BACKUP_SOURCE"
         printf 'backup_last_success\t%s\n' "$DBTUNE_APPLY_BACKUP_LAST_SUCCESS"
@@ -733,11 +860,17 @@ dbtune_lifecycle_install_config() {
     local expected_target_identity=${5:-}
     local expected_target_hash=${6:-}
     local expected_parent_identities=${7:-}
+    local expected_proposal_hash=${8:-}
+    local expected_records_hash=${9:-}
+    local expected_record_count=${10:-}
     local directory temporary status
 
     directory=${target%/*}
+    [[ $expected_records_hash =~ ^[0-9a-f]{64}$ && $expected_record_count =~ ^[1-9][0-9]*$ ]] || return 65
     dbtune_lifecycle_validate_target_path "$target" "$expected_topology" \
         "$expected_directory_identity" "$expected_target_identity" "$expected_target_hash" || return
+    dbtune_lifecycle_before_target_copy "$proposal" || return
+    dbtune_lifecycle_require_snapshot_hash "$proposal" "$expected_proposal_hash" || return
     temporary=$(mktemp "$directory/.99-zz-tuning.cnf.tmp.XXXXXX") || return 1
     if ! command cat "$proposal" >"$temporary" || ! chown root:root "$temporary" || ! chmod 0644 "$temporary"; then
         rm -f "$temporary"
@@ -745,7 +878,7 @@ dbtune_lifecycle_install_config() {
     fi
     if dbtune_lifecycle_publish_managed_config "$temporary" "$target" "$expected_topology" \
         "$expected_directory_identity" "$expected_target_identity" "$expected_target_hash" \
-        "$(dbtune_sha256_file "$proposal")" "$expected_parent_identities"; then
+        "$expected_proposal_hash" "$expected_parent_identities"; then
         :
     else
         status=$?
@@ -757,7 +890,8 @@ dbtune_lifecycle_install_config() {
 dbtune_lifecycle_require_publisher() {
     local python=${DBTUNE_PYTHON:-python3}
 
-    if ! command -v "$python" >/dev/null 2>&1 || ! "$python" - <<'PY'
+    [[ $DBTUNE_ARTIFACT_PROFILE != production ]] || python=$(dbtune_runtime_command_path python3) || return 69
+    if ! command -v "$python" >/dev/null 2>&1 || ! "$python" -I -E -s - <<'PY'
 import ctypes
 import os
 import sys
@@ -792,6 +926,7 @@ dbtune_lifecycle_publish_managed_config() {
     local expected_source_hash=${7:-}
     local expected_parent_identities=${8:-}
     local directory base source_base=- python expected_uid expected_gid expected_mode status=0
+    local fail_match='' fault_hook='' crash_point='' crash_match=''
     local message_not_regular message_metadata message_hardlinks message_replaced message_changed
     local message_open_dir message_dir_replaced message_parent_chain message_parent_replaced
     local message_topology message_fault_hook message_atomic_flags message_fault_before message_failed
@@ -809,6 +944,14 @@ dbtune_lifecycle_publish_managed_config() {
     [[ $expected_topology == absent || $expected_topology == regular ]] || return 64
     [[ $expected_directory_identity =~ ^[0-9]+:[0-9]+$ ]] || return 64
     python=${DBTUNE_PYTHON:-python3}
+    if [[ $DBTUNE_ARTIFACT_PROFILE == production ]]; then
+        python=$(dbtune_runtime_command_path python3) || return 69
+    else
+        fail_match=${DBTUNE_PUBLISH_FAIL_MATCH:-}
+        fault_hook=${DBTUNE_PUBLISH_FAULT_HOOK:-}
+        crash_point=${DBTUNE_PUBLISH_CRASH_POINT:-}
+        crash_match=${DBTUNE_PUBLISH_CRASH_MATCH:-}
+    fi
     dbtune_lifecycle_require_publisher || return
     message_not_regular=$(dbtune_msg lifecycle_publisher_not_regular) || return
     message_metadata=$(dbtune_msg lifecycle_publisher_metadata) || return
@@ -833,13 +976,14 @@ dbtune_lifecycle_publish_managed_config() {
         return 65
     fi
     dbtune_lifecycle_before_publish "$target" "$source" || return
-    "$python" - "$directory" "$base" "$source_base" \
+    "$python" -I -E -s - "$directory" "$base" "$source_base" \
         "$expected_directory_identity" "$expected_parent_identities" "$expected_topology" "$expected_target_identity" \
         "$expected_target_hash" "$expected_source_hash" "$expected_uid" "$expected_gid" \
         "$expected_mode" "$message_not_regular" "$message_metadata" "$message_hardlinks" \
         "$message_replaced" "$message_changed" "$message_open_dir" "$message_dir_replaced" \
         "$message_parent_chain" "$message_parent_replaced" "$message_topology" "$message_fault_hook" \
-        "$message_atomic_flags" "$message_fault_before" "$message_failed" <<'PY' || status=$?
+        "$message_atomic_flags" "$message_fault_before" "$message_failed" \
+        "$fail_match" "$fault_hook" "$crash_point" "$crash_match" <<'PY' || status=$?
 import ctypes
 import errno
 import hashlib
@@ -875,11 +1019,11 @@ import sys
     message_atomic_flags,
     message_fault_before,
     message_failed,
+    fail_match,
+    fault_hook,
+    crash_point,
+    crash_match,
 ) = sys.argv[1:]
-fail_match = os.environ.get("DBTUNE_PUBLISH_FAIL_MATCH", "")
-fault_hook = os.environ.get("DBTUNE_PUBLISH_FAULT_HOOK", "")
-crash_point = os.environ.get("DBTUNE_PUBLISH_CRASH_POINT", "")
-crash_match = os.environ.get("DBTUNE_PUBLISH_CRASH_MATCH", "")
 expected_uid = int(expected_uid)
 expected_gid = int(expected_gid)
 expected_mode = int(expected_mode, 8)
@@ -1178,6 +1322,38 @@ dbtune_lifecycle_manifest_value() {
     awk -F '\t' -v wanted="$key" '$1 == wanted {sub(/^[^\t]*\t/, ""); print; exit}' "$history/manifest.tsv"
 }
 
+dbtune_lifecycle_validate_history_manifest() {
+    local history=${1:-}
+    local manifest="$history/manifest.tsv"
+    local key count value scan_hash fingerprint
+
+    [[ -f $manifest && ! -L $manifest ]] || return 65
+    count=$(command awk -F '\t' '$1=="schema" {count++} END {print count+0}' "$manifest") || return 65
+    ((count > 0)) || return 0
+    [[ $count == 1 && $(dbtune_lifecycle_manifest_value "$history" schema) == 1 ]] || return 65
+    for key in cycle_id run_id audit_hash proposal_hash proposal_records_hash proposal_count \
+        landmine_scan_hash landmine_scan_timestamp landmine_scan_method landmine_loaded_fingerprint force; do
+        count=$(command awk -F '\t' -v wanted="$key" '$1==wanted && NF==2 {count++} END {print count+0}' "$manifest") || return 65
+        [[ $count == 1 ]] || return 65
+    done
+    [[ $(dbtune_lifecycle_manifest_value "$history" proposal_hash) =~ ^[0-9a-f]{64}$ &&
+        $(dbtune_lifecycle_manifest_value "$history" proposal_records_hash) =~ ^[0-9a-f]{64}$ &&
+        $(dbtune_lifecycle_manifest_value "$history" proposal_count) =~ ^[1-9][0-9]*$ &&
+        $(dbtune_lifecycle_manifest_value "$history" landmine_scan_timestamp) =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ &&
+        $(dbtune_lifecycle_manifest_value "$history" landmine_scan_method) =~ ^(mariadbd_print_defaults|mysqld_print_defaults)$ &&
+        $(dbtune_lifecycle_manifest_value "$history" force) =~ ^[01]$ ]] || return 65
+    scan_hash=$(dbtune_lifecycle_manifest_value "$history" landmine_scan_hash) || return 65
+    fingerprint=$(dbtune_lifecycle_manifest_value "$history" landmine_loaded_fingerprint) || return 65
+    [[ $scan_hash =~ ^[0-9a-f]{64}$ && $fingerprint =~ ^[0-9a-f]{64}$ &&
+        -f $history/loaded-defaults.tsv && ! -L $history/loaded-defaults.tsv ]] || return 65
+    [[ $(dbtune_sha256_file "$history/loaded-defaults.tsv") == "$scan_hash" &&
+        $(dbtune_loaded_defaults_fingerprint "$history/loaded-defaults.tsv") == "$fingerprint" ]] || return 65
+    value=$(dbtune_lifecycle_manifest_value "$history" run_id) || return 65
+    [[ $value =~ ^[A-Za-z0-9._-]+$ ]] || return 65
+    value=$(dbtune_lifecycle_manifest_value "$history" audit_hash) || return 65
+    [[ $value =~ ^[0-9a-f]{64}$ ]] || return 65
+}
+
 dbtune_lifecycle_cycle_id() {
     local history=${1:-}
     local cycle_id
@@ -1187,6 +1363,7 @@ dbtune_lifecycle_cycle_id() {
         dbtune_log error "$(dbtune_printf lifecycle_history_identity_invalid "${history:-$(dbtune_msg core_value_empty)}")"
         return 65
     fi
+    dbtune_lifecycle_validate_history_manifest "$history" || return 65
     cycle_id=$(dbtune_lifecycle_manifest_value "$history" cycle_id)
     [[ -n $cycle_id ]] || cycle_id=${history##*/}
     if [[ $cycle_id != "${history##*/}" ]]; then
@@ -1678,6 +1855,7 @@ dbtune_lifecycle_read_current() {
         dbtune_log error "$(dbtune_printf lifecycle_history_invalid "${history:-$(dbtune_msg core_value_empty)}")"
         return 65
     fi
+    dbtune_lifecycle_validate_history_manifest "$history" || return 65
     printf '%s\n' "$history"
 }
 
@@ -1751,6 +1929,8 @@ dbtune_lifecycle_restore_rollback_target() {
 dbtune_lifecycle_prepare_rollback_service() {
     local history=${1:-}
     local systemctl_command=${DBTUNE_SYSTEMCTL:-systemctl}
+
+    [[ $DBTUNE_ARTIFACT_PROFILE != production ]] || systemctl_command=$(dbtune_runtime_command_path systemctl) || return
 
     DBTUNE_ROLLBACK_COMPLETION_START_STATUS=0
     DBTUNE_ROLLBACK_COMPLETION_RESTART_REQUIRED=0
@@ -1978,6 +2158,22 @@ dbtune_lifecycle_after_manifest_check() {
     return 0
 }
 
+dbtune_lifecycle_after_strict_parse() {
+    return 0
+}
+
+dbtune_lifecycle_before_history_copy() {
+    return 0
+}
+
+dbtune_lifecycle_after_records_hash() {
+    return 0
+}
+
+dbtune_lifecycle_before_target_copy() {
+    return 0
+}
+
 dbtune_lifecycle_before_publish() {
     return 0
 }
@@ -1986,10 +2182,15 @@ dbtune_lifecycle_apply_snapshot() {
     local restart=${1:-0}
     local force=${2:-0}
     local proposal=${3:-}
-    local backup_evidence=${4:-}
+    local records=${4:-}
+    local backup_evidence=${5:-}
     local target history had_original previous_state previous_current='' unmeasured=0
+    local live_scan='' live_scan_hash live_scan_timestamp live_scan_method loaded_fingerprint
     local target_topology directory_identity target_identity target_hash parent_identities
     local systemctl_command=${DBTUNE_SYSTEMCTL:-systemctl}
+    local status=0
+
+    [[ $DBTUNE_ARTIFACT_PROFILE != production ]] || systemctl_command=$(dbtune_runtime_command_path systemctl) || return
 
     dbtune_lifecycle_has_measurement || unmeasured=1
     if ((force == 1)); then
@@ -2007,36 +2208,81 @@ dbtune_lifecycle_apply_snapshot() {
     target_hash=$DBTUNE_LIFECYCLE_TARGET_HASH
     parent_identities=$DBTUNE_LIFECYCLE_PARENT_IDENTITIES
     dbtune_init_state_dir || return 1
-    dbtune_lifecycle_validate_variable_names "$proposal" || return
+    dbtune_lifecycle_require_snapshot_hash "$proposal" "$DBTUNE_APPLY_SNAPSHOT_HASH" || return
+    dbtune_lifecycle_validate_variable_names "$records" "$DBTUNE_APPLY_RECORDS_HASH" || return
     dbtune_lifecycle_reject_galera || return
     dbtune_lifecycle_reject_mydumper || return
     if [[ -r $DBTUNE_STATE_DIR/analysis.tsv ]]; then
         dbtune_lifecycle_reject_critical_analysis || return
     fi
 
-    history=$(dbtune_lifecycle_new_history) || return
+    live_scan=$(mktemp "$DBTUNE_STATE_DIR/.apply-landmine-scan.XXXXXX") || return 1
+    if ! dbtune_loaded_defaults_scan "$live_scan"; then
+        dbtune_log error "$(dbtune_msg lifecycle_landmine_scan_failed)"
+        rm -f "$live_scan"
+        return 65
+    fi
+    live_scan_hash=$(dbtune_sha256_file "$live_scan") || {
+        rm -f "$live_scan"
+        return 1
+    }
+    live_scan_timestamp=$(dbtune_now) || {
+        rm -f "$live_scan"
+        return 1
+    }
+    loaded_fingerprint=$(dbtune_loaded_defaults_fingerprint "$live_scan") || {
+        rm -f "$live_scan"
+        return 65
+    }
+    live_scan_method=$(command awk -F '\t' '$1=="landmine.scan.method" {print $2; exit}' "$live_scan") || {
+        rm -f "$live_scan"
+        return 65
+    }
+    if ! dbtune_loaded_defaults_assert_safe "$live_scan"; then
+        dbtune_log error "$(dbtune_msg lifecycle_landmine_critical)"
+        rm -f "$live_scan"
+        return 65
+    fi
+    history=$(dbtune_lifecycle_new_history) || {
+        rm -f "$live_scan"
+        return 1
+    }
     previous_state=$(dbtune_state_read) || return
     if [[ -r $(dbtune_lifecycle_current_file) ]]; then
         IFS= read -r previous_current <"$(dbtune_lifecycle_current_file)" || previous_current=''
     fi
-    had_original=$(dbtune_lifecycle_prepare_history "$history" "$target" "$proposal" "$backup_evidence" \
+    if had_original=$(dbtune_lifecycle_prepare_history "$history" "$target" "$proposal" "$backup_evidence" \
         "$target_topology" "$directory_identity" "$target_identity" "$target_hash" \
-        "$parent_identities" "$previous_current") || return
+        "$parent_identities" "$previous_current" "$DBTUNE_APPLY_SNAPSHOT_HASH" \
+        "$DBTUNE_APPLY_RECORDS_HASH" "$DBTUNE_APPLY_RECORD_COUNT" "$live_scan" "$live_scan_hash" \
+        "$live_scan_timestamp" "$live_scan_method" "$loaded_fingerprint" "$force"); then
+        :
+    else
+        status=$?
+        rm -f "$live_scan"
+        dbtune_lifecycle_discard_uncommitted_history "$history" || return
+        return "$status"
+    fi
+    rm -f "$live_scan"
     dbtune_lifecycle_capture_baseline "$history" || {
         dbtune_log error "$(dbtune_msg lifecycle_baseline_failed)"
         return 1
     }
     dbtune_lifecycle_publish_intent "$history" "$previous_state" "$previous_current" || return
     dbtune_lifecycle_fault_inject after_intent || return
-    if ! dbtune_lifecycle_install_config "$proposal" "$target" "$target_topology" \
-        "$directory_identity" "$target_identity" "$target_hash" "$parent_identities"; then
+    if dbtune_lifecycle_install_config "$proposal" "$target" "$target_topology" \
+        "$directory_identity" "$target_identity" "$target_hash" "$parent_identities" \
+        "$DBTUNE_APPLY_SNAPSHOT_HASH" "$DBTUNE_APPLY_RECORDS_HASH" "$DBTUNE_APPLY_RECORD_COUNT"; then
+        :
+    else
+        status=$?
         dbtune_log error "$(dbtune_msg lifecycle_atomic_write_failed)"
         dbtune_lifecycle_recover_failed_apply "$history" "$previous_state" "$previous_current" install || true
-        return 1
+        return "$status"
     fi
     dbtune_lifecycle_fault_inject after_config || return
     if ! dbtune_lifecycle_validate_target_path "$target" regular "$directory_identity" ||
-        [[ $DBTUNE_LIFECYCLE_TARGET_HASH != "$(dbtune_sha256_file "$proposal")" ]]; then
+        [[ $DBTUNE_LIFECYCLE_TARGET_HASH != "$DBTUNE_APPLY_SNAPSHOT_HASH" ]]; then
         dbtune_log error "$(dbtune_msg lifecycle_final_check_failed)"
         dbtune_lifecycle_recover_failed_apply "$history" "$previous_state" "$previous_current" publish || true
         return 65
@@ -2093,7 +2339,7 @@ dbtune_lifecycle_apply_snapshot() {
 }
 
 cmd_apply() {
-    local parsed restart force analysis proposal snapshot backup_file backup_snapshot='' status=0
+    local parsed restart force analysis proposal snapshot records backup_file backup_snapshot='' status=0
 
     parsed=$(dbtune_lifecycle_parse_args "$@") || return
     IFS=$'\t' read -r restart force <<<"$parsed"
@@ -2103,49 +2349,61 @@ cmd_apply() {
         dbtune_analysis_validate_schema "$analysis" || return
     fi
     proposal=$(dbtune_lifecycle_proposal)
-    [[ -s $proposal ]] || {
-        dbtune_log error "$(dbtune_printf lifecycle_proposal_missing "$proposal")"
-        return 66
-    }
     snapshot=$(mktemp "$DBTUNE_STATE_DIR/.apply-proposal.XXXXXX") || return 1
-    if ! cp "$proposal" "$snapshot" || ! chmod 400 "$snapshot"; then
+    records=$(mktemp "$DBTUNE_STATE_DIR/.apply-records.XXXXXX") || {
         rm -f "$snapshot"
         return 1
+    }
+    if dbtune_lifecycle_prepare_proposal_snapshot "$proposal" "$snapshot" "$records"; then
+        :
+    else
+        status=$?
+        rm -f "$snapshot" "$records"
+        return "$status"
+    fi
+    dbtune_lifecycle_after_strict_parse "$snapshot" "$records" || {
+        status=$?
+        rm -f "$snapshot" "$records"
+        return "$status"
+    }
+    if ! dbtune_lifecycle_require_snapshot_hash "$snapshot" "$DBTUNE_APPLY_SNAPSHOT_HASH"; then
+        rm -f "$snapshot" "$records"
+        return 65
     fi
     backup_file=$(dbtune_backup_evidence_file)
     if dbtune_backup_evidence_validate "$backup_file"; then
         backup_snapshot=$(mktemp "$DBTUNE_STATE_DIR/.apply-backup-evidence.XXXXXX") || {
-            rm -f "$snapshot"
+            rm -f "$snapshot" "$records"
             return 1
         }
         if ! cp "$backup_file" "$backup_snapshot" || ! chmod 400 "$backup_snapshot"; then
-            rm -f "$snapshot" "$backup_snapshot"
+            rm -f "$snapshot" "$records" "$backup_snapshot"
             return 1
         fi
         if ! dbtune_backup_evidence_validate "$backup_snapshot"; then
             dbtune_lifecycle_log_backup_rejection
-            rm -f "$snapshot" "$backup_snapshot"
+            rm -f "$snapshot" "$records" "$backup_snapshot"
             return 65
         fi
     elif [[ -e $backup_file || -L $backup_file ]]; then
         dbtune_lifecycle_log_backup_rejection
-        rm -f "$snapshot"
+        rm -f "$snapshot" "$records"
         return 65
     fi
-    if dbtune_lifecycle_check_apply_inputs "$force" "$snapshot"; then
+    if dbtune_lifecycle_check_apply_inputs "$force" "$snapshot" "$records"; then
         :
     else
         status=$?
-        rm -f "$snapshot" "$backup_snapshot"
+        rm -f "$snapshot" "$records" "$backup_snapshot"
         return "$status"
     fi
     dbtune_lifecycle_after_manifest_check || {
         status=$?
-        rm -f "$snapshot" "$backup_snapshot"
+        rm -f "$snapshot" "$records" "$backup_snapshot"
         return "$status"
     }
-    dbtune_lifecycle_apply_snapshot "$restart" "$force" "$snapshot" "$backup_snapshot" || status=$?
-    rm -f "$snapshot" "$backup_snapshot"
+    dbtune_lifecycle_apply_snapshot "$restart" "$force" "$snapshot" "$records" "$backup_snapshot" || status=$?
+    rm -f "$snapshot" "$records" "$backup_snapshot"
     return "$status"
 }
 
@@ -2215,7 +2473,7 @@ dbtune_lifecycle_verify_target() {
 
 dbtune_lifecycle_verify_values() {
     local proposal=${1:-}
-    local names='' separator='' name expected actual output_file query
+    local requested_names='' separator='' name expected actual output_file query
     local -A expected_values=() actual_values=()
     local failures=0 missing missing_upper
 
@@ -2225,10 +2483,10 @@ dbtune_lifecycle_verify_values() {
     while IFS=$'\t' read -r name expected; do
         [[ -n $name ]] || continue
         expected_values["$name"]=$expected
-        names+="${separator}'$name'"
+        requested_names+="${separator}'$name'"
         separator=,
     done < <(dbtune_lifecycle_config_entries "$proposal")
-    query="SELECT LOWER(VARIABLE_NAME), VARIABLE_VALUE FROM information_schema.GLOBAL_VARIABLES WHERE LOWER(VARIABLE_NAME) IN ($names)"
+    query="SELECT LOWER(VARIABLE_NAME), VARIABLE_VALUE FROM information_schema.GLOBAL_VARIABLES WHERE LOWER(VARIABLE_NAME) IN ($requested_names)"
     output_file=$(mktemp "$DBTUNE_STATE_DIR/.effective.XXXXXX") || return 1
     if ! dbtune_sql "$query" >"$output_file"; then
         rm -f "$output_file"

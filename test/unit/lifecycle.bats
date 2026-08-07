@@ -33,11 +33,15 @@ setup() {
     export STUB_FAIL_CHMOD_MATCH=
     export STUB_FAIL_MKDIR_MATCH=
     export STUB_HELP_HAS_VALIDATE_CONFIG=1
+    export STUB_DEFAULTS_OUTPUT=
+    export STUB_DEFAULTS_ERROR=
+    export STUB_DEFAULTS_STATUS=0
     unset DBTUNE_PUBLISH_FAIL_MATCH
     unset DBTUNE_PUBLISH_FAULT_HOOK
     unset DBTUNE_PUBLISH_CRASH_POINT
     unset DBTUNE_PUBLISH_CRASH_MATCH
     export STUB_GLOBAL_NAMES=$'max_connections\nskip_name_resolve'
+    export STUB_GLOBAL_STATUS=0
     export STUB_EFFECTIVE=$'max_connections\t300\nskip_name_resolve\tON'
     export STUB_STATUS=$'uptime\t100\ninnodb_buffer_pool_wait_free\t0\ninnodb_log_waits\t0\naborted_connects\t0'
     export PATH="$BATS_TEST_TMPDIR/bin:$PATH"
@@ -47,8 +51,11 @@ setup() {
     source "$BATS_TEST_DIRNAME/../../lib/00-header.sh"
     source "$BATS_TEST_DIRNAME/../../lib/05-i18n.sh"
     source "$BATS_TEST_DIRNAME/../../lib/10-util.sh"
+    source "$BATS_TEST_DIRNAME/../../lib/15-mariadb-safety.sh"
+    source "$BATS_TEST_DIRNAME/../../lib/20-audit.sh"
     source "$BATS_TEST_DIRNAME/../../lib/60-lifecycle.sh"
     source "$BATS_TEST_DIRNAME/../../lib/50-report.sh"
+    source "$BATS_TEST_DIRNAME/../support/bats-fd-hygiene.bash"
     dbtune_i18n_set en
     source "$BATS_TEST_DIRNAME/../../lib/90-main.sh"
     export DBTUNE_CONFIG_UID
@@ -60,6 +67,8 @@ setup() {
 audit.hostname	test
 mariadb.variable.max_connections	200
 mariadb.variable.skip_name_resolve	OFF
+landmine.scan.status	complete
+landmine.scan.method	mariadbd_print_defaults
 EOF
     : >"$DBTUNE_STATE_DIR/apps.tsv"
     : >"$DBTUNE_STATE_DIR/databases.tsv"
@@ -68,7 +77,7 @@ rule_id	scope	severity	verdict	proposed_key	proposed_value	evidence	reason_id
 R-MAXCONN	server	high	CHANGE	max_connections	300	current=200	reason_max_connections_change
 R-PINNED	server	medium	CHANGE	skip_name_resolve	1	current=OFF	reason_skip_name_resolve
 EOF
-    printf 'timestamp\tuptime\tbp_hit_pct\tbp_misses_s\tdata_read_s\trnd_next_s\ttmp_disk_pct\tthreads_running\tthreads_connected\tqcache_hit_pct\tlog_waits_delta\twait_free_delta\tcpu_pct\tmem_available_kb\tswap_used_kb\tload1\trestart_flag\tqcache_queries_delta\tinterval_seconds\tsample_status\n' >"$DBTUNE_STATE_DIR/samples.tsv"
+    printf 'timestamp\tuptime\tbp_hit_pct\tbp_misses_s\tdata_read_s\trnd_next_s\ttmp_disk_pct\tthreads_running\tthreads_connected\tqcache_hit_pct\tlog_waits_delta\twait_free_delta\tcpu_pct\tmem_available_kb\tswap_used_kb\tload1\trestart_flag\tcom_select_delta\tinterval_seconds\tsample_status\n' >"$DBTUNE_STATE_DIR/samples.tsv"
     printf '2026-07-31T12:00:00Z\t100\t99\t0\t0\t0\t0\t1\t1\t30\t0\t0\t1\t1000\t0\t1\t0\t1\t60\tok\n' >>"$DBTUNE_STATE_DIR/samples.tsv"
     printf 'timestamp\tdatabase\tsize_bytes\n' >"$DBTUNE_STATE_DIR/dbsize.tsv"
     dbtune_provenance_write_audit_manifest "$DBTUNE_STATE_DIR/audit-manifest.tsv" \
@@ -108,8 +117,12 @@ make_stubs() {
     cat >"$BATS_TEST_TMPDIR/bin/mariadb" <<'STUB'
 #!/usr/bin/env bash
 query=$(cat)
+printf '%s\n' "$query" >>"$BATS_TEST_TMPDIR/sql.log"
 case $query in
-    *"SELECT LOWER(VARIABLE_NAME) FROM information_schema.GLOBAL_VARIABLES"*) printf '%s\n' "$STUB_GLOBAL_NAMES" ;;
+    *"SELECT LOWER(VARIABLE_NAME) FROM information_schema.GLOBAL_VARIABLES"*)
+        [[ $STUB_GLOBAL_NAMES == __NO_OUTPUT__ ]] || printf '%s\n' "$STUB_GLOBAL_NAMES"
+        exit "$STUB_GLOBAL_STATUS"
+        ;;
     *"WSREP_ON"*) printf '%s\t%s\n' "$STUB_WSREP_ON" "$STUB_WSREP_ADDRESS" ;;
     *"information_schema.PROCESSLIST"*) printf '%s\n' "$STUB_MYDUMPER" ;;
     *"LOWER(VARIABLE_NAME), VARIABLE_VALUE FROM information_schema.GLOBAL_VARIABLES"*) printf '%s\n' "$STUB_EFFECTIVE" ;;
@@ -121,6 +134,13 @@ STUB
 #!/usr/bin/env bash
 printf '%s\n' "$*" >>"$BATS_TEST_TMPDIR/mariadbd.log"
 case " $* " in
+    *" --version "*) printf '%s\n' 'mariadbd  Ver 15.1 Distrib 11.4.12-MariaDB' ;;
+    *" --print-defaults "*)
+        printf '%s\n' scan >>"$BATS_TEST_TMPDIR/landmine-scan.log"
+        [[ -z $STUB_DEFAULTS_OUTPUT ]] || printf '%b' "$STUB_DEFAULTS_OUTPUT"
+        [[ -z $STUB_DEFAULTS_ERROR ]] || printf '%b' "$STUB_DEFAULTS_ERROR" >&2
+        exit "$STUB_DEFAULTS_STATUS"
+        ;;
     *" --help --verbose "*)
         if [[ $STUB_HELP_HAS_VALIDATE_CONFIG == 1 ]]; then
             printf '%s\n' '  --validate-config'
@@ -257,6 +277,77 @@ write_manifest() {
     } >"$DBTUNE_STATE_DIR/proposal-manifest.tsv"
 }
 
+assert_apply_preflight_unchanged() {
+    local expected_state=${1:-proposed}
+
+    [ "$(cat "$DBTUNE_CONFIG_TARGET")" = 'original target' ]
+    [ "$(dbtune_state_read)" = "$expected_state" ]
+    [ ! -e "$DBTUNE_STATE_DIR/apply/current" ]
+    [ ! -e "$DBTUNE_STATE_DIR/apply" ]
+    ! compgen -G "$DBTUNE_STATE_DIR/.apply-*" >/dev/null
+}
+
+reset_apply_preflight_fixture() {
+    rm -rf "$DBTUNE_STATE_DIR/apply" "$DBTUNE_STATE_DIR/proposed-99-zz-tuning.cnf"
+    rm -f "$DBTUNE_STATE_DIR"/.apply-* "$BATS_TEST_TMPDIR/sql.log" "$BATS_TEST_TMPDIR/confirmation.log" \
+        "$BATS_TEST_TMPDIR/publisher-replaced"
+    printf 'original target\n' >"$DBTUNE_CONFIG_TARGET"
+    printf 'proposed\n' >"$DBTUNE_STATE_DIR/state"
+    write_proposal
+    write_manifest
+}
+
+write_strict_proposal_case() {
+    local name=${1:-}
+    local proposal="$DBTUNE_STATE_DIR/proposed-99-zz-tuning.cnf"
+
+    rm -rf "$proposal"
+    case $name in
+        empty) : >"$proposal" ;;
+        no-assignment) printf '# comment\n[mysqld]\n; comment\n' >"$proposal" ;;
+        before-section) printf 'max_connections=300\n[mysqld]\nskip_name_resolve=1\n' >"$proposal" ;;
+        second-mysqld) printf '[mysqld]\nmax_connections=300\n[mysqld]\nskip_name_resolve=1\n' >"$proposal" ;;
+        server-section) printf '[server]\nmax_connections=300\n' >"$proposal" ;;
+        client-section) printf '[client]\nmax_connections=300\n' >"$proposal" ;;
+        include) printf '[mysqld]\n!include /tmp/unsafe.cnf\n' >"$proposal" ;;
+        includedir) printf '[mysqld]\n!includedir /tmp/unsafe\n' >"$proposal" ;;
+        bare-option) printf '[mysqld]\nskip_name_resolve\n' >"$proposal" ;;
+        empty-key) printf '[mysqld]\n=300\n' >"$proposal" ;;
+        empty-value) printf '[mysqld]\nmax_connections=\n' >"$proposal" ;;
+        inline-hash) printf '[mysqld]\nmax_connections=300 # comment\n' >"$proposal" ;;
+        inline-semicolon) printf '[mysqld]\nmax_connections=300 ; comment\n' >"$proposal" ;;
+        multiple-equals) printf '[mysqld]\nmax_connections=300=400\n' >"$proposal" ;;
+        canonical-duplicate) printf '[mysqld]\nMax-Connections=300\nmax_connections=400\n' >"$proposal" ;;
+        crlf) printf '[mysqld]\r\nmax_connections=300\r\n' >"$proposal" ;;
+        control) printf '[mysqld]\nmax_connections=30\0010\n' >"$proposal" ;;
+        unsafe-key) printf '[mysqld]\n1unsafe=300\n' >"$proposal" ;;
+        sensitive-key) printf '[mysqld]\npassword=secret\n' >"$proposal" ;;
+        unreadable) printf '[mysqld]\nmax_connections=300\n' >"$proposal"; chmod 000 "$proposal" ;;
+        directory) mkdir "$proposal" ;;
+        symlink) printf '[mysqld]\nmax_connections=300\n' >"$BATS_TEST_TMPDIR/symlink-proposal"; ln -s "$BATS_TEST_TMPDIR/symlink-proposal" "$proposal" ;;
+        *) return 64 ;;
+    esac
+}
+
+replace_apply_snapshot() {
+    local file=${1:-}
+    local replacement="$file.replacement"
+
+    { cat "$file"; printf '# replaced\n'; } >"$replacement"
+    chmod 400 "$replacement"
+    mv "$replacement" "$file"
+}
+
+replace_apply_records() {
+    local file=${1:-}
+    local replacement="$file.replacement"
+
+    printf 'max_connections\t300\n' >"$replacement"
+    chmod 400 "$replacement"
+    mv "$replacement" "$file"
+    touch "$BATS_TEST_TMPDIR/records-replaced"
+}
+
 prepare_apply_a_b() {
     printf 'external\n' >"$DBTUNE_CONFIG_TARGET"
     cmd_apply >/dev/null
@@ -362,6 +453,189 @@ run_publish_fixture() {
     [ "$status" -eq 65 ]
     [[ "$output" == *"skip_name_resolve"* ]]
     [ ! -e "$DBTUNE_CONFIG_TARGET" ]
+}
+
+@test "strict proposal grammar rejects every ambiguous input before apply preflight" {
+    local mode name
+    local cases=(
+        empty no-assignment before-section second-mysqld server-section client-section include includedir
+        bare-option empty-key empty-value inline-hash inline-semicolon multiple-equals canonical-duplicate
+        crlf control unsafe-key sensitive-key unreadable directory symlink
+    )
+    dbtune_lifecycle_confirm_force() {
+        touch "$BATS_TEST_TMPDIR/confirmation.log"
+    }
+
+    for mode in normal force; do
+        for name in "${cases[@]}"; do
+            reset_apply_preflight_fixture
+            write_strict_proposal_case "$name"
+
+            if [[ $mode == force ]]; then
+                run cmd_apply --force
+            else
+                run cmd_apply
+            fi
+
+            [ "$status" -eq 65 ]
+            [ ! -e "$BATS_TEST_TMPDIR/sql.log" ]
+            [ ! -e "$BATS_TEST_TMPDIR/confirmation.log" ]
+            assert_apply_preflight_unchanged
+        done
+    done
+}
+
+@test "partial parser output is never consumed by apply" {
+    reset_apply_preflight_fixture
+    dbtune_cnf_entries_strict() {
+        printf 'max_connections\t300\n'
+        return 65
+    }
+
+    run cmd_apply
+
+    [ "$status" -eq 65 ]
+    [ ! -e "$BATS_TEST_TMPDIR/sql.log" ]
+    assert_apply_preflight_unchanged
+}
+
+@test "exact live variable output rejects malformed and partial SQL responses" {
+    local name
+    local cases=(duplicate extra-key extra-field blank-row control partial-failure)
+
+    for name in "${cases[@]}"; do
+        reset_apply_preflight_fixture
+        export STUB_GLOBAL_STATUS=0
+        case $name in
+            duplicate) export STUB_GLOBAL_NAMES=$'max_connections\nmax_connections\nskip_name_resolve' ;;
+            extra-key) export STUB_GLOBAL_NAMES=$'max_connections\nskip_name_resolve\nunknown_extra' ;;
+            extra-field) export STUB_GLOBAL_NAMES=$'max_connections\textra\nskip_name_resolve' ;;
+            blank-row) export STUB_GLOBAL_NAMES=$'max_connections\n\nskip_name_resolve' ;;
+            control) export STUB_GLOBAL_NAMES=$'max_connections\nskip_name_resolve\001' ;;
+            partial-failure)
+                export STUB_GLOBAL_NAMES=max_connections
+                export STUB_GLOBAL_STATUS=2
+                ;;
+        esac
+
+        run cmd_apply
+
+        [ "$status" -eq 65 ]
+        [ -s "$BATS_TEST_TMPDIR/sql.log" ]
+        assert_apply_preflight_unchanged
+    done
+}
+
+@test "exact live variable command failure without output returns unavailable" {
+    reset_apply_preflight_fixture
+    export STUB_GLOBAL_NAMES=__NO_OUTPUT__
+    export STUB_GLOBAL_STATUS=2
+
+    run cmd_apply
+
+    [ "$status" -eq 69 ]
+    [ -s "$BATS_TEST_TMPDIR/sql.log" ]
+    assert_apply_preflight_unchanged
+}
+
+@test "records path replacement after hash check cannot change the live variable query" {
+    reset_apply_preflight_fixture
+    dbtune_lifecycle_after_records_hash() {
+        [[ -e $BATS_TEST_TMPDIR/records-replaced ]] || replace_apply_records "$1"
+    }
+    dbtune_sha256_file() {
+        local file=${1:-} hash
+
+        if command -v sha256sum >/dev/null 2>&1; then
+            hash=$(sha256sum "$file" | awk '{print $1}')
+        else
+            hash=$(shasum -a 256 "$file" | awk '{print $1}')
+        fi
+        if [[ $file == "$DBTUNE_STATE_DIR"/.apply-records.* ]]; then
+            if [[ -e $BATS_TEST_TMPDIR/records-hashed-once && ! -e $BATS_TEST_TMPDIR/records-replaced ]]; then
+                replace_apply_records "$file"
+            else
+                touch "$BATS_TEST_TMPDIR/records-hashed-once"
+            fi
+        fi
+        printf '%s\n' "$hash"
+    }
+
+    run cmd_apply
+
+    [ "$status" -eq 0 ]
+    grep -F "'max_connections'" "$BATS_TEST_TMPDIR/sql.log"
+    grep -F "'skip_name_resolve'" "$BATS_TEST_TMPDIR/sql.log"
+    cmp "$DBTUNE_CONFIG_TARGET" "$DBTUNE_STATE_DIR/proposed-99-zz-tuning.cnf"
+}
+
+@test "proposal snapshot mutation is detected at every copy and publication boundary" {
+    local hook
+    local hooks=(after-strict-parse before-history-copy before-target-copy before-publisher)
+
+    for hook in "${hooks[@]}"; do
+        reset_apply_preflight_fixture
+        dbtune_lifecycle_after_strict_parse() { return 0; }
+        dbtune_lifecycle_before_history_copy() { return 0; }
+        dbtune_lifecycle_before_target_copy() { return 0; }
+        dbtune_lifecycle_before_publish() { return 0; }
+        case $hook in
+            after-strict-parse)
+                dbtune_lifecycle_after_strict_parse() { replace_apply_snapshot "$1"; }
+                ;;
+            before-history-copy)
+                dbtune_lifecycle_before_history_copy() { replace_apply_snapshot "$1"; }
+                ;;
+            before-target-copy)
+                dbtune_lifecycle_before_target_copy() { replace_apply_snapshot "$1"; }
+                ;;
+            before-publisher)
+                dbtune_lifecycle_before_publish() {
+                    [[ $2 == *'.99-zz-tuning.cnf.tmp.'* && ! -e $BATS_TEST_TMPDIR/publisher-replaced ]] || return 0
+                    touch "$BATS_TEST_TMPDIR/publisher-replaced"
+                    printf '# replaced\n' >>"$2"
+                }
+                ;;
+        esac
+
+        run cmd_apply
+
+        [ "$status" -eq 65 ]
+        [[ "$output" == *changed* ]]
+        [ "$(cat "$DBTUNE_CONFIG_TARGET")" = 'original target' ]
+        [ "$(dbtune_state_read)" = proposed ]
+        [ ! -e "$DBTUNE_STATE_DIR/apply/current" ]
+        if [[ $hook == after-strict-parse || $hook == before-history-copy ]]; then
+            [ ! -e "$DBTUNE_STATE_DIR/apply" ]
+        fi
+    done
+}
+
+@test "proposal manifest exact schema rejects duplicate unknown missing and malformed records" {
+    local name manifest="$DBTUNE_STATE_DIR/proposal-manifest.tsv"
+    local cases=(duplicate-first duplicate-last identical-duplicate unknown missing-schema malformed-hash zero-count extra-fields)
+
+    for name in "${cases[@]}"; do
+        reset_apply_preflight_fixture
+        case $name in
+            duplicate-first)
+                { printf 'schema\t999\n'; cat "$manifest"; } >"$BATS_TEST_TMPDIR/manifest"; mv "$BATS_TEST_TMPDIR/manifest" "$manifest"
+                ;;
+            duplicate-last) printf 'schema\t999\n' >>"$manifest" ;;
+            identical-duplicate) printf 'schema\t1\n' >>"$manifest" ;;
+            unknown) printf 'unexpected\tvalue\n' >>"$manifest" ;;
+            missing-schema) awk -F '\t' '$1 != "schema"' "$manifest" >"$BATS_TEST_TMPDIR/manifest"; mv "$BATS_TEST_TMPDIR/manifest" "$manifest" ;;
+            malformed-hash) awk -F '\t' 'BEGIN {OFS="\t"} $1 == "proposal_hash" {$2="bad"} {print}' "$manifest" >"$BATS_TEST_TMPDIR/manifest"; mv "$BATS_TEST_TMPDIR/manifest" "$manifest" ;;
+            zero-count) awk -F '\t' 'BEGIN {OFS="\t"} $1 == "proposal_count" {$2="0"} {print}' "$manifest" >"$BATS_TEST_TMPDIR/manifest"; mv "$BATS_TEST_TMPDIR/manifest" "$manifest" ;;
+            extra-fields) awk -F '\t' 'BEGIN {OFS="\t"} $1 == "schema" {$3="extra"} {print}' "$manifest" >"$BATS_TEST_TMPDIR/manifest"; mv "$BATS_TEST_TMPDIR/manifest" "$manifest" ;;
+        esac
+
+        run cmd_apply
+
+        [ "$status" -eq 65 ]
+        [ ! -e "$BATS_TEST_TMPDIR/sql.log" ]
+        assert_apply_preflight_unchanged
+    done
 }
 
 @test "apply rejects a proposal changed after manifest creation" {
@@ -723,6 +997,237 @@ STUB
     run cmd_apply
     [ "$status" -eq 65 ]
     [ ! -e "$DBTUNE_CONFIG_TARGET" ]
+}
+
+@test "force cannot bypass live landmine critical or failed scans in every permitted state" {
+    local mode state failure
+
+    dbtune_lifecycle_confirm_force() { :; }
+    for mode in normal force; do
+        for state in audited analyzed proposed; do
+            [[ $mode == force || $state == proposed ]] || continue
+            for failure in critical failed; do
+                reset_apply_preflight_fixture
+                printf '%s\n' "$state" >"$DBTUNE_STATE_DIR/state"
+                : >"$BATS_TEST_TMPDIR/landmine-scan.log"
+                if [[ $failure == critical ]]; then
+                    export STUB_DEFAULTS_OUTPUT='--innodb-change-buffering=all\n'
+                    export STUB_DEFAULTS_STATUS=0
+                else
+                    export STUB_DEFAULTS_OUTPUT=
+                    export STUB_DEFAULTS_STATUS=7
+                fi
+
+                if [[ $mode == force ]]; then
+                    run cmd_apply --force
+                else
+                    run cmd_apply
+                fi
+
+                [ "$status" -eq 65 ]
+                [ "$(wc -l <"$BATS_TEST_TMPDIR/landmine-scan.log" | tr -d ' ')" -eq 1 ]
+                assert_apply_preflight_unchanged "$state"
+                [ ! -e "$DBTUNE_STATE_DIR/systemctl.log" ]
+            done
+        done
+    done
+}
+
+@test "live landmine preflight rejects an old audit before scanning or durable mutation" {
+    printf 'original target\n' >"$DBTUNE_CONFIG_TARGET"
+    awk -F '\t' '$1 !~ /^landmine[.]scan[.]/' "$DBTUNE_STATE_DIR/audit.tsv" >"$BATS_TEST_TMPDIR/old-audit.tsv"
+    mv "$BATS_TEST_TMPDIR/old-audit.tsv" "$DBTUNE_STATE_DIR/audit.tsv"
+    dbtune_provenance_write_audit_manifest "$DBTUNE_STATE_DIR/audit-manifest.tsv" \
+        lifecycle-run "$DBTUNE_STATE_DIR/audit.tsv" "$DBTUNE_STATE_DIR/apps.tsv" "$DBTUNE_STATE_DIR/databases.tsv"
+    write_manifest
+
+    run cmd_apply
+
+    [ "$status" -eq 65 ]
+    [ ! -e "$BATS_TEST_TMPDIR/landmine-scan.log" ]
+    assert_apply_preflight_unchanged
+}
+
+@test "live landmine scan observes defaults changed after proposal validation" {
+    printf 'original target\n' >"$DBTUNE_CONFIG_TARGET"
+    export STUB_DEFAULTS_OUTPUT=
+    dbtune_lifecycle_after_manifest_check() {
+        export STUB_DEFAULTS_OUTPUT='--innodb-change-buffering=all\n'
+    }
+
+    run cmd_apply
+
+    [ "$status" -eq 65 ]
+    [ "$(wc -l <"$BATS_TEST_TMPDIR/landmine-scan.log" | tr -d ' ')" -eq 1 ]
+    assert_apply_preflight_unchanged
+}
+
+@test "live landmine warning is bound into new history without bypassing other checks" {
+    local history expected_fingerprint
+
+    printf 'original target\n' >"$DBTUNE_CONFIG_TARGET"
+    export STUB_DEFAULTS_OUTPUT='--innodb-flush-method=O_DIRECT\n'
+    expected_fingerprint=$(printf 'innodb_flush_method\twarning\n' | dbtune_sha256_stream)
+
+    run cmd_apply
+
+    [ "$status" -eq 0 ]
+    history=$(cat "$DBTUNE_STATE_DIR/apply/current")
+    grep -Fx $'schema\t1' "$history/manifest.tsv"
+    grep -Fx $'landmine_scan_timestamp\t2026-07-31T12:00:00Z' "$history/manifest.tsv"
+    grep -Fx $'landmine_scan_method\tmariadbd_print_defaults' "$history/manifest.tsv"
+    grep -Fx $'landmine_loaded_fingerprint\t'"$expected_fingerprint" "$history/manifest.tsv"
+    grep -Fx $'force\t0' "$history/manifest.tsv"
+    [ "$(dbtune_lifecycle_manifest_value "$history" landmine_scan_hash)" = "$(dbtune_sha256_file "$history/loaded-defaults.tsv")" ]
+    grep -Fx $'landmine.innodb_flush_method.loaded\t1' "$history/loaded-defaults.tsv"
+
+    reset_apply_preflight_fixture
+    export STUB_DEFAULTS_OUTPUT='--innodb-flush-method=O_DIRECT\n'
+    export STUB_WSREP_ON=ON
+    run cmd_apply
+    [ "$status" -eq 65 ]
+    assert_apply_preflight_unchanged
+}
+
+@test "forced apply binds current audit identity without a valid proposal manifest" {
+    local history expected_run_id expected_audit_hash
+
+    printf 'audit.run_id\tartifact-run\n' >>"$DBTUNE_STATE_DIR/audit.tsv"
+    dbtune_provenance_write_audit_manifest "$DBTUNE_STATE_DIR/audit-manifest.tsv" \
+        lifecycle-run "$DBTUNE_STATE_DIR/audit.tsv" "$DBTUNE_STATE_DIR/apps.tsv" "$DBTUNE_STATE_DIR/databases.tsv"
+    expected_run_id=$(dbtune_manifest_value "$DBTUNE_STATE_DIR/audit-manifest.tsv" run_id)
+    expected_audit_hash=$(dbtune_manifest_value "$DBTUNE_STATE_DIR/audit-manifest.tsv" audit_hash)
+    rm -f "$DBTUNE_STATE_DIR/proposal-manifest.tsv"
+    dbtune_lifecycle_confirm_force() { :; }
+
+    run cmd_apply --force
+
+    [ "$status" -eq 0 ]
+    history=$(cat "$DBTUNE_STATE_DIR/apply/current")
+    [ "$(dbtune_lifecycle_manifest_value "$history" run_id)" = "$expected_run_id" ]
+    [ "$(dbtune_lifecycle_manifest_value "$history" audit_hash)" = "$expected_audit_hash" ]
+    [ "$(dbtune_lifecycle_manifest_value "$history" force)" = 1 ]
+}
+
+@test "force requires an audit manifest authenticating every audit artifact" {
+    local case_name state expected_status artifact
+
+    dbtune_lifecycle_confirm_force() { :; }
+    cp "$DBTUNE_STATE_DIR/audit.tsv" "$BATS_TEST_TMPDIR/authenticated-audit.tsv"
+    cp "$DBTUNE_STATE_DIR/apps.tsv" "$BATS_TEST_TMPDIR/authenticated-apps.tsv"
+    cp "$DBTUNE_STATE_DIR/databases.tsv" "$BATS_TEST_TMPDIR/authenticated-databases.tsv"
+    cp "$DBTUNE_STATE_DIR/audit-manifest.tsv" "$BATS_TEST_TMPDIR/authenticated-audit-manifest.tsv"
+    for state in audited analyzed proposed; do
+        for case_name in absent audit-mismatch apps-mismatch databases-mismatch; do
+            cp "$BATS_TEST_TMPDIR/authenticated-audit.tsv" "$DBTUNE_STATE_DIR/audit.tsv"
+            cp "$BATS_TEST_TMPDIR/authenticated-apps.tsv" "$DBTUNE_STATE_DIR/apps.tsv"
+            cp "$BATS_TEST_TMPDIR/authenticated-databases.tsv" "$DBTUNE_STATE_DIR/databases.tsv"
+            cp "$BATS_TEST_TMPDIR/authenticated-audit-manifest.tsv" "$DBTUNE_STATE_DIR/audit-manifest.tsv"
+            reset_apply_preflight_fixture
+            printf '%s\n' "$state" >"$DBTUNE_STATE_DIR/state"
+            expected_status=65
+            case $case_name in
+                absent)
+                    rm -f "$DBTUNE_STATE_DIR/audit-manifest.tsv"
+                    expected_status=66
+                    ;;
+                audit-mismatch) artifact=audit.tsv ;;
+                apps-mismatch) artifact=apps.tsv ;;
+                databases-mismatch) artifact=databases.tsv ;;
+            esac
+            if [[ $case_name != absent ]]; then
+                printf 'stale\tevidence\n' >>"$DBTUNE_STATE_DIR/$artifact"
+            fi
+
+            run cmd_apply --force
+
+            [ "$status" -eq "$expected_status" ]
+            assert_apply_preflight_unchanged "$state"
+        done
+    done
+}
+
+@test "force revalidates audit provenance at final history preparation" {
+    dbtune_lifecycle_confirm_force() { :; }
+    printf 'original target\n' >"$DBTUNE_CONFIG_TARGET"
+    dbtune_lifecycle_after_manifest_check() {
+        printf 'stale\tevidence\n' >>"$DBTUNE_STATE_DIR/apps.tsv"
+    }
+
+    run cmd_apply --force
+
+    [ "$status" -eq 65 ]
+    assert_apply_preflight_unchanged
+}
+
+@test "rollback ignores landmine scanner failure corrupt audit and unsafe current defaults" {
+    local history scans_before
+
+    printf 'original target\n' >"$DBTUNE_CONFIG_TARGET"
+    cmd_apply >/dev/null
+    history=$(cat "$DBTUNE_STATE_DIR/apply/current")
+    scans_before=$(wc -l <"$BATS_TEST_TMPDIR/landmine-scan.log" | tr -d ' ')
+    printf 'landmine.scan.status\tfailed\nlandmine.innodb_change_buffering.loaded\t2\n' >>"$DBTUNE_STATE_DIR/audit.tsv"
+    export STUB_DEFAULTS_OUTPUT='--innodb-change-buffering=all\n'
+    export STUB_DEFAULTS_STATUS=7
+    awk -F '\t' '$1 != "schema" && $1 !~ /^landmine_/' "$history/manifest.tsv" >"$BATS_TEST_TMPDIR/old-manifest.tsv"
+    mv "$BATS_TEST_TMPDIR/old-manifest.tsv" "$history/manifest.tsv"
+
+    run cmd_rollback
+
+    [ "$status" -eq 0 ]
+    [ "$(cat "$DBTUNE_CONFIG_TARGET")" = 'original target' ]
+    [ "$(wc -l <"$BATS_TEST_TMPDIR/landmine-scan.log" | tr -d ' ')" -eq "$scans_before" ]
+}
+
+@test "new history schema requires exact live landmine metadata" {
+    local history
+
+    printf 'original target\n' >"$DBTUNE_CONFIG_TARGET"
+    cmd_apply >/dev/null
+    history=$(cat "$DBTUNE_STATE_DIR/apply/current")
+    awk -F '\t' '$1 != "landmine_scan_hash"' "$history/manifest.tsv" >"$BATS_TEST_TMPDIR/incomplete-manifest.tsv"
+    mv "$BATS_TEST_TMPDIR/incomplete-manifest.tsv" "$history/manifest.tsv"
+
+    run cmd_rollback
+
+    [ "$status" -eq 65 ]
+    [ "$(dbtune_state_read)" = applied ]
+    cmp "$DBTUNE_CONFIG_TARGET" "$history/proposed.cnf"
+}
+
+@test "rollback ignores landmine scanner during failed apply recovery and interrupted continuation" {
+    local scans_before
+
+    printf 'original target\n' >"$DBTUNE_CONFIG_TARGET"
+    dbtune_lifecycle_before_publish() {
+        export STUB_DEFAULTS_OUTPUT='--innodb-change-buffering=all\n'
+        export STUB_DEFAULTS_STATUS=7
+    }
+    export STUB_RESTART_FAIL=1
+
+    run cmd_apply --restart
+
+    [ "$status" -ne 0 ]
+    [ "$(cat "$DBTUNE_CONFIG_TARGET")" = 'original target' ]
+    [ "$(wc -l <"$BATS_TEST_TMPDIR/landmine-scan.log" | tr -d ' ')" -eq 1 ]
+
+    dbtune_lifecycle_before_publish() { :; }
+    export STUB_RESTART_FAIL=0 STUB_DEFAULTS_STATUS=0 STUB_DEFAULTS_OUTPUT=
+    prepare_apply_a_b
+    export DBTUNE_FAULT_INJECT=after_rollback_intent
+    run cmd_rollback
+    [ "$status" -eq 99 ]
+    unset DBTUNE_FAULT_INJECT
+    scans_before=$(wc -l <"$BATS_TEST_TMPDIR/landmine-scan.log" | tr -d ' ')
+    printf 'landmine.scan.status\tfailed\n' >>"$DBTUNE_STATE_DIR/audit.tsv"
+    export STUB_DEFAULTS_OUTPUT='--innodb-change-buffering=all\n' STUB_DEFAULTS_STATUS=7
+
+    run dbtune_lifecycle_recover_if_needed
+
+    [ "$status" -eq 0 ]
+    assert_apply_a_restored_from_b
+    [ "$(wc -l <"$BATS_TEST_TMPDIR/landmine-scan.log" | tr -d ' ')" -eq "$scans_before" ]
 }
 
 @test "apply rejects critical version and missing-backup findings" {
@@ -1520,15 +2025,21 @@ STUB
         done
     }
 
-    dbtune_dispatch apply >"$BATS_TEST_TMPDIR/apply.out" 2>&1 &
+    (
+        dbtune_test_close_non_std_fds
+        dbtune_dispatch apply
+    ) >"$BATS_TEST_TMPDIR/apply.out" 2>&1 &
     apply_pid=$!
-    for _ in {1..200}; do
+    for _ in {1..1000}; do
         [[ -e $BATS_TEST_TMPDIR/apply-paused ]] && break
         sleep 0.01
     done
     [ -e "$BATS_TEST_TMPDIR/apply-paused" ]
 
-    dbtune_dispatch propose >"$BATS_TEST_TMPDIR/propose.out" 2>&1 &
+    (
+        dbtune_test_close_non_std_fds
+        dbtune_dispatch propose
+    ) >"$BATS_TEST_TMPDIR/propose.out" 2>&1 &
     propose_pid=$!
     sleep 0.1
     kill -0 "$propose_pid"
@@ -1572,4 +2083,21 @@ STUB
     [ "$(dbtune_sha256_file "$DBTUNE_CONFIG_TARGET")" = "$target_hash" ]
     [ ! -e "$BATS_TEST_TMPDIR/mktemp.log" ]
     [ ! -e "$DBTUNE_STATE_DIR/apply" ]
+}
+
+@test "publisher isolates Python from hostile module search paths" {
+    mkdir "$BATS_TEST_TMPDIR/pythonpath"
+    cat >"$BATS_TEST_TMPDIR/pythonpath/sitecustomize.py" <<'PY'
+import os
+
+with open(os.environ["PYTHON_STARTUP_MARKER"], "w", encoding="utf-8") as marker:
+    marker.write("loaded\n")
+PY
+    export PYTHONPATH="$BATS_TEST_TMPDIR/pythonpath"
+    export PYTHON_STARTUP_MARKER="$BATS_TEST_TMPDIR/python-startup-marker"
+
+    run cmd_apply
+
+    [ "$status" -eq 0 ]
+    [ ! -e "$PYTHON_STARTUP_MARKER" ]
 }

@@ -8,7 +8,7 @@ Goal: a tool that **audits** each server, **collects** metrics from production t
 
 **Approved decisions:**
 - v1 is standalone per server; the report is also available as flat-key JSON, allowing future fleet aggregation in v2 without rework.
-- MariaDB restart is always manual through the RunCloud panel (the tool only provides instructions; the `--restart` flag is for pilot scripting only).
+- MariaDB restart is always manual through the RunCloud panel (the tool only provides instructions; the `--restart` flag is for explicitly approved lifecycle scripting only).
 
 ## Tool form
 
@@ -37,11 +37,13 @@ dbtune status | version
 dbtune _tick                          # internal, invoked by the systemd timer
 ```
 
-States: `idle -> audited -> collecting -> collected -> analyzed -> proposed -> applied -> verified` (plus `rolled_back`, `recovery_required`, and `rollback_failed`). An invalid command for the current state receives a clear rejection. **Apply without measurement is blocked** ("a preset without measurement is guesswork"). `--force` requires the exact active-language confirmation phrase and marks the report as `WITHOUT MEASUREMENTS`/`BEZ MERANIA`. Apply and force additionally require separate authoritative backup evidence or a second explicit TTY confirmation.
+States: `idle -> audited -> collecting -> collected -> analyzed -> proposed -> applied -> verified` (plus `rolled_back`, `recovery_required`, and `rollback_failed`). An invalid command for the current state receives a clear rejection. **Apply without measurement is blocked** ("a preset without measurement is guesswork"). Interactive `--force` may bypass only measurement/analysis and proposal-manifest provenance, including its analysis-derived proposal mapping, the normal `proposed` state requirement, and the local time window; it accepts only `audited|analyzed|proposed`. It never bypasses proposal grammar/snapshot, authenticated audit and loaded-default evidence, live variable-name existence, blocking findings in any present analysis, Galera, mydumper, backup, target/topology/ownership, publication, daemon validation, restart, rollback, or recovery guards. Apply and force additionally require separate authoritative backup evidence or a second explicit TTY confirmation.
 
 ## Language, schema, and release contract
 
 - `DBTUNE_UI_LANG=en|sk` is the public interface selector. Unset or empty means English. Any unsupported non-empty value exits with status 64 before command dispatch. Operating-system locale variables do not select the interface language.
+- The exact production runtime operator allowlist is `DBTUNE_UI_LANG`, `DBTUNE_STATE_DIR`, `DBTUNE_CONFIG_TARGET`, `DBTUNE_CONFIG_ALLOWED_DIR`, `DBTUNE_ROOT_CNF`, `DBTUNE_LOG_LEVEL`, and `DBTUNE_MAX_BACKUP_AGE_SECONDS`. Production removes every other exported `DBTUNE_*` value, including all test-only command/path, SQL-auth, clock, ownership, fault, and threshold overrides.
+- Source, production, and integration builds embed immutable `source-test`, `production`, and `integration-test` profiles. Production cannot be sourced. The default and release build produce only `dist/dbtune`; integration writes isolated `dist/dbtune-integration`; installer and release checks reject every non-production profile.
 - `collect start` persists the validated language as `ui_lang` in `collect.tsv`; `_tick` restores it before diagnostics and automatic analyze/report execution.
 - English force phrase: `APPLY WITHOUT MEASUREMENTS`. Slovak force phrase: `APLIKUJ BEZ MERANIA`.
 - English backup phrase: `I CONFIRM A RESTORABLE BACKUP`. Slovak backup phrase: `POTVRDZUJEM OBNOVITELNU ZALOHU`.
@@ -52,18 +54,19 @@ States: `idle -> audited -> collecting -> collected -> analyzed -> proposed -> a
 ## AUDIT phase (read-only)
 
 - **Hardware:** CPU, RAM, swap, storage (ROTA plus NVMe detection, including md RAID through slave devices), and free space.
-- **MariaDB:** version and version gates; effective variables; a **landmine scan** of existing configuration for variables removed by newer versions (`innodb_change_buffering` on 11.x is a critical finding because the server would fail on its next restart; also `innodb_buffer_pool_instances`, `innodb_log_files_in_group`, and others).
+- **MariaDB:** version and version gates; effective variables; a **landmine scan** of the effective startup arguments emitted by `mariadbd --print-defaults` (or `mysqld --print-defaults` only when `mariadbd` is absent) for removed variables. A failed scan makes audit evidence incomplete; critical loaded options such as `innodb_change_buffering` on 11.x block forward apply.
 - **RunCloud layer:** `runcloud.cnf` values, `skip-log-bin`, query-cache hit rate, `open_files_limit` versus systemd `LimitNOFILE`, unattended-upgrades `MariaDB:` origin, backup (mydumper) frequency, wp-cron setup, `performance_schema`, and Galera detection (which rejects apply).
 - **Applications:** `/home/*/webapps/*` WordPress detection, tolerant wp-config parser (define/const/env variants, custom prefix, multisite; fallback through wp-cli if available, otherwise SHOW TABLES), WooCommerce, Redis plus the `object-cache.php` drop-in, and page cache. Non-WordPress applications are marked and their databases are included in sizing.
 - **Per database:** dataset, largest tables, `kb_per_row` log detector, autoload, HPOS, sessions, Action Scheduler (including failed actions), transients, and foreign indexes on postmeta.
 - **PHP-FPM:** sum of `pm.max_children` across every version and pool (OLS stack produces a warning because formula input is missing).
-- **Security mini-check:** bind address, wildcard grants, and a `root.cnf` note. Reports never contain passwords.
+- **Security mini-check:** bind address, listener, and complete account-host grant enumeration plus a `root.cnf` note. `skip_name_resolve` is proposal-capable only when every unique HEX-encoded grant row is valid, `security.grants_audited=1`, and `security.hostname_grant_count=0`; reports retain only counts/status and never account hosts or passwords.
 - **Root authentication probe:** unix_socket, then `root.cnf` defaults-extra-file; the method is remembered and the password never appears on the command line or in logs.
 
 ## COLLECT phase
 
 - **systemd oneshot service and timer** (`OnCalendar=*:0/5`, `Persistent=false`, enabled so collection resumes automatically after reboot). Tick uses `flock` and **always exits 0**; health is tracked in a health file, not a failed unit.
-- Every tick is a **60-second two-point delta** (two single SQL round trips for GLOBAL STATUS plus `/proc` mariadbd CPU, `free`, and load average), appended to `samples.tsv`: short-window buffer-pool hit ratio, misses/s, data-read/s, `Handler_read_rnd_next`/s, temporary-disk percentage, Threads_running/connected, query cache and its denominator, log waits, wait free, CPU percentage, RAM/swap, `restart_flag`, actual monotonic interval, and sample status. Rates and CPU use the real interval including SQL/scheduler delay; invalid or excessively long intervals are degraded and excluded by rules. Seven days is approximately 500 KB.
+- Every tick is a **60-second two-point delta** (two exact 13-counter SQL snapshots plus `/proc` mariadbd CPU, `free`, and load average), appended to the current 20-column `samples.tsv`. Canonical uint64 values are validated through `18446744073709551615` and differenced without AWK numeric coercion. Field 18 is `com_select_delta`; query-cache hit rate is `100 * Qcache_hits_delta / Com_select_delta`, with zero denominators idle. Cross-counter invariants require buffer-pool reads <= read requests, disk temporary tables <= all temporary tables, and query-cache hits <= `Com_select`.
+- Sample statuses are `ok`, `degraded_interval`, `degraded_counter_reset`, `degraded_counter_inconsistent`, and `degraded_restart_identity`. Restart evidence comes from mariadbd PID plus `/proc` start time, not uptime alone; confirmed restart rows set `restart_flag=1` and zero deltas. Every degraded or restart row is excluded. Active v0.4.1 20-column (`qcache_queries_delta`) and legacy 17-column collections must stop and begin a fresh audit/collection cycle before writes; old apply/rollback history remains available.
 - **Slow log** runtime (`long_query_time=2` in `/var/log/mysql/slow.log` for logrotate coverage). **Self-healing:** tick detects an uptime reset (an unattended-upgrades restart), re-enables the slow log, and records `db_restart_detected`; `restart_flag` lets analyze segment lifetime counters correctly.
 - **Daily:** per-database size snapshot in `dbsize.tsv` (growth rate for expansion reserve); disk guards for free space, sample-file size, and a slow log above 2 GB.
 - **Automatic stop** after `--days`, followed by automatic `analyze` and `report`, leaving a completed report on the server after one week. The persisted collector language controls unattended diagnostics and the final report.
@@ -93,11 +96,12 @@ The report retains the source document's philosophy: the "application layer - so
 ## APPLY / VERIFY / ROLLBACK - defense in depth
 
 1. Before writing, validate variable names against live `information_schema`.
-2. Write **only** `/etc/mysql/mariadb.conf.d/99-zz-tuning.cnf` (`runcloud.cnf` is never touched), then run capability-probed `mariadbd --validate-config` with the parser from the Markdown (it ignores lock errors from the running server). On the `--validate-config` path, validation uses a `root:mysql` mode `0710` parent; root-owned mode `0600` probe and output logs stay outside the only mysql-writable path, a dedicated `mysql:mysql` mode `0700` datadir. The fallback uses the root-owned capture workspace and does not create a mysql-writable datadir.
-3. Guard the unattended-upgrades window (reject apply from 05:30 to 07:30 without `--force`) and check the process list for a running mydumper backup before restart instructions.
-4. Restart is decoupled: apply prints exact RunCloud panel instructions and expectations (a longer first start after a redo-log change), plus **`ROLLBACK.txt` with literal commands** so recovery does not require the tool itself.
-5. `rollback` is a filesystem-only operation (mv plus systemctl start), without SQL, and works while the database is down.
-6. `verify --post` checks no growth in wait_free, log_waits, or aborted relative to a reset-aware baseline, stable swap, and stores the post-restart baseline. `verify --24h` compares against the successful post-restart baseline.
+2. Require complete safe loaded-default evidence from the authenticated audit, then repeat daemon `--print-defaults` as the final fresh forward scan before new apply history and mutation intent. Scan/audit failure blocks normal and forced apply; rollback and crash recovery never invoke or depend on either check, including for old history.
+3. Write **only** `/etc/mysql/mariadb.conf.d/99-zz-tuning.cnf` (`runcloud.cnf` is never touched), then run capability-probed `mariadbd --validate-config` with the parser from the Markdown (it ignores lock errors from the running server). On the `--validate-config` path, validation uses a `root:mysql` mode `0710` parent; root-owned mode `0600` probe and output logs stay outside the only mysql-writable path, a dedicated `mysql:mysql` mode `0700` datadir. The fallback uses the root-owned capture workspace and does not create a mysql-writable datadir.
+4. Guard the unattended-upgrades window (reject apply from 05:30 to 07:30 without `--force`) and check the process list for a running mydumper backup before restart instructions.
+5. Restart is decoupled: apply prints exact RunCloud panel instructions and expectations (a longer first start after a redo-log change), plus **`ROLLBACK.txt` with literal commands** so recovery does not require the tool itself.
+6. `rollback` is a filesystem-only operation (mv plus systemctl start), without SQL, and works while the database is down.
+7. `verify --post` checks no growth in wait_free, log_waits, or aborted relative to a reset-aware baseline, stable swap, and stores the post-restart baseline. `verify --24h` compares against the successful post-restart baseline.
 
 ## Repository structure and tests
 
@@ -123,7 +127,7 @@ docs/RUNBOOK.md
 5. Report and proposal
 6. Apply, verify, and rollback
 7. Tests (fixtures, Bats, and Docker harness), continuously alongside modules
-8. RUNBOOK: pilot on 1-2 servers (one per MariaDB family, with verified backups), stage 5 servers, then process the rest of the fleet in batches of approximately 10, always applying manually per server
+8. RUNBOOK: audit-only pilot on an approved host, separate consented no-apply measurement rehearsal, stage 5 servers, then process the rest of the fleet in batches of approximately 10, always applying manually per server
 
 After the skeleton, modules 2-5 can be developed in parallel with final integration and review.
 
@@ -131,7 +135,7 @@ After the skeleton, modules 2-5 can be developed in parallel with final integrat
 
 - Clean `shellcheck`, green `bats` against fixtures for both MariaDB families, and validated emitted JSON.
 - Docker harness: full lifecycle from audit through ticks, analyze, report, propose, CNF validation in the database container, apply, restart, and `verify --post`, in English and Slovak with equivalent proposal keys and values.
-- Real pilot: one fleet server, comparing the audit with manual measurements from the reference store in the Markdown.
+- Real P1 pilot: one approved non-critical fleet server, running only the audit-only procedure with no collection or lifecycle command. A no-apply measurement rehearsal is a separate, operationally mutating checkpoint requiring separate consent.
 
 ## Out of scope for v1
 

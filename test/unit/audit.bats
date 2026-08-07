@@ -20,6 +20,7 @@ setup() {
     source "$BATS_TEST_DIRNAME/../../lib/00-header.sh"
     source "$BATS_TEST_DIRNAME/../../lib/05-i18n.sh"
     source "$BATS_TEST_DIRNAME/../../lib/10-util.sh"
+    source "$BATS_TEST_DIRNAME/../../lib/15-mariadb-safety.sh"
     source "$BATS_TEST_DIRNAME/../../lib/20-audit.sh"
 }
 
@@ -74,6 +75,8 @@ mariadb.variable.wsrep_on	OFF
 mariadb.status.uptime	86400
 mariadb.status.max_used_connections	120
 mariadb.status.key_read_requests	0
+landmine.scan.status	complete
+landmine.scan.method	mariadbd_print_defaults
 EOF
     printf '%s\t\n' mariadb.variable.log_slow_verbosity mariadb.variable.bind_address >>"$file"
 }
@@ -279,23 +282,265 @@ EOF
     done < <(dbtune_audit_effective_variables)
 }
 
-@test "landmine scan applies MariaDB version gates" {
-    cat >"$DBTUNE_MYSQL_CONFIG_DIR/99-old.cnf" <<'EOF'
-[mysqld]
-innodb_change_buffering = all
-innodb_buffer_pool_instances = 8
-innodb_log_files_in_group = 2
+@test "MariaDB audit preserves uint64 query-cache evidence and rejects inexact snapshots" {
+    local malformed
+    for malformed in none missing duplicate conflicting unknown extra empty signed decimal over_range; do
+        : >"$BATS_TEST_TMPDIR/audit.tsv"
+        : >"$BATS_TEST_TMPDIR/databases.tsv"
+        dbtune_audit_sql() {
+            case $1 in
+                'SELECT VERSION()') printf '11.4.12-MariaDB\n' ;;
+                *GLOBAL_VARIABLES*) complete_mariadb_variable_rows ;;
+                *GLOBAL_STATUS*)
+                    rows=$'aborted_connects\t0\ncom_select\t9007199254740993\ncreated_tmp_disk_tables\t0\ncreated_tmp_tables\t0\nhandler_read_rnd_next\t0\ninnodb_buffer_pool_pages_data\t0\ninnodb_buffer_pool_pages_free\t0\ninnodb_buffer_pool_read_requests\t0\ninnodb_buffer_pool_reads\t0\ninnodb_buffer_pool_wait_free\t0\ninnodb_data_read\t0\ninnodb_log_waits\t0\nkey_read_requests\t0\nmax_used_connections\t0\nqcache_hits\t9007199254740992\nquestions\t0\nslow_queries\t0\nthreads_connected\t0\nthreads_running\t0\nuptime\t18446744073709551615'
+                    case $malformed in
+                        none) ;;
+                        missing) rows=$(awk -F '\t' '$1 != "qcache_hits"' <<<"$rows") ;;
+                        duplicate) rows+=$'\nqcache_hits\t9007199254740992' ;;
+                        conflicting) rows+=$'\nqcache_hits\t1' ;;
+                        unknown) rows+=$'\nunknown_counter\t1' ;;
+                        extra) rows=$(awk -F '\t' -v OFS='\t' '$1 == "qcache_hits" {$3="extra"} {print}' <<<"$rows") ;;
+                        empty) rows=$(awk -F '\t' -v OFS='\t' '$1 == "qcache_hits" {$2=""} {print}' <<<"$rows") ;;
+                        signed) rows=$(awk -F '\t' -v OFS='\t' '$1 == "qcache_hits" {$2="-1"} {print}' <<<"$rows") ;;
+                        decimal) rows=$(awk -F '\t' -v OFS='\t' '$1 == "qcache_hits" {$2="1.5"} {print}' <<<"$rows") ;;
+                        over_range) rows=$(awk -F '\t' -v OFS='\t' '$1 == "qcache_hits" {$2="18446744073709551616"} {print}' <<<"$rows") ;;
+                    esac
+                    printf '%s\n' "$rows"
+                    ;;
+                *GROUP\ BY\ TABLE_SCHEMA*) printf '' ;;
+            esac
+        }
+
+        dbtune_audit_collect_mariadb "$BATS_TEST_TMPDIR/audit.tsv" "$BATS_TEST_TMPDIR/databases.tsv"
+
+        if [[ $malformed == none ]]; then
+            [ "$(awk -F '\t' '$1 == "mariadb.status.uptime" {print $2}' "$BATS_TEST_TMPDIR/audit.tsv")" = 18446744073709551615 ]
+            [ "$(awk -F '\t' '$1 == "mariadb.query_cache_hit_pct" {print $2}' "$BATS_TEST_TMPDIR/audit.tsv")" = 100.00 ]
+        else
+            [ "$(awk -F '\t' '$1 == "mariadb.query_cache_hit_pct" {print $2}' "$BATS_TEST_TMPDIR/audit.tsv")" = unknown ]
+            run awk -F '\t' '$1 == "mariadb.status.uptime" {found=1} END {exit found}' "$BATS_TEST_TMPDIR/audit.tsv"
+            [ "$status" -eq 0 ]
+        fi
+    done
+}
+
+write_defaults_daemon() {
+    local name=$1
+    local version=$2
+    local print_status=${3:-0}
+    local stdout=${4-}
+    local stderr=${5-}
+
+    cat >"$BATS_TEST_TMPDIR/$name" <<'STUB'
+#!/usr/bin/env bash
+case $1 in
+    --version) printf '%s\n' "$STUB_VERSION" ;;
+    --print-defaults)
+        if [[ ${STUB_STDOUT:-} == __NUL__ ]]; then
+            printf '%b' '--max-connections=200\0\n'
+        else
+            [[ -z ${STUB_STDOUT:-} ]] || printf '%b' "$STUB_STDOUT"
+        fi
+        [[ -z ${STUB_STDERR:-} ]] || printf '%b' "$STUB_STDERR" >&2
+        exit "${STUB_PRINT_STATUS:-0}"
+        ;;
+    *) exit 64 ;;
+esac
+STUB
+    chmod +x "$BATS_TEST_TMPDIR/$name"
+    export STUB_VERSION="$version" STUB_PRINT_STATUS="$print_status" STUB_STDOUT="$stdout" STUB_STDERR="$stderr"
+}
+
+@test "loaded defaults catalog is the single exact landmine definition" {
+    run dbtune_landmine_catalog
+
+    [ "$status" -eq 0 ]
+    [ "$output" = $'innodb_file_format\t10.3\tcritical\treason_variable_removed_startup\ninnodb_file_format_max\t10.3\tcritical\treason_variable_removed_startup\ninnodb_buffer_pool_instances\t10.6\tcritical\treason_variable_removed_config\ninnodb_log_files_in_group\t10.6\tcritical\treason_variable_removed_config\ninnodb_change_buffering\t11.0\tcritical\treason_variable_removed_startup\ninnodb_flush_method\t11.0\twarning\treason_flush_method_deprecated' ]
+}
+
+@test "loaded defaults uses mysqld only when mariadbd is absent" {
+    rm -f "$BATS_TEST_TMPDIR/mariadbd"
+    write_defaults_daemon mysqld 'mysqld  Ver 15.1 Distrib 11.4.12-MariaDB' 0 \
+        '--innodb-change-buffering=all --unknown-valid=value\n'
+    PATH="$BATS_TEST_TMPDIR:/usr/bin:/bin"
+
+    run dbtune_loaded_defaults_scan "$BATS_TEST_TMPDIR/scan.tsv"
+
+    [ "$status" -eq 0 ]
+    [ "$(cat "$BATS_TEST_TMPDIR/scan.tsv")" = $'landmine.scan.status\tcomplete\nlandmine.scan.method\tmysqld_print_defaults\nlandmine.innodb_change_buffering.loaded\t1\nlandmine.innodb_change_buffering.severity\tcritical\nfinding.landmine.innodb_change_buffering\tcritical' ]
+}
+
+@test "loaded defaults does not hide a failing mariadbd behind mysqld" {
+    write_defaults_daemon mariadbd 'mariadbd  Ver 15.1 Distrib 11.4.12-MariaDB' 7 '' 'diagnostic only\n'
+    cp "$BATS_TEST_TMPDIR/mariadbd" "$BATS_TEST_TMPDIR/mysqld"
+    PATH="$BATS_TEST_TMPDIR:/usr/bin:/bin"
+
+    run dbtune_loaded_defaults_scan "$BATS_TEST_TMPDIR/scan.tsv"
+
+    [ "$status" -eq 69 ]
+    [ "$(cat "$BATS_TEST_TMPDIR/scan.tsv")" = $'landmine.scan.status\tfailed\nlandmine.scan.method\tmariadbd_print_defaults' ]
+}
+
+@test "loaded defaults publishes failed evidence when no daemon command is available" {
+    rm -f "$BATS_TEST_TMPDIR/mariadbd" "$BATS_TEST_TMPDIR/mysqld"
+    PATH="$BATS_TEST_TMPDIR:/usr/bin:/bin"
+
+    run dbtune_loaded_defaults_scan "$BATS_TEST_TMPDIR/scan.tsv"
+
+    [ "$status" -eq 69 ]
+    [ "$(cat "$BATS_TEST_TMPDIR/scan.tsv")" = $'landmine.scan.status\tfailed\nlandmine.scan.method\tmariadbd_print_defaults' ]
+}
+
+@test "loaded defaults accepts empty success and ignores stderr diagnostics" {
+    write_defaults_daemon mariadbd 'mariadbd  Ver 15.1 Distrib 11.4.12-MariaDB' 0 '' \
+        '--innodb-change-buffering=stderr-is-not-evidence\n'
+    PATH="$BATS_TEST_TMPDIR:/usr/bin:/bin"
+
+    run dbtune_loaded_defaults_scan "$BATS_TEST_TMPDIR/scan.tsv"
+
+    [ "$status" -eq 0 ]
+    [ "$(cat "$BATS_TEST_TMPDIR/scan.tsv")" = $'landmine.scan.status\tcomplete\nlandmine.scan.method\tmariadbd_print_defaults' ]
+    run dbtune_loaded_defaults_assert_safe "$BATS_TEST_TMPDIR/scan.tsv"
+    [ "$status" -eq 0 ]
+}
+
+@test "loaded defaults exact contract rejects CRLF in validation assertion and fingerprint" {
+    local validate_status assert_status fingerprint_status
+
+    printf 'landmine.scan.status\tcomplete\r\nlandmine.scan.method\tmariadbd_print_defaults\r\nlandmine.innodb_change_buffering.loaded\t1\r\nlandmine.innodb_change_buffering.severity\tcritical\r\nfinding.landmine.innodb_change_buffering\tcritical\r\n' \
+        >"$BATS_TEST_TMPDIR/crlf-scan.tsv"
+
+    run dbtune_loaded_defaults_validate "$BATS_TEST_TMPDIR/crlf-scan.tsv"
+    validate_status=$status
+    run dbtune_loaded_defaults_assert_safe "$BATS_TEST_TMPDIR/crlf-scan.tsv"
+    assert_status=$status
+    run dbtune_loaded_defaults_fingerprint "$BATS_TEST_TMPDIR/crlf-scan.tsv"
+    fingerprint_status=$status
+
+    [ "$validate_status $assert_status $fingerprint_status" = '65 65 65' ]
+}
+
+@test "landmine scan publishes failed evidence when helper TMPDIR is unavailable" {
+    write_defaults_daemon mariadbd 'mariadbd  Ver 15.1 Distrib 11.4.12-MariaDB' 0 ''
+    PATH="$BATS_TEST_TMPDIR:/usr/bin:/bin"
+    TMPDIR="$BATS_TEST_TMPDIR/missing/helpers"
+
+    run dbtune_loaded_defaults_scan "$BATS_TEST_TMPDIR/scan.tsv"
+
+    [ "$status" -eq 69 ]
+    [ "$(cat "$BATS_TEST_TMPDIR/scan.tsv")" = $'landmine.scan.status\tfailed\nlandmine.scan.method\tmariadbd_print_defaults' ]
+}
+
+@test "landmine scan normalizes exact forms collapses duplicates and applies version gates" {
+    write_defaults_daemon mariadbd 'mariadbd  Ver 15.1 Distrib 10.6.18-MariaDB' 0 \
+        'mariadbd would have been started with the following arguments:\n--innodb-buffer-pool-instances --innodb_buffer_pool_instances=8 --innodb-log-files-in-group=2 --innodb-change-buffering=all --innodb-flush-method=O_DIRECT\n'
+    PATH="$BATS_TEST_TMPDIR:/usr/bin:/bin"
+
+    run dbtune_loaded_defaults_scan "$BATS_TEST_TMPDIR/scan.tsv"
+
+    [ "$status" -eq 0 ]
+    [ "$(awk -F '\t' '$1=="landmine.innodb_buffer_pool_instances.loaded" {count++} END {print count+0}' "$BATS_TEST_TMPDIR/scan.tsv")" -eq 1 ]
+    grep -Fx $'landmine.innodb_log_files_in_group.loaded\t1' "$BATS_TEST_TMPDIR/scan.tsv"
+    ! grep -F 'innodb_change_buffering' "$BATS_TEST_TMPDIR/scan.tsv"
+    ! grep -F 'innodb_flush_method' "$BATS_TEST_TMPDIR/scan.tsv"
+}
+
+@test "landmine scan rejects malformed and control output with valid failed evidence" {
+    local payload
+
+    for payload in 'not-an-option\n' $'--innodb-change-buffering=all\t--innodb-flush-method=fsync\n' '--=value\n'; do
+        write_defaults_daemon mariadbd 'mariadbd  Ver 15.1 Distrib 11.4.12-MariaDB' 0 "$payload"
+        PATH="$BATS_TEST_TMPDIR:/usr/bin:/bin"
+
+        run dbtune_loaded_defaults_scan "$BATS_TEST_TMPDIR/scan.tsv"
+
+        [ "$status" -eq 65 ]
+        [ "$(cat "$BATS_TEST_TMPDIR/scan.tsv")" = $'landmine.scan.status\tfailed\nlandmine.scan.method\tmariadbd_print_defaults' ]
+    done
+}
+
+@test "landmine scan rejects raw NUL output before shell parsing" {
+    write_defaults_daemon mariadbd 'mariadbd  Ver 15.1 Distrib 11.4.12-MariaDB' 0 '__NUL__'
+    PATH="$BATS_TEST_TMPDIR:/usr/bin:/bin"
+
+    run dbtune_loaded_defaults_scan "$BATS_TEST_TMPDIR/scan.tsv"
+
+    [ "$status" -eq 65 ]
+    [ "$(cat "$BATS_TEST_TMPDIR/scan.tsv")" = $'landmine.scan.status\tfailed\nlandmine.scan.method\tmariadbd_print_defaults' ]
+}
+
+@test "loaded defaults ignores unused files client sections and comments" {
+    cat >"$DBTUNE_MYSQL_CONFIG_DIR/unused.cnf" <<'EOF'
+[client]
+innodb_change_buffering=all
+# --innodb-buffer-pool-instances=8
 EOF
+    write_defaults_daemon mariadbd 'mariadbd  Ver 15.1 Distrib 11.4.12-MariaDB' 0 '--max-connections=200\n'
+    PATH="$BATS_TEST_TMPDIR:/usr/bin:/bin"
 
-    run dbtune_audit_scan_landmines 10.6.18 "$DBTUNE_MYSQL_CONFIG_DIR"
-    [ "$status" -eq 0 ]
-    [[ "$output" == *'landmine.innodb_buffer_pool_instances.severity'* ]]
-    [[ "$output" == *'landmine.innodb_log_files_in_group.severity'* ]]
-    [[ "$output" != *'landmine.innodb_change_buffering.severity'* ]]
+    run dbtune_loaded_defaults_scan "$BATS_TEST_TMPDIR/scan.tsv"
 
-    run dbtune_audit_scan_landmines 11.4.12 "$DBTUNE_MYSQL_CONFIG_DIR"
     [ "$status" -eq 0 ]
-    [[ "$output" == *$'landmine.innodb_change_buffering.severity\tcritical'* ]]
+    [ "$(cat "$BATS_TEST_TMPDIR/scan.tsv")" = $'landmine.scan.status\tcomplete\nlandmine.scan.method\tmariadbd_print_defaults' ]
+}
+
+@test "landmine scan tri-state makes incomplete audit evidence partial" {
+    local case_name expected
+
+    for case_name in complete-absent complete-loaded failed missing duplicate conflicting malformed old-config; do
+        cat >"$BATS_TEST_TMPDIR/status-audit.tsv" <<'EOF'
+mariadb.available	1
+hw.cpu_count	8
+hw.ram_bytes	17179869184
+hw.storage_class	nvme
+app.discovery_status	complete
+app.count	0
+security.grants_audited	1
+security.hostname_grant_count	0
+security.port_3306	local
+EOF
+        append_complete_mariadb_evidence "$BATS_TEST_TMPDIR/complete-audit.tsv"
+        awk -F '\t' '$1 !~ /^landmine[.]scan[.]/' "$BATS_TEST_TMPDIR/complete-audit.tsv" >>"$BATS_TEST_TMPDIR/status-audit.tsv"
+        case $case_name in
+            complete-absent)
+                printf 'landmine.scan.status\tcomplete\nlandmine.scan.method\tmariadbd_print_defaults\n' >>"$BATS_TEST_TMPDIR/status-audit.tsv"
+                expected=complete
+                ;;
+            complete-loaded)
+                printf 'landmine.scan.status\tcomplete\nlandmine.scan.method\tmariadbd_print_defaults\nlandmine.innodb_change_buffering.loaded\t1\nlandmine.innodb_change_buffering.severity\tcritical\nfinding.landmine.innodb_change_buffering\tcritical\n' >>"$BATS_TEST_TMPDIR/status-audit.tsv"
+                expected=complete
+                ;;
+            failed)
+                printf 'landmine.scan.status\tfailed\nlandmine.scan.method\tmariadbd_print_defaults\n' >>"$BATS_TEST_TMPDIR/status-audit.tsv"
+                expected=partial
+                ;;
+            missing)
+                expected=partial
+                ;;
+            duplicate)
+                printf 'landmine.scan.status\tcomplete\nlandmine.scan.status\tcomplete\nlandmine.scan.method\tmariadbd_print_defaults\n' >>"$BATS_TEST_TMPDIR/status-audit.tsv"
+                expected=partial
+                ;;
+            conflicting)
+                printf 'landmine.scan.status\tcomplete\nlandmine.scan.status\tfailed\nlandmine.scan.method\tmariadbd_print_defaults\n' >>"$BATS_TEST_TMPDIR/status-audit.tsv"
+                expected=partial
+                ;;
+            malformed)
+                printf 'landmine.scan.status\tcomplete\nlandmine.scan.method\tmariadbd_print_defaults\nlandmine.innodb_change_buffering.loaded\t2\n' >>"$BATS_TEST_TMPDIR/status-audit.tsv"
+                expected=partial
+                ;;
+            old-config)
+                printf 'config_innodb_change_buffering\tall\n' >>"$BATS_TEST_TMPDIR/status-audit.tsv"
+                expected=partial
+                ;;
+        esac
+        : >"$BATS_TEST_TMPDIR/status-apps.tsv"
+        : >"$BATS_TEST_TMPDIR/status-databases.tsv"
+
+        dbtune_audit_finalize_status "$BATS_TEST_TMPDIR/status-audit.tsv" "$BATS_TEST_TMPDIR/status-apps.tsv" "$BATS_TEST_TMPDIR/status-databases.tsv"
+
+        [ "$(awk -F '\t' '$1=="audit.section.mariadb.status" {print $2}' "$BATS_TEST_TMPDIR/status-audit.tsv")" = "$expected" ]
+    done
 }
 
 @test "hardware audit ignores unrelated NVMe and classifies the datadir HDD RAID" {
@@ -403,6 +648,142 @@ EOF
     [ "$status" -eq 0 ]
     run grep -F $'backup.evidence_error\tinvalid' "$BATS_TEST_TMPDIR/invalid-platform.tsv"
     [ "$status" -eq 0 ]
+}
+
+@test "grant host classifier accepts only exact address forms" {
+    local host
+    local addresses=(
+        localhost LOCALHOST LocalHost % 0.0.0.0 255.255.255.255 192.168.% 10.%
+        192.0.2.1/255.255.255.0 192.0.2.1/255.255.255.255 192.0.2.1/0.0.0.0
+        2001:db8:0:0:0:0:0:1 2001:db8::1 ::1 ::ffff:192.0.2.128
+        2001:db8:% ABCD:%
+    )
+    local hostnames=(
+        db.example.com '192.168.\%' '192.168._' '192.168.example.%'
+        256.1.2.3 01.2.3.4 1..2.3 192.0.2.1/255.0.255.0
+        192.0.2.1/255.255.255 192.0.2.1/33 :::: abcd:host
+    )
+
+    for host in "${addresses[@]}"; do
+        run dbtune_grant_host_classify "$host"
+        [ "$status" -eq 0 ]
+        [ "$output" = address ]
+    done
+    for host in "${hostnames[@]}"; do
+        run dbtune_grant_host_classify "$host"
+        [ "$status" -eq 0 ]
+        [ "$output" = hostname ]
+    done
+    for host in '' NULL '\N' $'host\001name'; do
+        run dbtune_grant_host_classify "$host"
+        [ "$status" -eq 65 ]
+        [ -z "$output" ]
+    done
+}
+
+@test "remote numeric grant is hostname independent but remotely exposed" {
+    dbtune_audit_sql() { printf '%s\n' $'6E756D65726963\t3139322E302E322E3130'; }
+
+    dbtune_audit_collect_platform "$BATS_TEST_TMPDIR/numeric.tsv"
+
+    grep -F $'security.grants_audited\t1' "$BATS_TEST_TMPDIR/numeric.tsv"
+    grep -F $'security.hostname_grant_count\t0' "$BATS_TEST_TMPDIR/numeric.tsv"
+    grep -F $'security.remote_grant_count\t1' "$BATS_TEST_TMPDIR/numeric.tsv"
+}
+
+@test "grant collection independently counts local wildcard netmask and hostname account hosts" {
+    dbtune_audit_sql() {
+        printf '%s\n' "$1" >"$BATS_TEST_TMPDIR/grants-query.sql"
+        printf '%s\n' \
+            $'726F6F74\t6C6F63616C686F7374' \
+            $'63617365\t4C4F43414C484F5354' \
+            $'6C6F6F70\t3132372E3235352E3235352E323535' \
+            $'6C6F6F7036\t3A3A31' \
+            $'617070\t3139322E3136382E25' \
+            $'6D61736B\t3139322E302E322E312F3235352E3235352E3235352E30' \
+            $'617070\t64622E6578616D706C652E636F6D' \
+            $'61707032\t64622E6578616D706C652E636F6D'
+    }
+
+    dbtune_audit_collect_platform "$BATS_TEST_TMPDIR/platform.tsv"
+
+    grep -F 'HEX(USER), HEX(HOST)' "$BATS_TEST_TMPDIR/grants-query.sql"
+    grep -F $'security.grants_audited\t1' "$BATS_TEST_TMPDIR/platform.tsv"
+    grep -F $'security.hostname_grant_count\t2' "$BATS_TEST_TMPDIR/platform.tsv"
+    grep -F $'security.remote_grant_count\t4' "$BATS_TEST_TMPDIR/platform.tsv"
+    run grep -F 'db.example.com' "$BATS_TEST_TMPDIR/platform.tsv"
+    [ "$status" -ne 0 ]
+    run grep -F 'security.remote_grant.' "$BATS_TEST_TMPDIR/platform.tsv"
+    [ "$status" -ne 0 ]
+}
+
+@test "hostname grant collection fails closed on duplicate malformed NUL and invalid host rows" {
+    local name
+    for name in duplicate extra missing blank odd nonhex nul empty_host; do
+        case $name in
+            duplicate) GRANT_ROWS=$'61\t6C6F63616C686F7374\n61\t6C6F63616C686F7374' ;;
+            extra) GRANT_ROWS=$'61\t6C6F63616C686F7374\t00' ;;
+            missing) GRANT_ROWS='61' ;;
+            blank) GRANT_ROWS='' ;;
+            odd) GRANT_ROWS=$'61\t123' ;;
+            nonhex) GRANT_ROWS=$'61\tGG' ;;
+            nul) GRANT_ROWS=$'6100\t6C6F63616C686F7374' ;;
+            empty_host) GRANT_ROWS=$'61\t' ;;
+        esac
+        dbtune_audit_sql() { printf '%s\n' "$GRANT_ROWS"; }
+        dbtune_audit_collect_platform "$BATS_TEST_TMPDIR/$name.tsv"
+
+        [ "$(awk -F '\t' '$1=="security.grants_audited" {print $2}' "$BATS_TEST_TMPDIR/$name.tsv")" = 0 ]
+        [ "$(awk -F '\t' '$1=="security.hostname_grant_count" {print $2}' "$BATS_TEST_TMPDIR/$name.tsv")" = unknown ]
+        [ "$(awk -F '\t' '$1=="security.remote_grant_count" {print $2}' "$BATS_TEST_TMPDIR/$name.tsv")" = unknown ]
+        [ "$(awk -F '\t' '$1=="security.grants_audited" {count++} END {print count+0}' "$BATS_TEST_TMPDIR/$name.tsv")" = 1 ]
+        [ "$(awk -F '\t' '$1=="security.hostname_grant_count" {count++} END {print count+0}' "$BATS_TEST_TMPDIR/$name.tsv")" = 1 ]
+        [ "$(awk -F '\t' '$1=="security.remote_grant_count" {count++} END {print count+0}' "$BATS_TEST_TMPDIR/$name.tsv")" = 1 ]
+        [[ -z $GRANT_ROWS ]] || ! grep -F "$GRANT_ROWS" "$BATS_TEST_TMPDIR/$name.tsv"
+    done
+}
+
+@test "security evidence is complete only for one audited status and one uint hostname count" {
+    local grants count expected file
+    : >"$BATS_TEST_TMPDIR/status-apps.tsv"
+    : >"$BATS_TEST_TMPDIR/status-databases.tsv"
+    for grants in zero one malformed missing; do
+        for count in zero positive unknown malformed missing duplicate; do
+            file="$BATS_TEST_TMPDIR/security-$grants-$count.tsv"
+            printf '%s\n' $'mariadb.available\t0' $'hw.cpu_count\t0' $'hw.ram_bytes\t0' \
+                $'hw.storage_class\tunknown' $'app.discovery_status\tfailed' $'app.count\t0' \
+                $'security.port_3306\tlocal' >"$file"
+            case $grants in
+                zero) printf 'security.grants_audited\t0\n' >>"$file" ;;
+                one) printf 'security.grants_audited\t1\n' >>"$file" ;;
+                malformed) printf 'security.grants_audited\tmaybe\n' >>"$file" ;;
+            esac
+            case $count in
+                zero) printf 'security.hostname_grant_count\t0\n' >>"$file" ;;
+                positive) printf 'security.hostname_grant_count\t2\n' >>"$file" ;;
+                unknown) printf 'security.hostname_grant_count\tunknown\n' >>"$file" ;;
+                malformed) printf 'security.hostname_grant_count\t-1\n' >>"$file" ;;
+                duplicate) printf 'security.hostname_grant_count\t0\nsecurity.hostname_grant_count\t0\n' >>"$file" ;;
+            esac
+
+            dbtune_audit_finalize_status "$file" "$BATS_TEST_TMPDIR/status-apps.tsv" "$BATS_TEST_TMPDIR/status-databases.tsv"
+
+            expected=partial
+            [[ $grants == one && ( $count == zero || $count == positive ) ]] && expected=complete
+            [ "$(awk -F '\t' '$1=="audit.section.security.status" {print $2}' "$file")" = "$expected" ]
+        done
+    done
+}
+
+@test "grant query failure emits one failed status and both unknown counts" {
+    dbtune_audit_sql() { return 1; }
+
+    dbtune_audit_collect_platform "$BATS_TEST_TMPDIR/platform.tsv"
+
+    [ "$(awk -F '\t' '$1=="security.grants_audited" {print $2}' "$BATS_TEST_TMPDIR/platform.tsv")" = 0 ]
+    [ "$(awk -F '\t' '$1=="security.hostname_grant_count" {print $2}' "$BATS_TEST_TMPDIR/platform.tsv")" = unknown ]
+    [ "$(awk -F '\t' '$1=="security.remote_grant_count" {print $2}' "$BATS_TEST_TMPDIR/platform.tsv")" = unknown ]
+    [ "$(awk -F '\t' '$1 ~ /^security[.](grants_audited|hostname_grant_count|remote_grant_count)$/ {count++} END {print count+0}' "$BATS_TEST_TMPDIR/platform.tsv")" = 3 ]
 }
 
 @test "shared database metrics cron and multisite remain app scoped" {
@@ -522,6 +903,7 @@ hw.storage_class	nvme
 app.discovery_status	complete
 app.count	1
 security.grants_audited	1
+security.hostname_grant_count	0
 security.port_3306	local
 EOF
     append_complete_mariadb_evidence "$BATS_TEST_TMPDIR/status-audit.tsv"
@@ -555,6 +937,7 @@ hw.storage_class	nvme
 app.discovery_status	complete
 app.count	0
 security.grants_audited	1
+security.hostname_grant_count	0
 security.port_3306	local
 EOF
     append_complete_mariadb_evidence "$BATS_TEST_TMPDIR/complete-audit.tsv"
@@ -578,7 +961,7 @@ EOF
 @test "missing non-sentinel proposal variable makes MariaDB evidence partial" {
     printf '%s\n' $'mariadb.available\t1' $'hw.cpu_count\t8' $'hw.ram_bytes\t17179869184' \
         $'hw.storage_class\tnvme' $'app.discovery_status\tcomplete' $'app.count\t0' \
-        $'security.grants_audited\t1' $'security.port_3306\tlocal' >"$BATS_TEST_TMPDIR/status-audit.tsv"
+        $'security.grants_audited\t1' $'security.hostname_grant_count\t0' $'security.port_3306\tlocal' >"$BATS_TEST_TMPDIR/status-audit.tsv"
     append_complete_mariadb_evidence "$BATS_TEST_TMPDIR/complete-audit.tsv"
     command awk -F '\t' '$1 != "mariadb.variable.innodb_io_capacity_max" {print}' \
         "$BATS_TEST_TMPDIR/complete-audit.tsv" >>"$BATS_TEST_TMPDIR/status-audit.tsv"
@@ -595,7 +978,7 @@ EOF
 @test "malformed numeric and enum MariaDB evidence is safely diagnosed" {
     printf '%s\n' $'mariadb.available\t1' $'hw.cpu_count\t8' $'hw.ram_bytes\t17179869184' \
         $'hw.storage_class\tnvme' $'app.discovery_status\tcomplete' $'app.count\t0' \
-        $'security.grants_audited\t1' $'security.port_3306\tlocal' >"$BATS_TEST_TMPDIR/status-audit.tsv"
+        $'security.grants_audited\t1' $'security.hostname_grant_count\t0' $'security.port_3306\tlocal' >"$BATS_TEST_TMPDIR/status-audit.tsv"
     append_complete_mariadb_evidence "$BATS_TEST_TMPDIR/complete-audit.tsv"
     command awk -F '\t' 'BEGIN {OFS="\t"}
         $1=="mariadb.variable.innodb_io_capacity" {$2="fast"}
@@ -620,7 +1003,7 @@ EOF
 @test "required evidence conflicts become UNKNOWN without exposing values" {
     printf '%s\n' $'mariadb.available\t1' $'hw.cpu_count\t8' $'hw.ram_bytes\t17179869184' \
         $'hw.storage_class\tnvme' $'app.discovery_status\tcomplete' $'app.count\t0' \
-        $'security.grants_audited\t1' $'security.port_3306\tlocal' >"$BATS_TEST_TMPDIR/status-audit.tsv"
+        $'security.grants_audited\t1' $'security.hostname_grant_count\t0' $'security.port_3306\tlocal' >"$BATS_TEST_TMPDIR/status-audit.tsv"
     append_complete_mariadb_evidence "$BATS_TEST_TMPDIR/status-audit.tsv"
     printf 'mariadb.variable.max_connections\tsecret-conflicting-value\n' >>"$BATS_TEST_TMPDIR/status-audit.tsv"
     : >"$BATS_TEST_TMPDIR/status-apps.tsv"
@@ -644,7 +1027,7 @@ EOF
         file="$BATS_TEST_TMPDIR/${version%%-*}.tsv"
         printf '%s\n' $'mariadb.available\t1' $'hw.cpu_count\t8' $'hw.ram_bytes\t17179869184' \
             $'hw.storage_class\tnvme' $'app.discovery_status\tcomplete' $'app.count\t0' \
-            $'security.grants_audited\t1' $'security.port_3306\tlocal' >"$file"
+            $'security.grants_audited\t1' $'security.hostname_grant_count\t0' $'security.port_3306\tlocal' >"$file"
         append_complete_mariadb_evidence "$BATS_TEST_TMPDIR/complete.tsv" "$version"
         if [[ $version == 11.* ]]; then
             command awk -F '\t' '$1 != "mariadb.variable.innodb_flush_method" {print}' "$BATS_TEST_TMPDIR/complete.tsv" >>"$file"
@@ -666,7 +1049,7 @@ EOF
 
     printf '%s\n' $'mariadb.available\t1' $'hw.cpu_count\t8' $'hw.ram_bytes\t17179869184' \
         $'hw.storage_class\tnvme' $'app.discovery_status\tcomplete' $'app.count\t0' \
-        $'security.grants_audited\t1' $'security.port_3306\tlocal' >"$BATS_TEST_TMPDIR/unsupported.tsv"
+        $'security.grants_audited\t1' $'security.hostname_grant_count\t0' $'security.port_3306\tlocal' >"$BATS_TEST_TMPDIR/unsupported.tsv"
     append_complete_mariadb_evidence "$BATS_TEST_TMPDIR/unsupported.tsv" 12.0.0-MariaDB
     dbtune_audit_finalize_status "$BATS_TEST_TMPDIR/unsupported.tsv" "$BATS_TEST_TMPDIR/status-apps.tsv" "$BATS_TEST_TMPDIR/status-databases.tsv"
     grep -F $'audit.section.mariadb.invalid_evidence\tmariadb.version=unsupported' "$BATS_TEST_TMPDIR/unsupported.tsv"
@@ -684,6 +1067,7 @@ hw.storage_class	nvme
 app.discovery_status	complete
 app.count	0
 security.grants_audited	1
+security.hostname_grant_count	0
 security.port_3306	local
 EOF
     append_complete_mariadb_evidence "$BATS_TEST_TMPDIR/status-audit.tsv"
@@ -717,6 +1101,7 @@ hw.storage_class	unknown
 app.discovery_status	complete
 app.count	0
 security.grants_audited	1
+security.hostname_grant_count	0
 security.port_3306	local
 EOF
     append_complete_mariadb_evidence "$BATS_TEST_TMPDIR/status-audit.tsv"
@@ -747,6 +1132,7 @@ hw.storage_class	nvme
 app.discovery_status	complete
 app.count	2
 security.grants_audited	1
+security.hostname_grant_count	0
 security.port_3306	local
 EOF
     append_complete_mariadb_evidence "$BATS_TEST_TMPDIR/status-audit.tsv"
@@ -775,6 +1161,7 @@ hw.storage_class	unknown
 app.discovery_status	failed
 app.count	0
 security.grants_audited	0
+security.hostname_grant_count	unknown
 security.port_3306	unknown
 EOF
     : >"$BATS_TEST_TMPDIR/status-apps.tsv"
@@ -898,6 +1285,7 @@ EOF
     }
     dbtune_audit_collect_platform() {
         dbtune_audit_put "$1" security.grants_audited 1
+        dbtune_audit_put "$1" security.hostname_grant_count 0
         dbtune_audit_put "$1" security.port_3306 local
     }
     dbtune_audit_collect_apps() {
@@ -940,6 +1328,7 @@ EOF
     dbtune_audit_collect_platform() {
         dbtune_audit_put "$1" systemd.limit_nofile 32768
         dbtune_audit_put "$1" security.grants_audited 1
+        dbtune_audit_put "$1" security.hostname_grant_count 0
         dbtune_audit_put "$1" security.port_3306 local
         dbtune_audit_put "$1" security.root_cnf_present 0
     }
@@ -950,7 +1339,7 @@ EOF
         case $1 in
             'SELECT VERSION()') printf '11.4.12-MariaDB\n' ;;
             *"GLOBAL_VARIABLES"*) complete_mariadb_variable_rows ;;
-            *"GLOBAL_STATUS"*) printf 'uptime\t86400\nmax_used_connections\t120\nkey_read_requests\t0\ncom_select\t100\nqcache_hits\t50\n' ;;
+            *"GLOBAL_STATUS"*) printf 'aborted_connects\t0\ncom_select\t100\ncreated_tmp_disk_tables\t0\ncreated_tmp_tables\t0\nhandler_read_rnd_next\t0\ninnodb_buffer_pool_pages_data\t0\ninnodb_buffer_pool_pages_free\t0\ninnodb_buffer_pool_read_requests\t0\ninnodb_buffer_pool_reads\t0\ninnodb_buffer_pool_wait_free\t0\ninnodb_data_read\t0\ninnodb_log_waits\t0\nkey_read_requests\t0\nmax_used_connections\t120\nqcache_hits\t50\nquestions\t0\nslow_queries\t0\nthreads_connected\t0\nthreads_running\t0\nuptime\t86400\n' ;;
             *"GROUP BY TABLE_SCHEMA"*) printf 'shopdb\t1073741824\t805306368\t268435456\t20\n' ;;
             *"TABLE_NAME='wp_options'"*) printf '1\n' ;;
             *"SUM(LENGTH(option_value))"*) printf '2097152\t100\n' ;;
@@ -960,6 +1349,9 @@ EOF
             *"COUNT(*) FROM information_schema.TABLES"*) printf '0\n' ;;
             *) printf '' ;;
         esac
+    }
+    dbtune_loaded_defaults_scan() {
+        printf 'landmine.scan.status\tcomplete\nlandmine.scan.method\tmariadbd_print_defaults\n' >"$1"
     }
 
     run cmd_audit --json

@@ -291,34 +291,6 @@ dbtune_audit_verified_owner() {
     printf '%s\n' "$owner"
 }
 
-dbtune_audit_scan_landmines() {
-    local version=${1:-0}
-    local root=${2:-/etc/mysql}
-    local file variable severity gate
-    local -a files=()
-
-    [[ -d $root ]] || return 0
-    while IFS= read -r file; do
-        files+=("$file")
-    done < <(command grep -RIl --include='*.cnf' '' "$root" 2>/dev/null || true)
-    for file in "${files[@]}"; do
-        while IFS=$'\t' read -r variable gate severity; do
-            dbtune_version_at_least "$version" "$gate" || continue
-            if command grep -Eiq "^[[:space:]]*${variable//_/[-_]}[[:space:]]*=" "$file" 2>/dev/null; then
-                printf 'landmine.%s.severity\t%s\n' "$variable" "$severity"
-                printf 'landmine.%s.file\t%s\n' "$variable" "$file"
-            fi
-        done <<'LANDMINES'
-innodb_file_format	10.3	critical
-innodb_file_format_max	10.3	critical
-innodb_buffer_pool_instances	10.6	critical
-innodb_log_files_in_group	10.6	critical
-innodb_change_buffering	11.0	critical
-innodb_flush_method	11.0	warning
-LANDMINES
-    done
-}
-
 dbtune_audit_parse_cnf() {
     local file=${1:-}
     local key value normalized
@@ -632,7 +604,7 @@ dbtune_audit_collect_mariadb() {
     local dbout=${2:-}
     local version rows name value key schema total data indexes tables
     local qcache_hits=unknown com_select=unknown hit_rate=unknown
-    local variables status dataset_ok=0
+    local variables status validated_status comparison dataset_ok=0
 
     if ! version=$(dbtune_audit_sql 'SELECT VERSION()'); then
         dbtune_audit_put "$out" mariadb.available 0
@@ -668,17 +640,28 @@ dbtune_audit_collect_mariadb() {
         rows=''
         dbtune_audit_put "$out" finding.global_status_query_failed warning
     fi
-    while IFS=$'\t' read -r name value; do
-        [[ -n $name ]] || continue
-        key=$(dbtune_audit_slug "$name")
-        dbtune_audit_put "$out" "mariadb.status.$key" "$value"
-        case $key in
-            qcache_hits) qcache_hits=$value ;;
-            com_select) com_select=$value ;;
-        esac
-    done <<<"$rows"
-    if [[ $qcache_hits =~ ^[0-9]+$ && $com_select =~ ^[0-9]+$ ]]; then
-        hit_rate=$(command awk -v h="$qcache_hits" -v s="$com_select" 'BEGIN { if (h+s == 0) print 0; else printf "%.2f", 100*h/(h+s) }')
+    if validated_status=$(dbtune_status_snapshot_exact "$rows" \
+        aborted_connects com_select created_tmp_disk_tables created_tmp_tables handler_read_rnd_next \
+        innodb_buffer_pool_pages_data innodb_buffer_pool_pages_free innodb_buffer_pool_read_requests \
+        innodb_buffer_pool_reads innodb_buffer_pool_wait_free innodb_data_read innodb_log_waits \
+        key_read_requests max_used_connections qcache_hits questions slow_queries threads_connected \
+        threads_running uptime); then
+        while IFS=$'\t' read -r name value; do
+            key=$(dbtune_audit_slug "$name")
+            dbtune_audit_put "$out" "mariadb.status.$key" "$value"
+            case $key in
+                qcache_hits) qcache_hits=$value ;;
+                com_select) com_select=$value ;;
+            esac
+        done <<<"$validated_status"
+    else
+        dbtune_audit_put "$out" finding.global_status_query_failed warning
+    fi
+    if dbtune_uint64_valid "$qcache_hits" && dbtune_uint64_valid "$com_select" && [[ $com_select != 0 ]]; then
+        comparison=$(dbtune_uint64_compare "$qcache_hits" "$com_select") || comparison=1
+        if ((comparison <= 0)); then
+            hit_rate=$(command awk -v h="$qcache_hits" -v s="$com_select" 'BEGIN { printf "%.2f", 100*h/s }')
+        fi
     fi
     dbtune_audit_put "$out" mariadb.query_cache_hit_pct "$hit_rate"
 
@@ -1127,7 +1110,7 @@ dbtune_audit_collect_apps() {
 dbtune_audit_collect_platform() {
     local out=${1:-}
     local runcloud=${DBTUNE_RUNCLOUD_CNF:-/etc/mysql/conf.d/runcloud.cnf}
-    local key value limit=unknown fpm=0 backup=0 backup_schedules=0 grants rows count=0 listener=unknown
+    local key value limit=unknown fpm=0 backup=0 backup_schedules=0 listener=unknown
     local evidence backup_status=unknown backup_source=unknown backup_checked=unknown backup_success=unknown
     local unattended=${DBTUNE_UNATTENDED_CONFIG:-/etc/apt/apt.conf.d/50unattended-upgrades}
 
@@ -1206,19 +1189,7 @@ dbtune_audit_collect_platform() {
         dbtune_audit_put "$out" php_fpm.ols_stack 0
     fi
 
-    if rows=$(dbtune_audit_sql "SELECT CONCAT(USER,'@',HOST) FROM mysql.user WHERE HOST NOT IN ('localhost','127.0.0.1','::1') ORDER BY USER,HOST"); then
-        dbtune_audit_put "$out" security.grants_audited 1
-    else
-        rows=''
-        dbtune_audit_put "$out" security.grants_audited 0
-        dbtune_audit_put "$out" finding.grants_query_failed warning
-    fi
-    while IFS= read -r grants; do
-        [[ -n $grants ]] || continue
-        dbtune_audit_put "$out" "security.remote_grant.$count" "$grants"
-        count=$((count + 1))
-    done <<<"$rows"
-    dbtune_audit_put "$out" security.remote_grant_count "$count"
+    dbtune_audit_collect_grants "$out"
     if command -v ss >/dev/null 2>&1; then
         if ss -lnt 2>/dev/null | command awk '$4 ~ /(^|:)(0\.0\.0\.0|\[::\]|\*)?:?3306$/ { found=1 } END { exit !found }'; then
             listener=public
@@ -1238,15 +1209,198 @@ dbtune_audit_collect_platform() {
     fi
 }
 
+dbtune_grant_host_classify() {
+    local host=${1-}
+
+    [[ -n $host && ${host^^} != NULL && $host != '\N' && ! $host =~ [[:cntrl:]] ]] || return 65
+    command awk '
+        function canonical_octet(value) {
+            return value ~ /^(0|[1-9][0-9]{0,2})$/ && value + 0 <= 255
+        }
+        function ipv4(value, parts, count, i) {
+            count = split(value, parts, ".")
+            if (count != 4) return 0
+            for (i = 1; i <= count; i++) if (!canonical_octet(parts[i])) return 0
+            return 1
+        }
+        function ipv4_wildcard(value, prefix, parts, count, i) {
+            if (value !~ /[.]%$/) return 0
+            prefix = substr(value, 1, length(value) - 2)
+            count = split(prefix, parts, ".")
+            if (count < 1 || count > 3) return 0
+            for (i = 1; i <= count; i++) if (!canonical_octet(parts[i])) return 0
+            return 1
+        }
+        function contiguous_mask(value, parts, count, i, bit, octet, zero_seen) {
+            if (!ipv4(value)) return 0
+            count = split(value, parts, ".")
+            for (i = 1; i <= count; i++) {
+                octet = parts[i] + 0
+                for (bit = 128; bit >= 1; bit /= 2) {
+                    if (octet >= bit) {
+                        if (zero_seen) return 0
+                        octet -= bit
+                    } else zero_seen = 1
+                }
+            }
+            return 1
+        }
+        function ipv4_netmask(value, slash, address, mask) {
+            slash = index(value, "/")
+            if (!slash || index(substr(value, slash + 1), "/")) return 0
+            address = substr(value, 1, slash - 1)
+            mask = substr(value, slash + 1)
+            return ipv4(address) && contiguous_mask(mask)
+        }
+        function hex_group(value) {
+            return value ~ /^[[:xdigit:]]+$/ && length(value) <= 4
+        }
+        function ipv6(value, last_colon, tail, expanded, rest, double_at, left, right, groups, count, i, total) {
+            if (value !~ /:/ || value ~ /[^[:xdigit:]:.]/) return 0
+            if (value ~ /[.]/) {
+                last_colon = 0
+                for (i = 1; i <= length(value); i++) if (substr(value, i, 1) == ":") last_colon = i
+                if (!last_colon) return 0
+                tail = substr(value, last_colon + 1)
+                if (!ipv4(tail)) return 0
+                value = substr(value, 1, last_colon) "0:0"
+            }
+            double_at = index(value, "::")
+            if (double_at) {
+                rest = substr(value, double_at + 2)
+                if (index(rest, "::")) return 0
+                left = substr(value, 1, double_at - 1)
+                right = rest
+                total = 0
+                if (left != "") {
+                    count = split(left, groups, ":")
+                    for (i = 1; i <= count; i++) if (!hex_group(groups[i])) return 0
+                    total += count
+                }
+                if (right != "") {
+                    count = split(right, groups, ":")
+                    for (i = 1; i <= count; i++) if (!hex_group(groups[i])) return 0
+                    total += count
+                }
+                return total < 8
+            }
+            count = split(value, groups, ":")
+            if (count != 8) return 0
+            for (i = 1; i <= count; i++) if (!hex_group(groups[i])) return 0
+            return 1
+        }
+        function ipv6_wildcard(value, prefix, groups, count, i) {
+            if (value !~ /:%$/) return 0
+            prefix = substr(value, 1, length(value) - 2)
+            count = split(prefix, groups, ":")
+            if (count < 1 || count > 7) return 0
+            for (i = 1; i <= count; i++) if (!hex_group(groups[i])) return 0
+            return 1
+        }
+        BEGIN {
+            host = ARGV[1]
+            if (tolower(host) == "localhost" || host == "%" || ipv4(host) || ipv4_wildcard(host) ||
+                ipv4_netmask(host) || ipv6(host) || ipv6_wildcard(host)) print "address"
+            else print "hostname"
+            exit
+        }
+    ' "$host"
+}
+
+dbtune_grant_host_is_local() {
+    local host=${1-}
+
+    [[ ${host,,} == localhost || $host == ::1 ]] && return 0
+    command awk '
+        function canonical_octet(value) {
+            return value ~ /^(0|[1-9][0-9]{0,2})$/ && value + 0 <= 255
+        }
+        BEGIN {
+            count = split(ARGV[1], parts, ".")
+            if (count != 4 || parts[1] != "127") exit 1
+            for (i = 1; i <= count; i++) if (!canonical_octet(parts[i])) exit 1
+            exit 0
+        }
+    ' "$host"
+}
+
+dbtune_grant_hex_decode() {
+    local hex=${1-}
+    local escaped='' pair
+
+    [[ $hex =~ ^([[:xdigit:]]{2})*$ && ${hex^^} != *00* ]] || return 65
+    while [[ -n $hex ]]; do
+        pair=${hex:0:2}
+        escaped+="\\x$pair"
+        hex=${hex:2}
+    done
+    printf '%b' "$escaped"
+}
+
+dbtune_audit_collect_grants() {
+    local out=${1:-}
+    local grants_file='' line user_hex host_hex host class key hostname_count=0 remote_count=0 failed=0
+    local -A seen=()
+
+    if ! grants_file=$(mktemp "${TMPDIR:-/tmp}/dbtune-grants.XXXXXX") || ! chmod 600 "$grants_file"; then
+        failed=1
+    elif ! dbtune_audit_sql 'SELECT HEX(USER), HEX(HOST) FROM mysql.user ORDER BY USER,HOST' >"$grants_file"; then
+        failed=1
+    else
+        while IFS= read -r line || [[ -n $line ]]; do
+            if [[ $line != *$'\t'* || ${line#*$'\t'} == *$'\t'* ]]; then
+                failed=1
+                break
+            fi
+            user_hex=${line%%$'\t'*}
+            host_hex=${line#*$'\t'}
+            key="${user_hex^^}:${host_hex^^}"
+            if [[ -n ${seen[$key]+x} ]]; then
+                failed=1
+                break
+            fi
+            seen[$key]=1
+            if ! dbtune_grant_hex_decode "$user_hex" >/dev/null ||
+                ! host=$(dbtune_grant_hex_decode "$host_hex") ||
+                ! class=$(dbtune_grant_host_classify "$host"); then
+                failed=1
+                break
+            fi
+            [[ $class != hostname ]] || hostname_count=$((hostname_count + 1))
+            dbtune_grant_host_is_local "$host" || remote_count=$((remote_count + 1))
+        done <"$grants_file"
+    fi
+    [[ -z $grants_file ]] || rm -f "$grants_file"
+
+    if ((failed)); then
+        dbtune_audit_put "$out" security.grants_audited 0
+        dbtune_audit_put "$out" security.hostname_grant_count unknown
+        dbtune_audit_put "$out" security.remote_grant_count unknown
+        dbtune_audit_put "$out" finding.grants_query_failed warning
+    else
+        dbtune_audit_put "$out" security.grants_audited 1
+        dbtune_audit_put "$out" security.hostname_grant_count "$hostname_count"
+        dbtune_audit_put "$out" security.remote_grant_count "$remote_count"
+    fi
+}
+
 dbtune_audit_add_findings() {
     local out=${1:-}
-    local version=${2:-0}
-    local config_root=${DBTUNE_MYSQL_CONFIG_DIR:-/etc/mysql}
-    local key value effective systemd_limit configured_limit
+    local scan scan_status=0 key value effective systemd_limit configured_limit
 
-    while IFS=$'\t' read -r key value; do
-        dbtune_audit_put "$out" "$key" "$value"
-    done < <(dbtune_audit_scan_landmines "$version" "$config_root")
+    scan=$(mktemp "${out%/*}/.landmine-scan.XXXXXX") || return 1
+    dbtune_loaded_defaults_scan "$scan" || scan_status=$?
+    if [[ -r $scan ]]; then
+        while IFS=$'\t' read -r key value; do
+            dbtune_audit_put "$out" "$key" "$value"
+        done <"$scan"
+    else
+        dbtune_audit_put "$out" landmine.scan.status failed
+        dbtune_audit_put "$out" landmine.scan.method mariadbd_print_defaults
+        scan_status=69
+    fi
+    rm -f "$scan"
+    ((scan_status == 0)) || dbtune_audit_put "$out" finding.landmine_scan_failed warning
 
     effective=$(command awk -F '\t' '$1=="mariadb.variable.open_files_limit" { print $2; exit }' "$out")
     systemd_limit=$(command awk -F '\t' '$1=="systemd.limit_nofile" { print $2; exit }' "$out")
@@ -1275,7 +1429,8 @@ dbtune_audit_finalize_status() {
     local database_file=${3:-}
     local available mariadb_status hardware_status applications_status security_status version family
     local cpu ram storage discovery app_count app_partial app_failed app_status_count
-    local grants listener hardware_evidence=0 findings=0 incomplete=0 failed_count=0
+    local grants grants_count hostname_grants hostname_grants_count listener listener_count
+    local grant_evidence=0 listener_evidence=0 hardware_evidence=0 findings=0 incomplete=0 failed_count=0
     local evidence_key evidence_value validator requirement _role first_value quarantined_conflicts
     local evidence_present evidence_conflict mariadb_missing='' mariadb_invalid='' mariadb_conflicting='' mariadb_optional=''
     local overall exit_status section status domain failed_sections='' partial_sections='' affected_domains=''
@@ -1329,6 +1484,9 @@ dbtune_audit_finalize_status() {
         if [[ -n $mariadb_missing || -n $mariadb_invalid || -n $mariadb_conflicting ]]; then
             mariadb_status=partial
         fi
+        if ! dbtune_loaded_defaults_validate "$audit" embedded; then
+            mariadb_status=partial
+        fi
     fi
 
     cpu=$(command awk -F '\t' '$1=="hw.cpu_count" {print $2; exit}' "$audit")
@@ -1367,11 +1525,14 @@ dbtune_audit_finalize_status() {
         applications_status=complete
     fi
 
-    grants=$(command awk -F '\t' '$1=="security.grants_audited" {print $2; exit}' "$audit")
-    listener=$(command awk -F '\t' '$1=="security.port_3306" {print tolower($2); exit}' "$audit")
-    if [[ $grants == 1 && -n $listener && $listener != unknown ]]; then
+    IFS=$'\t' read -r grants_count grants < <(command awk -F '\t' '$1=="security.grants_audited" {count++; if (count==1) value=$2} END {print count+0 "\t" value}' "$audit")
+    IFS=$'\t' read -r hostname_grants_count hostname_grants < <(command awk -F '\t' '$1=="security.hostname_grant_count" {count++; if (count==1) value=$2} END {print count+0 "\t" value}' "$audit")
+    IFS=$'\t' read -r listener_count listener < <(command awk -F '\t' '$1=="security.port_3306" {count++; if (count==1) value=tolower($2)} END {print count+0 "\t" value}' "$audit")
+    [[ $grants_count == 1 && $grants == 1 && $hostname_grants_count == 1 && $hostname_grants =~ ^(0|[1-9][0-9]*)$ ]] && grant_evidence=1
+    [[ $listener_count == 1 && $listener =~ ^(local|public|not_listening)$ ]] && listener_evidence=1
+    if ((grant_evidence && listener_evidence)); then
         security_status=complete
-    elif [[ $grants != 1 && ( -z $listener || $listener == unknown ) ]]; then
+    elif ((!grant_evidence && !listener_evidence)); then
         security_status=failed
     else
         security_status=partial

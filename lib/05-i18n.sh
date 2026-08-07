@@ -588,10 +588,10 @@ dbtune_i18n_lookup() {
             DBTUNE_I18N_MESSAGE='Collect watchdog ukoncil zber: %s'
             ;;
         en:collect_sample_header_unsupported)
-            DBTUNE_I18N_MESSAGE='samples.tsv has an unsupported header'
+            DBTUNE_I18N_MESSAGE='samples.tsv uses an old or unsupported header; start a new audit and collection cycle'
             ;;
         sk:collect_sample_header_unsupported)
-            DBTUNE_I18N_MESSAGE='samples.tsv ma nepodporovanu hlavicku'
+            DBTUNE_I18N_MESSAGE='samples.tsv ma staru alebo nepodporovanu hlavicku; spustite novy audit a cyklus zberu'
             ;;
         en:collect_auto_stop_failed)
             DBTUNE_I18N_MESSAGE='Automatic collection stop failed'
@@ -707,6 +707,12 @@ dbtune_i18n_lookup() {
         sk:proposal_invalid_record)
             DBTUNE_I18N_MESSAGE='Neplatny proposal record v pravidle %s'
             ;;
+        en:proposal_verdict_fields)
+            DBTUNE_I18N_MESSAGE='Rule %s verdict %s cannot contain proposal fields'
+            ;;
+        sk:proposal_verdict_fields)
+            DBTUNE_I18N_MESSAGE='Pravidlo %s s verdiktom %s nemoze obsahovat proposal polia'
+            ;;
         en:proposal_unsafe_record)
             DBTUNE_I18N_MESSAGE='Unsafe proposal record in rule %s'
             ;;
@@ -724,6 +730,12 @@ dbtune_i18n_lookup() {
             ;;
         sk:proposal_current_unknown)
             DBTUNE_I18N_MESSAGE='Proposal %s nema znamu efektivnu current hodnotu'
+            ;;
+        en:proposal_current_invalid)
+            DBTUNE_I18N_MESSAGE='Proposal %s has an invalid effective current value'
+            ;;
+        sk:proposal_current_invalid)
+            DBTUNE_I18N_MESSAGE='Proposal %s ma neplatnu efektivnu current hodnotu'
             ;;
         en:report_required_input_missing)
             DBTUNE_I18N_MESSAGE='Required input is missing: %s'
@@ -875,6 +887,12 @@ dbtune_i18n_lookup() {
         sk:reason_flush_method_deprecated)
             DBTUNE_I18N_MESSAGE='V MariaDB 11.x je flush_method deprecated; existujúcu hodnotu overte a nepridávajte novú naslepo.'
             ;;
+        en:reason_landmine_scan_unknown)
+            DBTUNE_I18N_MESSAGE='Loaded server defaults are unavailable or malformed; no version-safety conclusion is possible.'
+            ;;
+        sk:reason_landmine_scan_unknown)
+            DBTUNE_I18N_MESSAGE='Načítané predvolené nastavenia servera chýbajú alebo sú poškodené; bezpečnosť verzie nemožno vyhodnotiť.'
+            ;;
         en:reason_doublewrite)
             DBTUNE_I18N_MESSAGE='Doublewrite protects pages from torn writes.'
             ;;
@@ -917,6 +935,18 @@ dbtune_i18n_lookup() {
         sk:reason_skip_name_resolve)
             DBTUNE_I18N_MESSAGE='Lokálne aplikácie nepotrebujú reverzné DNS.'
             ;;
+        en:reason_skip_name_resolve_hostname_grants)
+            DBTUNE_I18N_MESSAGE='Hostname-dependent grants require review before enabling skip_name_resolve.'
+            ;;
+        sk:reason_skip_name_resolve_hostname_grants)
+            DBTUNE_I18N_MESSAGE='Granty závislé od hostname vyžadujú kontrolu pred zapnutím skip_name_resolve.'
+            ;;
+        en:reason_skip_name_resolve_unknown)
+            DBTUNE_I18N_MESSAGE='Valid current-value and grant evidence is required before changing skip_name_resolve.'
+            ;;
+        sk:reason_skip_name_resolve_unknown)
+            DBTUNE_I18N_MESSAGE='Zmena skip_name_resolve vyžaduje platnú aktuálnu hodnotu a dôkazy o grantoch.'
+            ;;
         en:reason_thread_cache)
             DBTUNE_I18N_MESSAGE='The cache reduces thread creation cost.'
             ;;
@@ -946,6 +976,12 @@ dbtune_i18n_lookup() {
             ;;
         sk:reason_myisam_keep)
             DBTUNE_I18N_MESSAGE='MyISAM sa používa, key buffer sa nesmie plošne zmenšiť.'
+            ;;
+        en:reason_myisam_unknown)
+            DBTUNE_I18N_MESSAGE='MyISAM usage cannot be determined without valid Key_read_requests evidence.'
+            ;;
+        sk:reason_myisam_unknown)
+            DBTUNE_I18N_MESSAGE='Pouzitie MyISAM sa bez platneho dokazu Key_read_requests neda urcit.'
             ;;
         en:reason_myisam_key_buffer)
             DBTUNE_I18N_MESSAGE='Modern WordPress normally does not use MyISAM.'
@@ -1012,6 +1048,12 @@ dbtune_i18n_lookup() {
             ;;
         sk:reason_security_ok)
             DBTUNE_I18N_MESSAGE='Audit nenašiel verejný listener ani vzdialený grant.'
+            ;;
+        en:reason_security_unknown)
+            DBTUNE_I18N_MESSAGE='Security exposure cannot be determined without complete grant evidence.'
+            ;;
+        sk:reason_security_unknown)
+            DBTUNE_I18N_MESSAGE='Bez úplných dôkazov o grantoch sa bezpečnostné vystavenie nedá určiť.'
             ;;
         en:reason_root_cnf_credential)
             DBTUNE_I18N_MESSAGE='Never print the root.cnf password; rotate it simultaneously in MariaDB and the RunCloud file.'
@@ -1713,6 +1755,10 @@ dbtune_i18n_lookup() {
         sk:lifecycle_proposal_hash_missing) DBTUNE_I18N_MESSAGE='Proposal manifest nemá proposal_hash' ;;
         en:lifecycle_proposal_changed) DBTUNE_I18N_MESSAGE='Proposal snapshot changed or does not match the manifest' ;;
         sk:lifecycle_proposal_changed) DBTUNE_I18N_MESSAGE='Proposal snapshot sa zmenil alebo nezodpovedá manifestu' ;;
+        en:lifecycle_proposal_invalid) DBTUNE_I18N_MESSAGE='Configuration proposal does not satisfy the strict [mysqld] grammar' ;;
+        sk:lifecycle_proposal_invalid) DBTUNE_I18N_MESSAGE='Návrh konfigurácie nespĺňa striktnú gramatiku [mysqld]' ;;
+        en:lifecycle_proposal_manifest_invalid) DBTUNE_I18N_MESSAGE='Proposal manifest does not satisfy its exact schema' ;;
+        sk:lifecycle_proposal_manifest_invalid) DBTUNE_I18N_MESSAGE='Proposal manifest nespĺňa svoju presnú schému' ;;
         en:lifecycle_proposal_count_missing) DBTUNE_I18N_MESSAGE='Proposal manifest has no proposal_count' ;;
         sk:lifecycle_proposal_count_missing) DBTUNE_I18N_MESSAGE='Proposal manifest nemá proposal_count' ;;
         en:lifecycle_proposal_records_hash_missing) DBTUNE_I18N_MESSAGE='Proposal manifest has no proposal_records_hash' ;;
@@ -1811,6 +1857,12 @@ dbtune_i18n_lookup() {
         sk:lifecycle_parent_replaced_prepare) DBTUNE_I18N_MESSAGE='Nadradený adresár konfigurácie bol počas prípravy apply vymenený' ;;
         en:lifecycle_original_backup_mismatch) DBTUNE_I18N_MESSAGE='Backup of the original config target does not match its source' ;;
         sk:lifecycle_original_backup_mismatch) DBTUNE_I18N_MESSAGE='Záloha pôvodného cieľa konfigurácie nezodpovedá zdroju' ;;
+        en:lifecycle_landmine_audit_invalid) DBTUNE_I18N_MESSAGE='Apply requires a complete loaded-defaults audit with no critical loaded option' ;;
+        sk:lifecycle_landmine_audit_invalid) DBTUNE_I18N_MESSAGE='Apply vyžaduje úplný audit načítaných predvolených nastavení bez načítanej kritickej voľby' ;;
+        en:lifecycle_landmine_scan_failed) DBTUNE_I18N_MESSAGE='The final loaded-defaults scan failed; apply stopped before durable mutation' ;;
+        sk:lifecycle_landmine_scan_failed) DBTUNE_I18N_MESSAGE='Finálna kontrola načítaných predvolených nastavení zlyhala; apply sa zastavil pred trvalou zmenou' ;;
+        en:lifecycle_landmine_critical) DBTUNE_I18N_MESSAGE='A critical removed server option is currently loaded; apply stopped before durable mutation' ;;
+        sk:lifecycle_landmine_critical) DBTUNE_I18N_MESSAGE='Server má načítanú kritickú odstránenú voľbu; apply sa zastavil pred trvalou zmenou' ;;
         en:lifecycle_publisher_required) DBTUNE_I18N_MESSAGE='Secure config publication requires python3 with dir_fd and atomic rename-exchange support' ;;
         sk:lifecycle_publisher_required) DBTUNE_I18N_MESSAGE='Bezpečné publikovanie konfigurácie vyžaduje python3 s podporou dir_fd a atomického rename exchange' ;;
         en:lifecycle_parent_replaced_validation) DBTUNE_I18N_MESSAGE='Config parent was replaced since the original validation' ;;

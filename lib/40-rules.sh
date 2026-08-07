@@ -57,7 +57,7 @@ dbtune_rules_analyze() {
     local min_samples=${6:-288}
     local p95_threads p50_qcache p05_available diagnostics rejected excluded_status excluded_restart
     local too_few_samples_format
-    local normalized_audit result
+    local normalized_audit audit_source sanitized_audit='' landmine_contract=unknown result
 
     [[ -r $audit_file && -r $samples_file ]] || return 66
     diagnostics=$(dbtune_samples_diagnostics "$samples_file") || return 65
@@ -72,12 +72,28 @@ dbtune_rules_analyze() {
     p95_threads=$(dbtune_tsv_percentile "$samples_file" threads_running 8 95) || return 65
     p05_available=$(dbtune_tsv_percentile "$samples_file" mem_available_kb 14 5) || return 65
     p50_qcache=$(dbtune_tsv_percentile "$samples_file" qcache_hit_pct 10 50 qcache-active 2>/dev/null || printf '0')
-    normalized_audit=$(mktemp "${TMPDIR:-/tmp}/dbtune-audit-normalized.XXXXXX") || return 1
-    if ! chmod 600 "$normalized_audit" || ! dbtune_audit_normalize "$audit_file" >"$normalized_audit"; then
-        rm -f "$normalized_audit"
+    audit_source=$audit_file
+    if dbtune_loaded_defaults_validate "$audit_file" embedded; then
+        landmine_contract=complete
+    else
+        sanitized_audit=$(mktemp "${TMPDIR:-/tmp}/dbtune-audit-without-landmines.XXXXXX") || return 1
+        if ! chmod 600 "$sanitized_audit" || ! command awk -F '\t' \
+            '$1 !~ /^landmine[.]/ && $1 !~ /^finding[.]landmine([.]|_)/' "$audit_file" >"$sanitized_audit"; then
+            rm -f "$sanitized_audit"
+            return 1
+        fi
+        audit_source=$sanitized_audit
+    fi
+    normalized_audit=$(mktemp "${TMPDIR:-/tmp}/dbtune-audit-normalized.XXXXXX") || {
+        rm -f "$sanitized_audit"
+        return 1
+    }
+    if ! chmod 600 "$normalized_audit" || ! dbtune_audit_normalize "$audit_source" >"$normalized_audit"; then
+        rm -f "$normalized_audit" "$sanitized_audit"
         return 65
     fi
     awk -v audit_file="$normalized_audit" -v samples_file=<(dbtune_samples_valid_rows "$samples_file") \
+        -v landmine_catalog_file=<(dbtune_landmine_catalog) -v landmine_contract="$landmine_contract" \
         -v dbsize_file="$dbsize_file" -v apps_file="$apps_file" \
         -v databases_file="$databases_file" -v min_samples="$min_samples" \
         -v shared_p95_threads="$p95_threads" -v shared_p50_qcache="$p50_qcache" \
@@ -89,6 +105,7 @@ dbtune_rules_analyze() {
         gib = 1073741824
         mib = 1048576
         load_audit(audit_file)
+        load_landmine_catalog(landmine_catalog_file)
         load_samples(samples_file)
         if (sample_count < min_samples) {
             printf "%s\n", sprintf(too_few_samples_format, sample_count, min_samples) > "/dev/stderr"
@@ -134,6 +151,8 @@ dbtune_rules_analyze() {
         if (key == "disk_class" || key == "storage_type") return "storage_class"
         if (key == "runcloud_skip_log_bin") return "skip_log_bin"
         if (key == "security_remote_grant_count") return "remote_grant_count"
+        if (key == "security_grants_audited") return "grants_audited"
+        if (key == "security_hostname_grant_count") return "hostname_grant_count"
         if (key == "security_port_3306") return "port_3306"
         if (key == "security_root_cnf_present") return "root_cnf_present"
         if (key == "limit_nofile") return "systemd_limit_nofile"
@@ -157,13 +176,25 @@ dbtune_rules_analyze() {
         close(file)
     }
 
+    function load_landmine_catalog(file, line, fields, count, name) {
+        while ((getline line < file) > 0) {
+            count = split(line, fields, "\t")
+            if (count != 4) continue
+            name = fields[1]
+            landmine_names[++landmine_count] = name
+            landmine_severity[name] = fields[3]
+            landmine_reason[name] = fields[4]
+        }
+        close(file)
+    }
+
     function require_sample_columns(header, columns, required, n, i) {
         n = split("timestamp uptime bp_hit_pct bp_misses_s data_read_s rnd_next_s tmp_disk_pct threads_running threads_connected qcache_hit_pct log_waits_delta wait_free_delta cpu_pct mem_available_kb swap_used_kb load1 restart_flag", required, " ")
         for (i = 1; i <= n; i++) if (!(required[i] in columns)) return 0
         return 1
     }
 
-    function load_samples(file, line, fields, header, n, i, value, status, restart, denominator, hit_text) {
+    function load_samples(file, line, fields, header, n, i, value, status, restart, denominator, hit_text, denominator_column) {
         if ((getline line < file) <= 0) {
             print "dbtune: samples.tsv je prazdny" > "/dev/stderr"
             exit 65
@@ -193,11 +224,12 @@ dbtune_rules_analyze() {
             value = numeric(fields[header["log_waits_delta"]]); log_waits_total += value
             value = numeric(fields[header["wait_free_delta"]]); wait_free_total += value
             if (threads_connected[sample_count] > peak_connected) peak_connected = threads_connected[sample_count]
-            if (!("qcache_queries_delta" in header)) {
+            denominator_column=("com_select_delta" in header) ? header["com_select_delta"] : header["qcache_queries_delta"]
+            if (!denominator_column) {
                 qcache_unavailable_count++
                 continue
             }
-            denominator = trim(fields[header["qcache_queries_delta"]])
+            denominator = trim(fields[denominator_column])
             hit_text = trim(fields[header["qcache_hit_pct"]])
             if (denominator !~ /^[0-9]+([.][0-9]+)?$/ || hit_text !~ /^[0-9]+([.][0-9]+)?$/ || hit_text + 0 < 0 || hit_text + 0 > 100) {
                 qcache_unavailable_count++
@@ -422,6 +454,13 @@ dbtune_rules_analyze() {
         return value ~ /^-?[0-9]+([.][0-9]+)?$/ ? value + 0 : 0
     }
 
+    function uint64_text(value) {
+        if (value !~ /^(0|[1-9][0-9]*)$/) return 0
+        if (length(value) < 20) return 1
+        if (length(value) > 20) return 0
+        return ("x" value <= "x18446744073709551615")
+    }
+
     function bytes(value, number, unit) {
         value = toupper(trim(value))
         gsub(/[[:space:]]/, "", value)
@@ -443,6 +482,13 @@ dbtune_rules_analyze() {
     function falsehood(value) {
         value = tolower(trim(value))
         return value == "0" || value == "no" || value == "false" || value == "off" || value == "disabled" || value == "inactive"
+    }
+
+    function exact_bool(value) {
+        value = tolower(trim(value))
+        if (value == "on" || value == "1") return 1
+        if (value == "off" || value == "0") return 0
+        return -1
     }
 
     function sort_text(values, count, i, j, swap) {
@@ -628,18 +674,22 @@ dbtune_rules_analyze() {
     }
 
     function gate_rules() {
+        if (landmine_contract != "complete") {
+            emit("R-VERSION", "server", "medium", "UNKNOWN", "", "", "landmine_scan_status=unknown", "reason_landmine_scan_unknown")
+            return
+        }
         if (version_family == "unsupported") {
             emit("R-VERSION", "server", "critical", "UNSUPPORTED", "", "", "version=" ag("mariadb_version", "unknown"), "reason_version_unsupported")
             return
         }
-        if (version_major >= 11 && (present["config_innodb_change_buffering"] || present["landmine_innodb_change_buffering_severity"] || truth(ag("landmine_innodb_change_buffering", ""))))
-            emit("R-VERSION", "server", "critical", "REMOVED", "", "", "innodb_change_buffering; family=" version_family, "reason_variable_removed_startup")
-        if (present["config_innodb_buffer_pool_instances"] || present["landmine_innodb_buffer_pool_instances_severity"] || truth(ag("landmine_innodb_buffer_pool_instances", "")))
-            emit("R-VERSION", "server", "critical", "REMOVED", "", "", "innodb_buffer_pool_instances; family=" version_family, "reason_variable_removed_config")
-        if (present["config_innodb_log_files_in_group"] || present["landmine_innodb_log_files_in_group_severity"] || truth(ag("landmine_innodb_log_files_in_group", "")))
-            emit("R-VERSION", "server", "critical", "REMOVED", "", "", "innodb_log_files_in_group; family=" version_family, "reason_variable_removed_config")
-        if (version_major >= 11)
-            emit("R-VERSION", "server", "medium", "DEPRECATED", "", "", "innodb_flush_method; family=" version_family, "reason_flush_method_deprecated")
+        for (landmine_index = 1; landmine_index <= landmine_count; landmine_index++) {
+            landmine_name = landmine_names[landmine_index]
+            if (!present["landmine_" landmine_name "_loaded"]) continue
+            if (landmine_severity[landmine_name] == "critical")
+                emit("R-VERSION", "server", "critical", "REMOVED", "", "", landmine_name "; family=" version_family, landmine_reason[landmine_name])
+            else
+                emit("R-VERSION", "server", "medium", "DEPRECATED", "", "", landmine_name "; family=" version_family, landmine_reason[landmine_name])
+        }
     }
 
     function pinned_rules() {
@@ -650,17 +700,38 @@ dbtune_rules_analyze() {
         setting("R-PINNED", "innodb_max_dirty_pages_pct", "60", "medium", "flush", "reason_dirty_pages_limit")
         setting("R-PINNED", "innodb_max_dirty_pages_pct_lwm", "10", "medium", "flush", "reason_dirty_pages_lwm")
         setting("R-PINNED", "innodb_lock_wait_timeout", "30", "medium", "connections", "reason_lock_wait_timeout")
-        setting("R-PINNED", "skip_name_resolve", "1", "medium", "local clients", "reason_skip_name_resolve")
+        skip_name_resolve_rule()
         setting("R-PINNED", "thread_cache_size", "64", "low", "connections", "reason_thread_cache")
         size_setting("R-PINNED", "tmp_table_size", "64M", "medium", "LONGTEXT remains disk-backed", "reason_tmp_table_size")
         size_setting("R-PINNED", "max_heap_table_size", "64M", "medium", "must match tmp_table_size", "reason_max_heap_table_size")
         setting("R-PINNED", "table_definition_cache", "2000", "low", "wordpress tables", "reason_table_definition_cache")
     }
 
-    function operational_rules(key_reads, backup_interval, bind, wildcard, configured, effective, backup_status, backup_source, backup_success, backup_evidence) {
-        key_reads = numeric(ag("key_read_requests", "0"))
-        if (key_reads > 0) emit("R-MYISAM", "server", "info", "KEEP", "", "", "Key_read_requests=" key_reads, "reason_myisam_keep")
-        else size_setting("R-MYISAM", "key_buffer_size", "32M", "low", "Key_read_requests=0", "reason_myisam_key_buffer")
+    function skip_name_resolve_rule(current, enabled, audited, hostname_count, evidence) {
+        current = ag("skip_name_resolve", "")
+        enabled = exact_bool(current)
+        audited = ag("grants_audited", "")
+        hostname_count = ag("hostname_grant_count", "")
+        evidence = "grant_evidence=" ((audited == "1" && uint64_text(hostname_count)) ? "complete" : "invalid")
+        if (enabled < 0 || audited != "1" || !uint64_text(hostname_count)) {
+            emit("R-PINNED", "server", "medium", "UNKNOWN", "", "", evidence "; current=" (enabled < 0 ? "invalid" : "valid") "; proposal_blocked=missing-or-invalid-evidence", "reason_skip_name_resolve_unknown")
+        } else if (hostname_count != "0") {
+            emit("R-PINNED", "server", "medium", "REVIEW", "", "", "hostname_grant_count=" hostname_count "; current=" (enabled ? "ON" : "OFF"), "reason_skip_name_resolve_hostname_grants")
+        } else if (enabled) {
+            emit("R-PINNED", "server", "info", "OK", "", "", "hostname_grant_count=0; current=ON", "reason_skip_name_resolve")
+        } else {
+            emit("R-PINNED", "server", "medium", "CHANGE", "skip_name_resolve", "1", "hostname_grant_count=0; current=OFF", "reason_skip_name_resolve")
+        }
+    }
+
+    function operational_rules(key_reads, backup_interval, bind, remote_count, configured, effective, backup_status, backup_source, backup_success, backup_evidence) {
+        key_reads = ag("key_read_requests", "")
+        if (!("key_read_requests" in present) || !uint64_text(key_reads))
+            emit("R-MYISAM", "server", "low", "UNKNOWN", "", "", "Key_read_requests=" (key_reads == "" ? "missing" : key_reads) "; proposal_blocked=missing-or-invalid-metric", "reason_myisam_unknown")
+        else if (key_reads == "0")
+            size_setting("R-MYISAM", "key_buffer_size", "32M", "low", "Key_read_requests=0", "reason_myisam_key_buffer")
+        else
+            emit("R-MYISAM", "server", "info", "KEEP", "", "", "Key_read_requests=" key_reads, "reason_myisam_keep")
 
         setting("R-SLOWLOG", "slow_query_log", "1", "medium", "persistent early warning", "reason_slow_query_log")
         setting("R-SLOWLOG", "slow_query_log_file", "/var/log/mysql/slow.log", "medium", "covered by logrotate", "reason_slow_query_log_file")
@@ -677,10 +748,12 @@ dbtune_rules_analyze() {
             emit("R-OPENFILES", "server", "medium", "SYSTEMD-LIMIT", "", "", "configured=" configured "; effective=" effective "; LimitNOFILE=" ag("systemd_limit_nofile", "unknown"), "reason_open_files_systemd_limit")
         else emit("R-OPENFILES", "server", "info", "OK", "", "", "effective=" effective, "reason_open_files_ok")
 
-        bind = tolower(ag("bind_address", "")); wildcard = numeric(ag("remote_grant_count", ag("wildcard_grants", "0")))
-        if (bind == "0.0.0.0" || bind == "*" || tolower(ag("port_3306", "")) == "public" || wildcard > 0)
-            emit("R-SEC", "server", "high", "EXPOSED", "", "", "bind_address=" bind "; remote_grants=" wildcard "; listener=" ag("port_3306", "unknown"), "reason_security_exposed")
-        else emit("R-SEC", "server", "info", "OK", "", "", "bind_address=" bind "; remote_grants=" wildcard, "reason_security_ok")
+        bind = tolower(ag("bind_address", "")); remote_count = ag("remote_grant_count", "")
+        if (ag("grants_audited", "") != "1" || !uint64_text(remote_count))
+            emit("R-SEC", "server", "medium", "UNKNOWN", "", "", "grant_evidence=invalid; listener=" ag("port_3306", "unknown"), "reason_security_unknown")
+        else if (bind == "0.0.0.0" || bind == "*" || tolower(ag("port_3306", "")) == "public" || remote_count != "0")
+            emit("R-SEC", "server", "high", "EXPOSED", "", "", "bind_address=" bind "; remote_grants=" remote_count "; listener=" ag("port_3306", "unknown"), "reason_security_exposed")
+        else emit("R-SEC", "server", "info", "OK", "", "", "bind_address=" bind "; remote_grants=" remote_count, "reason_security_ok")
         if (truth(ag("root_cnf_present", "")) || truth(ag("root_cnf_has_password", ag("root_cnf_plaintext_password", ""))))
             emit("R-SEC", "server", "low", "CREDENTIAL-NOTE", "", "", "root.cnf contains a managed credential", "reason_root_cnf_credential")
 
@@ -819,7 +892,7 @@ dbtune_rules_analyze() {
     }
     ' </dev/null
     result=$?
-    rm -f "$normalized_audit"
+    rm -f "$normalized_audit" "$sanitized_audit"
     return "$result"
 }
 

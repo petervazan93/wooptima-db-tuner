@@ -17,6 +17,7 @@ setup() {
     source "$BATS_TEST_DIRNAME/../../lib/05-i18n.sh"
     source "$BATS_TEST_DIRNAME/../../lib/10-util.sh"
     source "$BATS_TEST_DIRNAME/../../lib/30-collect.sh"
+    source "$BATS_TEST_DIRNAME/../support/bats-fd-hygiene.bash"
     dbtune_sql() {
         printf '%s\n' "$1" >>"$BATS_TEST_TMPDIR/sql.log"
         if [[ $1 == SELECT\ @@GLOBAL.slow_query_log* ]]; then
@@ -72,10 +73,28 @@ write_sample_rows() {
     local count=$1 file
 
     file=$(dbtune_collect_samples_file)
-    printf 'timestamp\tuptime\tbp_hit_pct\tbp_misses_s\tdata_read_s\trnd_next_s\ttmp_disk_pct\tthreads_running\tthreads_connected\tqcache_hit_pct\tlog_waits_delta\twait_free_delta\tcpu_pct\tmem_available_kb\tswap_used_kb\tload1\trestart_flag\tqcache_queries_delta\tinterval_seconds\tsample_status\n' >"$file"
+    printf 'timestamp\tuptime\tbp_hit_pct\tbp_misses_s\tdata_read_s\trnd_next_s\ttmp_disk_pct\tthreads_running\tthreads_connected\tqcache_hit_pct\tlog_waits_delta\twait_free_delta\tcpu_pct\tmem_available_kb\tswap_used_kb\tload1\trestart_flag\tcom_select_delta\tinterval_seconds\tsample_status\n' >"$file"
     for ((i = 0; i < count; i++)); do
         printf '2026-07-24T00:00:00Z\t%s\t99\t0\t0\t0\t0\t1\t1\t100\t0\t0\t1\t1000\t0\t1\t0\t1\t60\tok\n' "$i" >>"$file"
     done
+}
+
+status_snapshot_rows() {
+    cat <<'EOF'
+Uptime	100
+Innodb_buffer_pool_reads	10
+Innodb_buffer_pool_read_requests	100
+Innodb_data_read	1000
+Handler_read_rnd_next	20
+Created_tmp_disk_tables	2
+Created_tmp_tables	10
+Threads_running	3
+Threads_connected	8
+Qcache_hits	30
+Com_select	60
+Innodb_log_waits	1
+Innodb_buffer_pool_wait_free	0
+EOF
 }
 
 dbtune_embedded_get() {
@@ -127,7 +146,190 @@ source_tick_dispatch() {
 
     run dbtune_collect_delta now "$first" "$second" 60 $'7\t100' $'7\t400' 100 $'900000\t12000' 1.25 0
     [ "$status" -eq 0 ]
-    [ "$output" = $'now\t160\t95.00\t0.17\t100.00\t5.00\t30.00\t4\t10\t40.00\t2\t3\t5.00\t900000\t12000\t1.25\t0\t100\t60.000000\tok' ]
+    [ "$output" = $'now\t160\t95.00\t0.17\t100.00\t5.00\t30.00\t4\t10\t66.67\t2\t3\t5.00\t900000\t12000\t1.25\t0\t60\t60.000000\tok' ]
+}
+
+@test "uint64 helpers preserve exact decimal boundaries and deltas" {
+    run dbtune_uint64_valid 0
+    [ "$status" -eq 0 ]
+    run dbtune_uint64_valid 18446744073709551615
+    [ "$status" -eq 0 ]
+    run dbtune_uint64_valid 18446744073709551616
+    [ "$status" -ne 0 ]
+    run dbtune_uint64_valid 000000000000000000000000000000000000000000000000000000000000000000001
+    [ "$status" -ne 0 ]
+    run dbtune_uint64_valid 01
+    [ "$status" -ne 0 ]
+
+    run dbtune_uint64_compare 9007199254740992 9007199254740993
+    [ "$status" -eq 0 ]
+    [ "$output" = -1 ]
+    run dbtune_uint64_subtract 9007199254740993 9007199254740992
+    [ "$status" -eq 0 ]
+    [ "$output" = 1 ]
+    run dbtune_uint64_subtract 0 1
+    [ "$status" -eq 65 ]
+}
+
+@test "uint64 collector deltas remain exact above the AWK integer range" {
+    first=$'100\t9007199254740992\t9007199254740992\t9007199254740992\t9007199254740992\t9007199254740992\t9007199254740992\t2\t8\t9007199254740992\t9007199254740992\t9007199254740992\t9007199254740992'
+    second=$'160\t9007199254740993\t9007199254740994\t9007199254740993\t9007199254740993\t9007199254740993\t9007199254740994\t2\t8\t9007199254740993\t9007199254740994\t9007199254740993\t9007199254740993'
+
+    run dbtune_collect_delta now "$first" "$second" 60 $'7\t100\t20' $'7\t100\t20' 100 $'900000\t12000' 1.25 0
+
+    [ "$status" -eq 0 ]
+    [ "$(awk -F '\t' '{print $10, $11, $12, $18, $20}' <<<"$output")" = '50.00 1 1 2 ok' ]
+}
+
+@test "status snapshot rejects every malformed exact-schema response" {
+    local key mutation raw
+    local -a keys=(Uptime Innodb_buffer_pool_reads Innodb_buffer_pool_read_requests Innodb_data_read Handler_read_rnd_next Created_tmp_disk_tables Created_tmp_tables Threads_running Threads_connected Qcache_hits Com_select Innodb_log_waits Innodb_buffer_pool_wait_free)
+    local -a mutations=(missing duplicate unknown extra_field empty signed decimal over_range conflicting)
+
+    for key in "${keys[@]}"; do
+        for mutation in "${mutations[@]}"; do
+            raw=$(status_snapshot_rows)
+            case $mutation in
+                missing) raw=$(awk -F '\t' -v key="$key" '$1 != key' <<<"$raw") ;;
+                duplicate) raw+=$'\n'"$(awk -F '\t' -v key="$key" '$1 == key' <<<"$raw")" ;;
+                unknown) raw+=$'\nUnknown_counter\t1' ;;
+                extra_field) raw=$(awk -F '\t' -v OFS='\t' -v key="$key" '$1 == key {$3="extra"} {print}' <<<"$raw") ;;
+                empty) raw=$(awk -F '\t' -v OFS='\t' -v key="$key" '$1 == key {$2=""} {print}' <<<"$raw") ;;
+                signed) raw=$(awk -F '\t' -v OFS='\t' -v key="$key" '$1 == key {$2="-1"} {print}' <<<"$raw") ;;
+                decimal) raw=$(awk -F '\t' -v OFS='\t' -v key="$key" '$1 == key {$2="1.5"} {print}' <<<"$raw") ;;
+                over_range) raw=$(awk -F '\t' -v OFS='\t' -v key="$key" '$1 == key {$2="18446744073709551616"} {print}' <<<"$raw") ;;
+                conflicting) raw+=$'\n'"$key"$'\t999' ;;
+            esac
+            export DBTUNE_TEST_STATUS_RAW=$raw
+            dbtune_sql() { printf '%s\n' "$DBTUNE_TEST_STATUS_RAW"; }
+            run dbtune_collect_status_snapshot
+            if [ "$status" -ne 65 ]; then
+                printf 'unexpected snapshot result: key=%s mutation=%s status=%s output=%s\n' "$key" "$mutation" "$status" "$output" >&3
+                false
+            fi
+            [ -z "$output" ]
+        done
+    done
+}
+
+@test "status snapshot accepts canonical uint64 boundaries without coercion" {
+    dbtune_sql() {
+        status_snapshot_rows | awk -F '\t' -v OFS='\t' '$1 == "Uptime" {$2="0"} $1 == "Com_select" {$2="18446744073709551615"} {print}'
+    }
+
+    run dbtune_collect_status_snapshot
+
+    [ "$status" -eq 0 ]
+    [ "$(awk -F '\t' '{print $1, $11}' <<<"$output")" = '0 18446744073709551615' ]
+}
+
+@test "every unaccounted cumulative counter reset degrades the sample" {
+    local column
+    local first=$'100\t10\t100\t1000\t20\t2\t10\t3\t8\t30\t60\t1\t1'
+    local second
+
+    for column in 2 3 4 5 6 7 10 11 12 13; do
+        second=$(awk -F '\t' -v OFS='\t' -v column="$column" '{for (i=1;i<=NF;i++) $i=(i==column ? $i-1 : $i+10); print}' <<<"$first")
+        run dbtune_collect_delta now "$first" "$second" 60 $'7\t100\t20' $'7\t200\t20' 100 $'900000\t12000' 1.25 0
+        [ "$status" -eq 0 ]
+        [ "$(awk -F '\t' '{print $20}' <<<"$output")" = degraded_counter_reset ]
+    done
+}
+
+@test "restart identity is authoritative or degraded and never inferred from uptime alone" {
+    run dbtune_collect_restart_status 100 1000 999000 10 20 110 170 1100 1000000 $'0\t0\t0' $'0\t0\t0'
+    [ "$output" = degraded_restart_identity ]
+    run dbtune_collect_restart_status 100 1000 999000 10 20 110 170 1100 1000000 $'10\t100\t20' $'0\t0\t0'
+    [ "$output" = degraded_restart_identity ]
+    run dbtune_collect_restart_status 100 1000 999000 10 20 110 170 1100 1000000 $'10\t100\t0' $'10\t100\t0'
+    [ "$output" = degraded_restart_identity ]
+    run dbtune_collect_restart_status 100 1000 999000 bad 20 110 170 1100 1000000 $'10\t100\t20' $'10\t100\t20'
+    [ "$output" = degraded_restart_identity ]
+    run dbtune_collect_restart_status 100 1000 999000 10 0 110 170 1100 1000000 $'10\t100\t20' $'10\t100\t20'
+    [ "$output" = degraded_restart_identity ]
+    run dbtune_collect_restart_status 100 1000 999000 10 20 110 170 1100 1000000 $'10\t100\t20' $'10\t100\t21'
+    [ "$output" = restart ]
+    run dbtune_collect_restart_status 100 1000 999000 10 20 110 170 1100 1000000 $'10\t100\t20' $'11\t100\t20'
+    [ "$output" = restart ]
+
+    run dbtune_collect_restart_status 10 1000 999000 10 20 70 130 1100 1000000 $'10\t100\t20' $'11\t100\t20'
+    [ "$output" = restart ]
+}
+
+@test "unchanged restart identity degrades contradictory uptime with exact uint64 ordering" {
+    local state first=$'100\t10\t100\t1000\t20\t2\t10\t3\t8\t30\t60\t1\t1'
+    local second=$'160\t20\t120\t1100\t30\t3\t12\t3\t8\t32\t64\t2\t2'
+
+    run dbtune_collect_restart_status 100 1000 999000 10 20 110 109 1100 1000000 $'10\t100\t20' $'10\t101\t20'
+    [ "$status" -eq 0 ]
+    [ "$output" = degraded_counter_reset ]
+    state=$output
+    run dbtune_collect_delta now "$first" "$second" 60 $'10\t100\t20' $'10\t101\t20' 100 $'900000\t12000' 1.25 0 "$state"
+    [ "$status" -eq 0 ]
+    [ "$(awk -F '\t' '{print $11, $12, $17, $20}' <<<"$output")" = '1 1 0 degraded_counter_reset' ]
+
+    run dbtune_collect_restart_status 120 1000 999000 10 20 110 170 1100 1000000 $'10\t100\t20' $'10\t101\t20'
+    [ "$output" = degraded_counter_reset ]
+
+    run dbtune_collect_restart_status 100 1000 999000 10 20 110 170 1100 1000000 $'10\t100\t20' $'10\t101\t20'
+    [ "$output" = degraded_counter_inconsistent ]
+
+    run dbtune_collect_restart_status bad 1000 999000 10 20 110 170 1100 1000000 $'10\t100\t20' $'10\t101\t20'
+    [ "$output" = degraded_counter_inconsistent ]
+
+    run dbtune_collect_restart_status 9007199254740992 1000 999000 10 20 9007199254740993 9007199254740994 1001 1000000 $'10\t9007199254740992\t20' $'10\t9007199254740993\t20'
+    [ "$output" = ok ]
+}
+
+@test "CPU snapshots and percentages preserve one tick above the AWK integer range" {
+    local proc="$BATS_TEST_TMPDIR/proc"
+    mkdir -p "$proc/42"
+    printf '42 (mariadbd) S 0 0 0 0 0 0 0 0 0 0 9007199254740992 1 0 0 0 0 0 0 123\n' >"$proc/42/stat"
+    export DBTUNE_PROC_ROOT=$proc
+    export DBTUNE_PGREP=fake_pgrep
+    fake_pgrep() { printf '42\n'; }
+
+    run dbtune_collect_cpu_snapshot
+    [ "$status" -eq 0 ]
+    [ "$output" = $'42\t9007199254740993\t123' ]
+
+    first=$'100\t10\t100\t1000\t20\t2\t10\t3\t8\t30\t60\t1\t1'
+    second=$'101\t10\t100\t1000\t20\t2\t10\t3\t8\t30\t60\t1\t1'
+    run dbtune_collect_delta now "$first" "$second" 1 $'42\t9007199254740992\t123' $'42\t9007199254740993\t123' 100 $'900000\t12000' 1.25 0 ok
+    [ "$status" -eq 0 ]
+    [ "$(awk -F '\t' '{print $13, $20}' <<<"$output")" = '1.00 ok' ]
+
+    run dbtune_collect_delta now "$first" "$second" 1 $'42\t9007199254740993\t123' $'42\t9007199254740992\t123' 100 $'900000\t12000' 1.25 0 ok
+    [ "$status" -eq 0 ]
+    [ "$(awk -F '\t' '{print $13, $20}' <<<"$output")" = '0.00 degraded_counter_reset' ]
+}
+
+@test "counter inconsistent deltas are degraded and inspector rejects representable corruption" {
+    local first=$'100\t10\t100\t1000\t20\t2\t10\t3\t8\t30\t60\t1\t1'
+    local second
+    local file
+
+    for second in \
+        $'160\t11\t110\t1010\t30\t3\t20\t3\t8\t32\t61\t2\t2' \
+        $'160\t12\t101\t1010\t30\t3\t20\t3\t8\t31\t61\t2\t2' \
+        $'160\t11\t110\t1010\t30\t4\t11\t3\t8\t31\t61\t2\t2'; do
+        run dbtune_collect_delta now "$first" "$second" 60 $'7\t100\t20' $'7\t200\t20' 100 $'900000\t12000' 1.25 0
+        [ "$status" -eq 0 ]
+        [ "$(awk -F '\t' '{print $20}' <<<"$output")" = degraded_counter_inconsistent ]
+    done
+
+    file=$(dbtune_collect_samples_file)
+    dbtune_collect_sample_header >"$file"
+    {
+        printf '2026-07-24T00:00:00Z\t300\t101\t1\t1024\t100\t20\t2\t5\t30\t0\t0\t5\t12000000\t0\t1\t0\t10\t60\tok\n'
+        printf '2026-07-24T00:01:00Z\t360\t99\t1\t1024\t100\t101\t2\t5\t30\t0\t0\t5\t12000000\t0\t1\t0\t10\t60\tok\n'
+        printf '2026-07-24T00:02:00Z\t420\t99\t1\t1024\t100\t20\t2\t5\t101\t0\t0\t5\t12000000\t0\t1\t0\t10\t60\tok\n'
+        printf '2026-07-24T00:03:00Z\t480\t99\t1\t1024\t100\t20\t2\t5\t30\t0\t0\t5\t12000000\t0\t1\t0\t0\t60\tok\n'
+    } >>"$file"
+    run dbtune_samples_diagnostics "$file"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *$'valid_rows\t0'* ]]
+    [[ "$output" == *$'rejected_rows\t4'* ]]
 }
 
 @test "uptime reset zeroes deltas and marks restart" {
@@ -147,20 +349,36 @@ source_tick_dispatch() {
     [ "$status" -eq 0 ]
     [ "$output" -eq 3 ]
     run awk 'NR == 1 { print }' "$(dbtune_collect_samples_file)"
-    [ "$output" = $'timestamp\tuptime\tbp_hit_pct\tbp_misses_s\tdata_read_s\trnd_next_s\ttmp_disk_pct\tthreads_running\tthreads_connected\tqcache_hit_pct\tlog_waits_delta\twait_free_delta\tcpu_pct\tmem_available_kb\tswap_used_kb\tload1\trestart_flag\tqcache_queries_delta\tinterval_seconds\tsample_status' ]
+    [ "$output" = $'timestamp\tuptime\tbp_hit_pct\tbp_misses_s\tdata_read_s\trnd_next_s\ttmp_disk_pct\tthreads_running\tthreads_connected\tqcache_hit_pct\tlog_waits_delta\twait_free_delta\tcpu_pct\tmem_available_kb\tswap_used_kb\tload1\trestart_flag\tcom_select_delta\tinterval_seconds\tsample_status' ]
 }
 
-@test "first new append atomically upgrades a legacy sample header" {
+@test "old sample headers fail start before SQL timer config slow-log or state mutation" {
+    local file before after header sql_before timer_before config_before
     file=$(dbtune_collect_samples_file)
-    dbtune_collect_legacy_sample_header >"$file"
-    printf 'old\t100\t99\t1\t1\t1\t0\t1\t1\t100\t0\t0\t1\t1000\t0\t1\t0\n' >>"$file"
-    new=$'new\t160\t99\t1\t1\t1\t0\t1\t1\t100\t0\t0\t1\t1000\t0\t1\t0\t1\t60.000000\tok'
+    for header in \
+        $'timestamp\tuptime\tbp_hit_pct\tbp_misses_s\tdata_read_s\trnd_next_s\ttmp_disk_pct\tthreads_running\tthreads_connected\tqcache_hit_pct\tlog_waits_delta\twait_free_delta\tcpu_pct\tmem_available_kb\tswap_used_kb\tload1\trestart_flag\tqcache_queries_delta\tinterval_seconds\tsample_status' \
+        "$(dbtune_collect_legacy_sample_header)"; do
+        printf '%s\nold-row\n' "$header" >"$file"
+        before=$(dbtune_sha256_file "$file")
+        printf 'unchanged-sql\n' >"$BATS_TEST_TMPDIR/sql.log"
+        printf 'unchanged-timer\n' >"$BATS_TEST_TMPDIR/systemctl.log"
+        printf 'unchanged-config\n' >"$(dbtune_collect_config_file)"
+        sql_before=$(dbtune_sha256_file "$BATS_TEST_TMPDIR/sql.log")
+        timer_before=$(dbtune_sha256_file "$BATS_TEST_TMPDIR/systemctl.log")
+        config_before=$(dbtune_sha256_file "$(dbtune_collect_config_file)")
+        dbtune_state_write audited
 
-    run dbtune_collect_append_sample "$new"
-    [ "$status" -eq 0 ]
-    [ "$(awk -F '\t' 'NR==1 {print NF}' "$file")" -eq 20 ]
-    [ "$(awk -F '\t' 'NR==2 {print NF, $18, $19, $20}' "$file")" = '20   ok' ]
-    [ "$(awk -F '\t' 'NR==3 {print NF, $18, $19, $20}' "$file")" = '20 1 60.000000 ok' ]
+        run cmd_collect start
+
+        [ "$status" -eq 65 ]
+        [[ "$output" == *'new'*'cycle'* ]]
+        after=$(dbtune_sha256_file "$file")
+        [ "$after" = "$before" ]
+        [ "$(dbtune_state_read)" = audited ]
+        [ "$(dbtune_sha256_file "$(dbtune_collect_config_file)")" = "$config_before" ]
+        [ "$(dbtune_sha256_file "$BATS_TEST_TMPDIR/sql.log")" = "$sql_before" ]
+        [ "$(dbtune_sha256_file "$BATS_TEST_TMPDIR/systemctl.log")" = "$timer_before" ]
+    done
 }
 
 @test "interval validity rejects non-increasing and overly long measurements" {
@@ -291,12 +509,13 @@ source_tick_dispatch() {
     dbtune_collect_load1() { printf '0.5\n'; }
     dbtune_collect_ensure_slow_log() { printf 'ok\n'; }
     dbtune_collect_daily_dbsize() { return 0; }
+    printf '40\t40\t999900\t7\t20\n' >"$(dbtune_collect_last_uptime_file)"
     export DBTUNE_CLK_TCK=100
 
     run cmd_tick
     [ "$status" -eq 0 ]
     run awk -F '\t' 'END {print $4, $5, $6, $13, $18, $19, $20}' "$(dbtune_collect_samples_file)"
-    [ "$output" = '0.20 100.00 5.00 100.00 100 75.000000 ok' ]
+    [ "$output" = '0.20 100.00 5.00 100.00 50 75.000000 ok' ]
 }
 
 @test "start validates arguments" {
@@ -398,7 +617,10 @@ source_tick_dispatch() {
         done
     }
 
-    cmd_tick >"$BATS_TEST_TMPDIR/tick.out" &
+    (
+        dbtune_test_close_non_std_fds
+        cmd_tick
+    ) >"$BATS_TEST_TMPDIR/tick.out" &
     tick_pid=$!
     for _ in {1..200}; do
         [[ -e $BATS_TEST_TMPDIR/tick-entered ]] && break
@@ -406,7 +628,10 @@ source_tick_dispatch() {
     done
     [ -e "$BATS_TEST_TMPDIR/tick-entered" ]
 
-    cmd_collect stop >"$BATS_TEST_TMPDIR/stop.out" &
+    (
+        dbtune_test_close_non_std_fds
+        cmd_collect stop
+    ) >"$BATS_TEST_TMPDIR/stop.out" &
     stop_pid=$!
     for _ in {1..200}; do
         [[ -e $BATS_TEST_TMPDIR/systemctl.log ]] && grep -q 'disable --now dbtune-collect.timer' "$BATS_TEST_TMPDIR/systemctl.log" && break

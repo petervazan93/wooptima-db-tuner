@@ -213,7 +213,7 @@ they usually indicate a plugin that no longer works or was uninstalled.
 
 ## Step 0 - Measurement before deployment
 
-Read-only and safe in production. Run as `root`.
+This one-time shell measurement is read-only with respect to MariaDB and host configuration. Run it as `root`. It is not the dbtune release measurement rehearsal: dbtune collection changes slow-log runtime settings and installs/enables a systemd service/timer, so that separate no-apply checkpoint requires explicit consent and must not be called audit-only.
 
 ```bash
 #!/bin/bash
@@ -270,8 +270,8 @@ hr "DECISIONS"
 mariadb -Nse "SELECT CONCAT('MyISAM: ', IF((SELECT variable_value FROM information_schema.global_status
   WHERE variable_name='KEY_READ_REQUESTS')>0,'IN USE -> keep key_buffer','NOT IN USE -> key_buffer 32M'));"
 
-mariadb -Nse "SELECT CONCAT('query cache hit rate: ', ROUND(100*qh/NULLIF(qh+cs,0),1),'%  -> ',
-  IF(100*qh/NULLIF(qh+cs,0) < 20,'DISABLE','KEEP ENABLED'))
+mariadb -Nse "SELECT CONCAT('query cache hit rate: ', ROUND(100*qh/NULLIF(cs,0),1),'%  -> ',
+  IF(100*qh/NULLIF(cs,0) < 20,'DISABLE','KEEP ENABLED'))
   FROM (SELECT
    (SELECT variable_value FROM information_schema.global_status WHERE variable_name='QCACHE_HITS') qh,
    (SELECT variable_value FROM information_schema.global_status WHERE variable_name='COM_SELECT') cs) x;"
@@ -292,6 +292,14 @@ echo "-> USE:         $(( DS < RAM ? DS : RAM )) GB"
 ```
 
 Save the output; you will need it for comparison after deployment.
+
+### dbtune evidence contract
+
+The production executable accepts exactly `DBTUNE_UI_LANG`, `DBTUNE_STATE_DIR`, `DBTUNE_CONFIG_TARGET`, `DBTUNE_CONFIG_ALLOWED_DIR`, `DBTUNE_ROOT_CNF`, `DBTUNE_LOG_LEVEL`, and `DBTUNE_MAX_BACKUP_AGE_SECONDS` as operator `DBTUNE_*` inputs. Its immutable production profile cannot be selected through the environment and cannot be sourced; all test-only command/path, SQL-auth, clock, ownership, fault, and sample-threshold overrides are ignored. Integration uses a separate immutable artifact, while installer and release gates accept only production.
+
+Collector status values must be canonical decimal uint64 values from `0` through `18446744073709551615`, and exact subtraction is used above AWK's integer range. The query-cache window formula is `100 * Qcache_hits_delta / Com_select_delta`; current `samples.tsv` therefore names field 18 `com_select_delta`. A positive denominator is active and zero is idle. Buffer-pool reads cannot exceed read requests, disk temporary tables cannot exceed all temporary tables, and query-cache hits cannot exceed `Com_select`.
+
+Only `sample_status=ok` with `restart_flag=0` is usable. The other exact statuses are `degraded_interval`, `degraded_counter_reset`, `degraded_counter_inconsistent`, and `degraded_restart_identity`. Restarts require mariadbd PID plus `/proc` start-time evidence; uptime alone is insufficient, and a confirmed restart zeroes deltas. Old v0.4.1 20-column files using `qcache_queries_delta` and legacy 17-column files cannot receive new rows. Stop the active collection, run a fresh audit, and start a fresh collection; old apply and rollback history remains usable.
 
 ---
 
@@ -368,7 +376,7 @@ innodb_max_dirty_pages_pct_lwm = 10      # default 0 waits until the last moment
 
 # -- Connections -----------------------------------------------------------
 innodb_lock_wait_timeout       = 30      # RunCloud uses 200, blocking FPM workers
-skip_name_resolve              = 1       # all traffic comes from 127.0.0.1
+skip_name_resolve              = 1       # only after complete address-only grant evidence
 thread_cache_size              = 64
 
 # -- Temporary tables ------------------------------------------------------
@@ -411,6 +419,8 @@ After the investigation, restore `2` and `query_plan`.
 
 ## Step 3 - Deployment
 
+Before enabling `skip_name_resolve`, require a complete exact account-host query with `security.grants_audited=1` and `security.hostname_grant_count=0`. Address-only evidence includes `localhost`, `%`, canonical IPv4/IPv6, valid address-prefix wildcards, and IPv4 with a contiguous netmask. A failed query, duplicate/malformed row, invalid address, or hostname-dependent grant blocks the change.
+
 ```bash
 # 1. Slow-log directory (idempotent)
 sudo install -d -o mysql -g mysql -m 750 /var/log/mysql
@@ -448,6 +458,12 @@ the file correctly.
 
 **Do not skip this.** An unknown variable or invalid value prevents the server from
 starting, leaving the store down until it is corrected.
+
+dbtune audit scans the effective daemon startup arguments with `mariadbd --print-defaults`, using `mysqld --print-defaults` only when `mariadbd` is absent. Normal and `--force` apply require complete safe audit evidence and repeat this scan immediately before creating forward apply history and mutation intent. A scan failure or loaded critical removed option blocks both paths. It never blocks rollback, failed-apply restoration, or crash recovery, which do not call the current audit or scanner; legacy apply/rollback history remains usable.
+
+Interactive `--force` bypasses only measurement/analysis and proposal-manifest provenance, including its analysis-derived proposal mapping, the normal `proposed` state requirement (force permits `audited|analyzed|proposed`), and the 05:30-07:30 local window. It does not bypass strict proposal grammar and exact bytes, authenticated audit evidence, loaded-default checks, live variable-name existence, blocking findings in any present analysis, Galera, mydumper, backup, target/topology/ownership, atomic publication, daemon validation, restart, rollback, or recovery guards.
+
+Backup handling is the same with or without force. A missing artifact or a valid `status=unknown` artifact requires a separate TTY and the exact active-language phrase `I CONFIRM A RESTORABLE BACKUP` or `POTVRDZUJEM OBNOVITELNU ZALOHU`; confirmed `missing`, malformed, stale, or future evidence blocks apply instead of entering that confirmation path.
 
 ```bash
 sudo install -d -o mysql -g mysql /tmp/mdb-validate

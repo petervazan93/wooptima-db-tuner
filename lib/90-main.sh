@@ -108,10 +108,11 @@ dbtune_dispatch() {
 
 dbtune_main() {
     umask 077
+    dbtune_runtime_prepare_environment || return
     dbtune_i18n_init || return
     dbtune_dispatch "$@"
 }
 
-if [[ ${BASH_SOURCE[0]} == "$0" ]]; then
+if ! (return 0 2>/dev/null); then
     dbtune_main "$@"
 fi

@@ -10,6 +10,7 @@ setup() {
     source "$BATS_TEST_DIRNAME/../../lib/00-header.sh"
     source "$BATS_TEST_DIRNAME/../../lib/05-i18n.sh"
     source "$BATS_TEST_DIRNAME/../../lib/10-util.sh"
+    source "$BATS_TEST_DIRNAME/../../lib/20-audit.sh"
     source "$BATS_TEST_DIRNAME/../../lib/50-report.sh"
     dbtune_i18n_set sk
     mkdir -p "$DBTUNE_STATE_DIR"
@@ -28,7 +29,7 @@ hw.cpu_count	8
 hw.ram_bytes	17179869184
 hw.storage_class	nvme
 mariadb.dataset_bytes	4294967296
-mariadb.variable.innodb_buffer_pool_size	128M
+mariadb.variable.innodb_buffer_pool_size	134217728
 mariadb.variable.max_connections	4096
 backup.status	verified
 backup.source	unit-test-backup
@@ -45,6 +46,8 @@ audit.section.mariadb.optional_evidence	mariadb.variable.innodb_flush_method=dep
 audit.section.hardware.status	complete
 audit.section.applications.status	complete
 audit.section.security.status	complete
+security.grants_audited	1
+security.hostname_grant_count	0
 audit.required_sections	mariadb,hardware,applications,security
 audit.failed_sections	none
 audit.partial_sections	none
@@ -69,7 +72,7 @@ shop-a	autoload.top.0	large_option:1048576
 shop-a	autoload.top.1	api_token:512
 EOF
     cat >"$DBTUNE_STATE_DIR/samples.tsv" <<'EOF'
-timestamp	uptime	bp_hit_pct	bp_misses_s	data_read_s	rnd_next_s	tmp_disk_pct	threads_running	threads_connected	qcache_hit_pct	log_waits_delta	wait_free_delta	cpu_pct	mem_available_kb	swap_used_kb	load1	restart_flag	qcache_queries_delta	interval_seconds	sample_status
+timestamp	uptime	bp_hit_pct	bp_misses_s	data_read_s	rnd_next_s	tmp_disk_pct	threads_running	threads_connected	qcache_hit_pct	log_waits_delta	wait_free_delta	cpu_pct	mem_available_kb	swap_used_kb	load1	restart_flag	com_select_delta	interval_seconds	sample_status
 2026-07-01T10:00:00Z	1000	99.9	1	1024	100	10	2	4	30	0	0	5	12000000	0	0.2	0	10	300	ok
 2026-07-01T10:05:00Z	1300	80	200	4096000	9000	40	12	20	10	1	0	75	9000000	64	4.2	0	10	300	ok
 2026-07-01T10:10:00Z	1600	95	40	2048000	3000	25	7	12	22	0	0	30	10000000	64	2.1	0	10	300	ok
@@ -104,6 +107,26 @@ R-APP-OBJECT-CACHE	app:shop-a	critical	REDIS-DOWN			redis=0; dropin=1	reason_red
 R-BP-SIZE	server	high	CHANGE	innodb_buffer_pool_size	4G	dataset=4G; current=128M	reason_buffer_pool_change
 EOF
     write_analysis_manifest
+}
+
+@test "strict proposal grammar emits canonical records only after complete validation" {
+    local proposal="$BATS_TEST_TMPDIR/proposal.cnf"
+    cat >"$proposal" <<'CNF'
+[mysqld]
+Max-Connections = 300
+skip-name-resolve=ON
+CNF
+
+    run dbtune_cnf_entries_strict "$proposal"
+
+    [ "$status" -eq 0 ]
+    [ "$output" = $'max_connections\t300\nskip_name_resolve\tON' ]
+
+    printf '[mysqld]\nmax_connections=300\ninvalid line\n' >"$proposal"
+    run dbtune_cnf_entries_strict "$proposal"
+
+    [ "$status" -eq 65 ]
+    [ -z "$output" ]
 }
 
 @test "report and proposal command diagnostics follow the selected interface language" {
@@ -170,6 +193,8 @@ EOF
     grep -F '"audit.overall_status":"PASS"' "$DBTUNE_STATE_DIR/report.json"
     grep -F '"audit.exit_status":"0"' "$DBTUNE_STATE_DIR/report.json"
     grep -F '"audit.section.security.status":"complete"' "$DBTUNE_STATE_DIR/report.json"
+    grep -F '"security.grants_audited":"1"' "$DBTUNE_STATE_DIR/report.json"
+    grep -F '"security.hostname_grant_count":"0"' "$DBTUNE_STATE_DIR/report.json"
     grep -F '"audit.section.mariadb.evidence_schema_version":"1"' "$DBTUNE_STATE_DIR/report.json"
     grep -F '"audit.section.mariadb.invalid_evidence":"none"' "$DBTUNE_STATE_DIR/report.json"
     grep -F '_Run: `report-run`' "$DBTUNE_STATE_DIR/report.md"
@@ -364,7 +389,7 @@ EOF
     local sample_file="$BATS_TEST_TMPDIR/twenty.tsv"
     local value
 
-    printf 'timestamp\tuptime\tbp_hit_pct\tbp_misses_s\tdata_read_s\trnd_next_s\ttmp_disk_pct\tthreads_running\tthreads_connected\tqcache_hit_pct\tlog_waits_delta\twait_free_delta\tcpu_pct\tmem_available_kb\tswap_used_kb\tload1\trestart_flag\tqcache_queries_delta\tinterval_seconds\tsample_status\n' >"$sample_file"
+    printf 'timestamp\tuptime\tbp_hit_pct\tbp_misses_s\tdata_read_s\trnd_next_s\ttmp_disk_pct\tthreads_running\tthreads_connected\tqcache_hit_pct\tlog_waits_delta\twait_free_delta\tcpu_pct\tmem_available_kb\tswap_used_kb\tload1\trestart_flag\tcom_select_delta\tinterval_seconds\tsample_status\n' >"$sample_file"
     for value in {1..20}; do
         printf '2026-07-24T00:00:00Z\t%s\t99\t0\t0\t0\t0\t%s\t1\t30\t0\t0\t%s\t1000\t0\t1\t0\t1\t60\tok\n' \
             "$value" "$value" "$value" >>"$sample_file"
@@ -710,6 +735,112 @@ EOF
     run cmd_report
     [ "$status" -eq 65 ]
     [[ "$output" == *"Unsafe proposal record"* ]]
+}
+
+@test "report and propose reject proposal fields on non-changing verdicts without replacing artifacts" {
+    local verdict
+
+    for verdict in UNKNOWN REVIEW KEEP OK UNSUPPORTED; do
+        printf '%s\n' \
+            $'rule_id\tscope\tseverity\tverdict\tproposed_key\tproposed_value\tevidence\treason_id' \
+            $'R-TEST\tserver\thigh\t'"$verdict"$'\tmax_connections\t200\ttest\treason_max_connections_change' \
+            >"$DBTUNE_STATE_DIR/analysis.tsv"
+        write_analysis_manifest
+        dbtune_state_write analyzed
+        printf 'existing-report\n' >"$DBTUNE_STATE_DIR/report.md"
+        printf 'existing-json\n' >"$DBTUNE_STATE_DIR/report.json"
+        printf 'existing-proposal\n' >"$DBTUNE_STATE_DIR/proposed-99-zz-tuning.cnf"
+        printf 'existing-manifest\n' >"$DBTUNE_STATE_DIR/proposal-manifest.tsv"
+
+        run cmd_report
+        [ "$status" -eq 65 ]
+        [ "$(cat "$DBTUNE_STATE_DIR/report.md")" = existing-report ]
+        [ "$(cat "$DBTUNE_STATE_DIR/report.json")" = existing-json ]
+        run cmd_propose
+        [ "$status" -eq 65 ]
+        [ "$(cat "$DBTUNE_STATE_DIR/proposed-99-zz-tuning.cnf")" = existing-proposal ]
+        [ "$(cat "$DBTUNE_STATE_DIR/proposal-manifest.tsv")" = existing-manifest ]
+    done
+}
+
+@test "report and propose reject incomplete conflicting or invalid proposal fields atomically" {
+    local name rows
+
+    for name in missing-key missing-value malformed-current conflicting-verdicts; do
+        case $name in
+            missing-key)
+                rows=$'R-TEST\tserver\thigh\tCHANGE\t\t200\ttest\treason_max_connections_change'
+                ;;
+            missing-value)
+                rows=$'R-TEST\tserver\thigh\tCHANGE\tmax_connections\t\ttest\treason_max_connections_change'
+                ;;
+            malformed-current)
+                rows=$'R-TEST\tserver\thigh\tCHANGE\tmax_connections\t200\ttest\treason_max_connections_change'
+                awk -F '\t' '$1 != "mariadb.variable.max_connections" {print}' OFS='\t' \
+                    "$DBTUNE_STATE_DIR/audit.tsv" >"$BATS_TEST_TMPDIR/audit.tsv"
+                printf 'mariadb.variable.max_connections\tinvalid\n' >>"$BATS_TEST_TMPDIR/audit.tsv"
+                mv "$BATS_TEST_TMPDIR/audit.tsv" "$DBTUNE_STATE_DIR/audit.tsv"
+                ;;
+            conflicting-verdicts)
+                rows=$'R-FIRST\tserver\thigh\tCHANGE\tmax_connections\t200\tfirst\treason_max_connections_change\nR-SECOND\tserver\thigh\tREDUCE\tmax-connections\t100\tsecond\treason_max_connections_change'
+                ;;
+        esac
+        printf '%s\n%s\n' \
+            $'rule_id\tscope\tseverity\tverdict\tproposed_key\tproposed_value\tevidence\treason_id' \
+            "$rows" >"$DBTUNE_STATE_DIR/analysis.tsv"
+        dbtune_provenance_write_audit_manifest "$DBTUNE_STATE_DIR/audit-manifest.tsv" \
+            report-run "$DBTUNE_STATE_DIR/audit.tsv" "$DBTUNE_STATE_DIR/apps.tsv" "$DBTUNE_STATE_DIR/databases.tsv"
+        write_analysis_manifest
+        dbtune_state_write analyzed
+        printf 'existing-report\n' >"$DBTUNE_STATE_DIR/report.md"
+        printf 'existing-json\n' >"$DBTUNE_STATE_DIR/report.json"
+        printf 'existing-proposal\n' >"$DBTUNE_STATE_DIR/proposed-99-zz-tuning.cnf"
+        printf 'existing-manifest\n' >"$DBTUNE_STATE_DIR/proposal-manifest.tsv"
+
+        run cmd_report
+        [ "$status" -eq 65 ]
+        [ "$(cat "$DBTUNE_STATE_DIR/report.md")" = existing-report ]
+        [ "$(cat "$DBTUNE_STATE_DIR/report.json")" = existing-json ]
+        run cmd_propose
+        [ "$status" -eq 65 ]
+        [ "$(cat "$DBTUNE_STATE_DIR/proposed-99-zz-tuning.cnf")" = existing-proposal ]
+        [ "$(cat "$DBTUNE_STATE_DIR/proposal-manifest.tsv")" = existing-manifest ]
+
+        if [[ $name == malformed-current ]]; then
+            awk -F '\t' '$1 != "mariadb.variable.max_connections" || $2 != "invalid"' \
+                "$DBTUNE_STATE_DIR/audit.tsv" >"$BATS_TEST_TMPDIR/audit.tsv"
+            printf 'mariadb.variable.max_connections\t4096\n' >>"$BATS_TEST_TMPDIR/audit.tsv"
+            mv "$BATS_TEST_TMPDIR/audit.tsv" "$DBTUNE_STATE_DIR/audit.tsv"
+        fi
+    done
+}
+
+@test "proposal loader canonicalizes valid boolean current evidence" {
+    printf 'mariadb.variable.skip_name_resolve\tON\n' >>"$DBTUNE_STATE_DIR/audit.tsv"
+    DBTUNE_SERVER_SUPPORT=supported
+    DBTUNE_ANALYSIS_LINES=(
+        $'R-PINNED\tserver\tmedium\tCHANGE\tskip_name_resolve\t0\tlocal clients\treason_skip_name_resolve'
+    )
+
+    dbtune_proposals_load "$DBTUNE_STATE_DIR/audit.tsv"
+    dbtune_proposal_parse "${DBTUNE_PROPOSAL_LINES[0]}"
+    [ "$DBTUNE_PROPOSAL_CURRENT" = 1 ]
+}
+
+@test "static recommendation header omits evidence-dependent MyISAM and name resolution hints" {
+    printf '%s\n' \
+        $'rule_id\tscope\tseverity\tverdict\tproposed_key\tproposed_value\tevidence\treason_id' \
+        $'R-MYISAM\tserver\tlow\tUNKNOWN\t\t\tKey_read_requests=unknown; proposal_blocked=missing-or-invalid-metric\treason_myisam_key_buffer' \
+        $'R-PINNED\tserver\tmedium\tREVIEW\t\t\tskip_name_resolve=unknown\treason_skip_name_resolve' \
+        >"$DBTUNE_STATE_DIR/analysis.tsv"
+    write_analysis_manifest
+    dbtune_state_write analyzed
+
+    run cmd_propose
+
+    [ "$status" -eq 0 ]
+    run grep -E '^[#[:space:]]*(key_buffer_size|skip_name_resolve)[[:space:]]*=' "$DBTUNE_STATE_DIR/proposed-99-zz-tuning.cnf"
+    [ "$status" -eq 1 ]
 }
 
 @test "repeated proposal preserves proposed state and deterministic keys" {

@@ -10,6 +10,7 @@ setup() {
     source "$BATS_TEST_DIRNAME/../../lib/00-header.sh"
     source "$BATS_TEST_DIRNAME/../../lib/05-i18n.sh"
     source "$BATS_TEST_DIRNAME/../../lib/10-util.sh"
+    source "$BATS_TEST_DIRNAME/../../lib/15-mariadb-safety.sh"
     source "$BATS_TEST_DIRNAME/../../lib/20-audit.sh"
     source "$BATS_TEST_DIRNAME/../../lib/40-rules.sh"
     dbtune_i18n_set sk
@@ -41,6 +42,11 @@ backup.last_success	2026-07-23T02:00:00Z
 backup_interval_hours	6
 bind_address	127.0.0.1
 wildcard_grants	0
+security.grants_audited	1
+security.hostname_grant_count	0
+security.remote_grant_count	0
+landmine.scan.status	complete
+landmine.scan.method	mariadbd_print_defaults
 EOF
 }
 
@@ -52,12 +58,12 @@ make_samples() {
     local log_waits=${5:-0}
     local mem_available_kb=${6:-12582912}
     local connected=${7:-50}
-    local qcache_queries=${8:-1}
+    local com_select=${8:-1}
 
-    awk -v hit="$hit" -v threads="$threads" -v count="$count" -v waits="$log_waits" -v available="$mem_available_kb" -v connected="$connected" -v qcache_queries="$qcache_queries" 'BEGIN {
+    awk -v hit="$hit" -v threads="$threads" -v count="$count" -v waits="$log_waits" -v available="$mem_available_kb" -v connected="$connected" -v com_select="$com_select" 'BEGIN {
         OFS="\t"
-        print "timestamp","uptime","bp_hit_pct","bp_misses_s","data_read_s","rnd_next_s","tmp_disk_pct","threads_running","threads_connected","qcache_hit_pct","log_waits_delta","wait_free_delta","cpu_pct","mem_available_kb","swap_used_kb","load1","restart_flag","qcache_queries_delta","interval_seconds","sample_status"
-        for (i=1; i<=count; i++) print "2026-07-24T00:00:00Z",i*300,99.9,1,1024,100,20,threads,connected,hit,(i==1 ? waits : 0),0,5,available,0,1,0,qcache_queries,300,"ok"
+        print "timestamp","uptime","bp_hit_pct","bp_misses_s","data_read_s","rnd_next_s","tmp_disk_pct","threads_running","threads_connected","qcache_hit_pct","log_waits_delta","wait_free_delta","cpu_pct","mem_available_kb","swap_used_kb","load1","restart_flag","com_select_delta","interval_seconds","sample_status"
+        for (i=1; i<=count; i++) print "2026-07-24T00:00:00Z",i*300,99.9,1,1024,100,20,threads,connected,hit,(i==1 ? waits : 0),0,5,available,0,1,0,com_select,300,"ok"
     }' >"$file"
 }
 
@@ -509,6 +515,63 @@ EOF
     [ "$output" = "" ]
 }
 
+@test "landmine scan tri-state emits findings only from complete exact loaded evidence" {
+    local case_name verdict
+
+    make_samples "$BATS_TEST_TMPDIR/samples.tsv" 30 2 10
+    for case_name in complete-loaded complete-absent failed missing duplicate conflicting malformed old-config unsupported-failed; do
+        if [[ $case_name == unsupported-failed ]]; then
+            make_audit "$BATS_TEST_TMPDIR/base.tsv" 12.0.0-MariaDB
+        else
+            make_audit "$BATS_TEST_TMPDIR/base.tsv" 11.4.12-MariaDB
+        fi
+        awk -F '\t' '$1 !~ /^landmine[.]scan[.]/ && $1 !~ /^landmine[.]/ && $1 !~ /^finding[.]landmine[.]/' \
+            "$BATS_TEST_TMPDIR/base.tsv" >"$BATS_TEST_TMPDIR/$case_name.tsv"
+        case $case_name in
+            complete-loaded)
+                printf 'landmine.scan.status\tcomplete\nlandmine.scan.method\tmariadbd_print_defaults\nlandmine.innodb_change_buffering.loaded\t1\nlandmine.innodb_change_buffering.severity\tcritical\nfinding.landmine.innodb_change_buffering\tcritical\n' >>"$BATS_TEST_TMPDIR/$case_name.tsv"
+                verdict=REMOVED
+                ;;
+            complete-absent)
+                printf 'landmine.scan.status\tcomplete\nlandmine.scan.method\tmariadbd_print_defaults\n' >>"$BATS_TEST_TMPDIR/$case_name.tsv"
+                verdict=none
+                ;;
+            failed|unsupported-failed)
+                printf 'landmine.scan.status\tfailed\nlandmine.scan.method\tmariadbd_print_defaults\n' >>"$BATS_TEST_TMPDIR/$case_name.tsv"
+                verdict=UNKNOWN
+                ;;
+            missing)
+                verdict=UNKNOWN
+                ;;
+            duplicate)
+                printf 'landmine.scan.status\tcomplete\nlandmine.scan.status\tcomplete\nlandmine.scan.method\tmariadbd_print_defaults\n' >>"$BATS_TEST_TMPDIR/$case_name.tsv"
+                verdict=UNKNOWN
+                ;;
+            conflicting)
+                printf 'landmine.scan.status\tcomplete\nlandmine.scan.status\tfailed\nlandmine.scan.method\tmariadbd_print_defaults\n' >>"$BATS_TEST_TMPDIR/$case_name.tsv"
+                verdict=UNKNOWN
+                ;;
+            malformed)
+                printf 'landmine.scan.status\tcomplete\nlandmine.scan.method\tmariadbd_print_defaults\nlandmine.innodb_change_buffering.loaded\t2\n' >>"$BATS_TEST_TMPDIR/$case_name.tsv"
+                verdict=UNKNOWN
+                ;;
+            old-config)
+                printf 'config_innodb_change_buffering\tall\n' >>"$BATS_TEST_TMPDIR/$case_name.tsv"
+                verdict=UNKNOWN
+                ;;
+        esac
+
+        dbtune_rules_analyze "$BATS_TEST_TMPDIR/$case_name.tsv" "$BATS_TEST_TMPDIR/samples.tsv" "" "" "" 10 >"$BATS_TEST_TMPDIR/$case_name-analysis.tsv"
+
+        if [[ $verdict == none ]]; then
+            [ "$(awk -F '\t' '$1=="R-VERSION" {count++} END {print count+0}' "$BATS_TEST_TMPDIR/$case_name-analysis.tsv")" -eq 0 ]
+        else
+            [ "$(awk -F '\t' '$1=="R-VERSION" {print $4; exit}' "$BATS_TEST_TMPDIR/$case_name-analysis.tsv")" = "$verdict" ]
+        fi
+        [ "$(awk -F '\t' '$1=="R-VERSION" && ($5!="" || $6!="") {bad=1} END {print bad+0}' "$BATS_TEST_TMPDIR/$case_name-analysis.tsv")" -eq 0 ]
+    done
+}
+
 @test "minimum samples rejects analysis and preserves collected state" {
     cp "$BATS_TEST_DIRNAME/../fixtures/audit-10.6.tsv" "$DBTUNE_STATE_DIR/audit.tsv"
     cp "$BATS_TEST_DIRNAME/../fixtures/samples-7d.tsv" "$DBTUNE_STATE_DIR/samples.tsv"
@@ -638,6 +701,127 @@ EOF
     [[ "$output" == *'last_success=2026-07-23T02:00:00Z'* ]]
 }
 
+@test "R-MYISAM requires exact uint64 evidence before proposing key buffer size" {
+    local name value expected_verdict expected_key expected_value
+
+    make_audit "$BATS_TEST_TMPDIR/base.tsv"
+    make_samples "$BATS_TEST_TMPDIR/samples.tsv" 30 2 10
+    for name in missing unknown unresolved malformed zero positive maximum; do
+        awk -F '\t' '$1 != "mariadb.status.key_read_requests" && $1 != "key_read_requests" {print}' OFS='\t' \
+            "$BATS_TEST_TMPDIR/base.tsv" >"$BATS_TEST_TMPDIR/$name.tsv"
+        case $name in
+            missing) value='' ;;
+            unknown) value=unknown ;;
+            unresolved) value=unresolved ;;
+            malformed) value=12x ;;
+            zero) value=0 ;;
+            positive) value=1 ;;
+            maximum) value=18446744073709551615 ;;
+        esac
+        [[ -z $value ]] || printf 'mariadb.status.key_read_requests\t%s\n' "$value" >>"$BATS_TEST_TMPDIR/$name.tsv"
+        printf 'mariadb.variable.key_buffer_size\t134217728\n' >>"$BATS_TEST_TMPDIR/$name.tsv"
+
+        dbtune_rules_analyze "$BATS_TEST_TMPDIR/$name.tsv" "$BATS_TEST_TMPDIR/samples.tsv" "" "" "" 10 >"$BATS_TEST_TMPDIR/$name-analysis.tsv"
+
+        case $name in
+            missing|unknown|unresolved|malformed)
+                expected_verdict=UNKNOWN
+                expected_key=''
+                expected_value=''
+                ;;
+            zero)
+                expected_verdict=CHANGE
+                expected_key=key_buffer_size
+                expected_value=32M
+                ;;
+            positive|maximum)
+                expected_verdict=KEEP
+                expected_key=''
+                expected_value=''
+                ;;
+        esac
+        run awk -F '\t' '$1=="R-MYISAM" {print $4 "\t" $5 "\t" $6 "\t" $7; exit}' "$BATS_TEST_TMPDIR/$name-analysis.tsv"
+        [ "$status" -eq 0 ]
+        [[ "$output" == "$expected_verdict"$'\t'"$expected_key"$'\t'"$expected_value"$'\t'* ]]
+        if [[ $expected_verdict == UNKNOWN ]]; then
+            [[ "$output" == *'proposal_blocked=missing-or-invalid-metric'* ]]
+        fi
+    done
+}
+
+@test "skip_name_resolve uses exact current value and hostname grant evidence matrix" {
+    local current evidence expected_verdict expected_key expected_value file
+    make_audit "$BATS_TEST_TMPDIR/base.tsv"
+    make_samples "$BATS_TEST_TMPDIR/samples.tsv" 30 2 10
+
+    for current in ON 1 OFF 0 missing unknown unresolved 2 arbitrary; do
+        for evidence in zero positive failed malformed; do
+            file="$BATS_TEST_TMPDIR/skip-$current-$evidence.tsv"
+            awk -F '\t' '$1 != "security.grants_audited" && $1 != "security.hostname_grant_count" && $1 != "mariadb.variable.skip_name_resolve" {print}' \
+                "$BATS_TEST_TMPDIR/base.tsv" >"$file"
+            [[ $current == missing ]] || printf 'mariadb.variable.skip_name_resolve\t%s\n' "$current" >>"$file"
+            case $evidence in
+                zero) printf 'security.grants_audited\t1\nsecurity.hostname_grant_count\t0\n' >>"$file" ;;
+                positive) printf 'security.grants_audited\t1\nsecurity.hostname_grant_count\t2\n' >>"$file" ;;
+                failed) printf 'security.grants_audited\t0\nsecurity.hostname_grant_count\tunknown\n' >>"$file" ;;
+                malformed) printf 'security.grants_audited\t1\nsecurity.hostname_grant_count\tbad\n' >>"$file" ;;
+            esac
+
+            dbtune_rules_analyze "$file" "$BATS_TEST_TMPDIR/samples.tsv" "" "" "" 10 >"$file.analysis"
+
+            expected_verdict=UNKNOWN
+            expected_key=''
+            expected_value=''
+            if [[ $current == ON || $current == 1 || $current == OFF || $current == 0 ]]; then
+                if [[ $evidence == positive ]]; then
+                    expected_verdict=REVIEW
+                elif [[ $evidence == zero ]]; then
+                    if [[ $current == ON || $current == 1 ]]; then
+                        expected_verdict=OK
+                    else
+                        expected_verdict=CHANGE
+                        expected_key=skip_name_resolve
+                        expected_value=1
+                    fi
+                fi
+            fi
+            run awk -F '\t' '$1=="R-PINNED" && $8 ~ /^reason_skip_name_resolve/ {print $4 "\t" $5 "\t" $6; exit}' "$file.analysis"
+            [ "$status" -eq 0 ]
+            [ "$output" = "$expected_verdict"$'\t'"$expected_key"$'\t'"$expected_value" ]
+        done
+    done
+}
+
+@test "R-SEC uses independent remote grant evidence and fails closed" {
+    local name file
+    make_audit "$BATS_TEST_TMPDIR/base.tsv"
+    make_samples "$BATS_TEST_TMPDIR/samples.tsv" 30 2 10
+
+    awk -F '\t' '$1 != "security.remote_grant_count" {print}' "$BATS_TEST_TMPDIR/base.tsv" >"$BATS_TEST_TMPDIR/remote.tsv"
+    printf 'security.remote_grant_count\t1\n' >>"$BATS_TEST_TMPDIR/remote.tsv"
+    dbtune_rules_analyze "$BATS_TEST_TMPDIR/remote.tsv" "$BATS_TEST_TMPDIR/samples.tsv" "" "" "" 10 >"$BATS_TEST_TMPDIR/remote-analysis.tsv"
+
+    run awk -F '\t' '$1=="R-SEC" {print $3 "\t" $4 "\t" $7; exit}' "$BATS_TEST_TMPDIR/remote-analysis.tsv"
+    [ "$status" -eq 0 ]
+    [[ "$output" == high$'\t'EXPOSED$'\t'*'remote_grants=1'* ]]
+
+    for name in missing malformed incomplete; do
+        file="$BATS_TEST_TMPDIR/$name.tsv"
+        awk -F '\t' '$1 != "security.grants_audited" && $1 != "security.remote_grant_count" {print}' \
+            "$BATS_TEST_TMPDIR/base.tsv" >"$file"
+        case $name in
+            missing) printf 'security.grants_audited\t1\n' >>"$file" ;;
+            malformed) printf 'security.grants_audited\t1\nsecurity.remote_grant_count\tbad\n' >>"$file" ;;
+            incomplete) printf 'security.grants_audited\t0\nsecurity.remote_grant_count\t0\n' >>"$file" ;;
+        esac
+
+        dbtune_rules_analyze "$file" "$BATS_TEST_TMPDIR/samples.tsv" "" "" "" 10 >"$file.analysis"
+        run awk -F '\t' '$1=="R-SEC" {print $3 "\t" $4; exit}' "$file.analysis"
+        [ "$status" -eq 0 ]
+        [ "$output" = medium$'\t'UNKNOWN ]
+    done
+}
+
 @test "production audit scoped TSV contract feeds server and app rules" {
     cat >"$BATS_TEST_TMPDIR/audit.tsv" <<'EOF'
 mariadb.version	11.4.12-MariaDB
@@ -658,8 +842,14 @@ app.system_wp_cron	0
 redis.maxmemory_policy	allkeys-lru
 backup.schedule_count	1
 security.remote_grant_count	1
+security.grants_audited	1
+security.hostname_grant_count	1
 security.port_3306	public
+landmine.scan.status	complete
+landmine.scan.method	mariadbd_print_defaults
+landmine.innodb_change_buffering.loaded	1
 landmine.innodb_change_buffering.severity	critical
+finding.landmine.innodb_change_buffering	critical
 EOF
     make_samples "$BATS_TEST_TMPDIR/samples.tsv" 30 2 10
     cat >"$BATS_TEST_TMPDIR/apps.tsv" <<'EOF'

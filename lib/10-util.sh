@@ -1,3 +1,279 @@
+dbtune_runtime_environment_contract() {
+    cat <<'CONTRACT'
+DBTUNE_ARTIFACT_PROFILE	immutable
+DBTUNE_ARTIFACT_VERSION	immutable
+DBTUNE_UI_LANG	operator
+DBTUNE_STATE_DIR	operator
+DBTUNE_CONFIG_TARGET	operator
+DBTUNE_CONFIG_ALLOWED_DIR	operator
+DBTUNE_ROOT_CNF	operator
+DBTUNE_LOG_LEVEL	operator
+DBTUNE_MAX_BACKUP_AGE_SECONDS	operator
+DBTUNE_BACKUP_EVIDENCE_FILE	test-only
+DBTUNE_BACKUP_EVIDENCE_UID	test-only
+DBTUNE_CLK_TCK	test-only
+DBTUNE_COLLECT_CONFIG_FILE	test-only
+DBTUNE_COLLECT_HEALTH_FILE	test-only
+DBTUNE_COLLECT_LOCK_FILE	test-only
+DBTUNE_COLLECT_SERVICE_PATH	test-only
+DBTUNE_COLLECT_TIMER_PATH	test-only
+DBTUNE_COLLECT_TIMER_UNIT	test-only
+DBTUNE_CONFIG_GID	test-only
+DBTUNE_CONFIG_MODE	test-only
+DBTUNE_CONFIG_UID	test-only
+DBTUNE_CRONTAB_FILE	test-only
+DBTUNE_CRON_ROOT	test-only
+DBTUNE_CRON_SCAN_ROOT	test-only
+DBTUNE_DATE	test-only
+DBTUNE_DBSIZE_DATE_FILE	test-only
+DBTUNE_DBSIZE_FILE	test-only
+DBTUNE_DF	test-only
+DBTUNE_EVENT_FLOCK	test-only
+DBTUNE_FAULT_INJECT	test-only
+DBTUNE_FLOCK	test-only
+DBTUNE_FREE	test-only
+DBTUNE_GETCONF	test-only
+DBTUNE_HOME_ROOT	test-only
+DBTUNE_INSTALL	test-only
+DBTUNE_LAST_UPTIME_FILE	test-only
+DBTUNE_MAX_SAMPLES_BYTES	test-only
+DBTUNE_MAX_SAMPLE_INTERVAL_SECONDS	test-only
+DBTUNE_MAX_SLOW_LOG_BYTES	test-only
+DBTUNE_MIN_APPLY_SAMPLES	test-only
+DBTUNE_MIN_AUTO_SAMPLES	test-only
+DBTUNE_MIN_FREE_KB	test-only
+DBTUNE_MONOTONIC	test-only
+DBTUNE_MYSQL_CONFIG_DIR	test-only
+DBTUNE_MYSQL_DATADIR	test-only
+DBTUNE_MYSQL_GROUP	test-only
+DBTUNE_MYSQL_USER	test-only
+DBTUNE_NOW_EPOCH	test-only
+DBTUNE_NOW_HHMM	test-only
+DBTUNE_PGREP	test-only
+DBTUNE_PROC_ROOT	test-only
+DBTUNE_PROGRAM_PATH	test-only
+DBTUNE_PUBLISH_CRASH_MATCH	test-only
+DBTUNE_PUBLISH_CRASH_POINT	test-only
+DBTUNE_PUBLISH_FAIL_MATCH	test-only
+DBTUNE_PUBLISH_FAULT_HOOK	test-only
+DBTUNE_PYTHON	test-only
+DBTUNE_RESTART_SKEW_SECONDS	test-only
+DBTUNE_RUNCLOUD_CNF	test-only
+DBTUNE_SAMPLES_FILE	test-only
+DBTUNE_SAMPLE_SECONDS	test-only
+DBTUNE_SERVER_SUPPORT	test-only
+DBTUNE_SLEEP	test-only
+DBTUNE_SLOW_LOG	test-only
+DBTUNE_SQL_CONNECT_TIMEOUT	test-only
+DBTUNE_SQL_STATEMENT_TIMEOUT	test-only
+DBTUNE_STALE_SAMPLE_SECONDS	test-only
+DBTUNE_STAT	test-only
+DBTUNE_STATE_UID	test-only
+DBTUNE_SYNC	test-only
+DBTUNE_SYSTEMCTL	test-only
+DBTUNE_SYSTEMD_DIR	test-only
+DBTUNE_TODAY	test-only
+DBTUNE_UNATTENDED_CONFIG	test-only
+DBTUNE_UNATTENDED_DIR	test-only
+DBTUNE_WC	test-only
+DBTUNE_ACTION_COMMAND	internal
+DBTUNE_ACTION_CONNECT_TIMEOUT_SECONDS	internal
+DBTUNE_ACTION_DESTRUCTIVE	internal
+DBTUNE_ACTION_KIND	internal
+DBTUNE_ACTION_LINES	internal
+DBTUNE_ACTION_RULE_ID	internal
+DBTUNE_ACTION_SAFETY	internal
+DBTUNE_ACTION_SCOPE	internal
+DBTUNE_ACTION_STATEMENT_TIMEOUT_SECONDS	internal
+DBTUNE_ACTION_TARGET	internal
+DBTUNE_ACTION_TIMEOUT_CAPABILITY	internal
+DBTUNE_ACTION_WARNING_ID	internal
+DBTUNE_ANALYSIS_EVIDENCE	internal
+DBTUNE_ANALYSIS_FILE	internal
+DBTUNE_ANALYSIS_FINGERPRINT	internal
+DBTUNE_ANALYSIS_LINES	internal
+DBTUNE_ANALYSIS_PROPOSED_KEY	internal
+DBTUNE_ANALYSIS_PROPOSED_VALUE	internal
+DBTUNE_ANALYSIS_REASON_ID	internal
+DBTUNE_ANALYSIS_RULE_ID	internal
+DBTUNE_ANALYSIS_SCOPE	internal
+DBTUNE_ANALYSIS_SEVERITY	internal
+DBTUNE_ANALYSIS_VERDICT	internal
+DBTUNE_APPLY_BACKUP_AGE_SECONDS	internal
+DBTUNE_APPLY_BACKUP_LAST_SUCCESS	internal
+DBTUNE_APPLY_BACKUP_MAX_AGE_SECONDS	internal
+DBTUNE_APPLY_BACKUP_MODE	internal
+DBTUNE_APPLY_BACKUP_SOURCE	internal
+DBTUNE_APPLY_RECORDS_HASH	internal
+DBTUNE_APPLY_RECORD_COUNT	internal
+DBTUNE_APPLY_SNAPSHOT_HASH	internal
+DBTUNE_APPS_FILE	internal
+DBTUNE_AUDIT_EVIDENCE_ERROR	internal
+DBTUNE_AUDIT_FILE	internal
+DBTUNE_AUDIT_HASH	internal
+DBTUNE_AUDIT_QUERY_TIMEOUT_SECONDS	internal
+DBTUNE_AUTOLOAD_LINES	internal
+DBTUNE_AUTOLOAD_NAME	internal
+DBTUNE_AUTOLOAD_SCOPE	internal
+DBTUNE_AUTOLOAD_SIZE	internal
+DBTUNE_BACKUP_EVIDENCE_AGE_SECONDS	internal
+DBTUNE_BACKUP_EVIDENCE_ERROR	internal
+DBTUNE_BACKUP_EVIDENCE_MAX_AGE_SECONDS	internal
+DBTUNE_DATABASES_FILE	internal
+DBTUNE_DBSIZE_HASH	internal
+DBTUNE_DBSIZE_INPUT	internal
+DBTUNE_DBSIZE_SELECTED_HASH	internal
+DBTUNE_DBSIZE_SELECTED_ROWS	internal
+DBTUNE_DEFAULT_DAYS	internal
+DBTUNE_I18N_LANGUAGE	internal
+DBTUNE_I18N_MESSAGE	internal
+DBTUNE_JSON_FIELDS	internal
+DBTUNE_LIFECYCLE_DIRECTORY_IDENTITY	internal
+DBTUNE_LIFECYCLE_INTENT_HISTORY	internal
+DBTUNE_LIFECYCLE_INTENT_PREVIOUS_CURRENT	internal
+DBTUNE_LIFECYCLE_INTENT_PREVIOUS_STATE	internal
+DBTUNE_LIFECYCLE_INTENT_PROPOSAL_HASH	internal
+DBTUNE_LIFECYCLE_PARENT_IDENTITIES	internal
+DBTUNE_LIFECYCLE_RESTORED_BACKUP	internal
+DBTUNE_LIFECYCLE_RESTORED_CYCLE_ID	internal
+DBTUNE_LIFECYCLE_RESTORED_HISTORY	internal
+DBTUNE_LIFECYCLE_RESTORED_SOURCE	internal
+DBTUNE_LIFECYCLE_TARGET_HASH	internal
+DBTUNE_LIFECYCLE_TARGET_IDENTITY	internal
+DBTUNE_LIFECYCLE_TARGET_TOPOLOGY	internal
+DBTUNE_PROGRAM	internal
+DBTUNE_PROPOSAL_CURRENT	internal
+DBTUNE_PROPOSAL_EVIDENCE	internal
+DBTUNE_PROPOSAL_KEY	internal
+DBTUNE_PROPOSAL_LINES	internal
+DBTUNE_PROPOSAL_REASON_ID	internal
+DBTUNE_PROPOSAL_RULE_ID	internal
+DBTUNE_PROPOSAL_SEVERITY	internal
+DBTUNE_PROPOSAL_VALUE	internal
+DBTUNE_ROLLBACK_COMPLETION_RESTART_REQUIRED	internal
+DBTUNE_ROLLBACK_COMPLETION_START_STATUS	internal
+DBTUNE_ROLLBACK_INTENT_CREATED_AT	internal
+DBTUNE_ROLLBACK_INTENT_CYCLE_ID	internal
+DBTUNE_ROLLBACK_INTENT_HISTORY	internal
+DBTUNE_ROLLBACK_INTENT_PREVIOUS_CURRENT	internal
+DBTUNE_ROLLBACK_INTENT_PREVIOUS_STATE	internal
+DBTUNE_ROLLBACK_INTENT_PROPOSAL_HASH	internal
+DBTUNE_ROLLBACK_INTENT_RESTORED_BACKUP	internal
+DBTUNE_ROLLBACK_INTENT_RESTORED_CYCLE_ID	internal
+DBTUNE_ROLLBACK_INTENT_RESTORED_HASH	internal
+DBTUNE_ROLLBACK_INTENT_RESTORED_HISTORY	internal
+DBTUNE_ROLLBACK_INTENT_RESTORED_SOURCE	internal
+DBTUNE_RUN_ID	internal
+DBTUNE_SAMPLES_HASH	internal
+DBTUNE_SQL_AUTH_METHOD	internal
+DBTUNE_SQL_DEFAULTS_FILE	internal
+DBTUNE_STATE_LOCK_IDENTITY	internal
+DBTUNE_TSV_FIELDS	internal
+DBTUNE_WORST_LINES	internal
+CONTRACT
+}
+
+dbtune_runtime_prepare_environment() {
+    builtin local name declaration exported_names exported_function_declarations line function_name
+    builtin local function_details function_source extdebug_enabled=0
+    builtin local safe_path=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+    [[ $DBTUNE_ARTIFACT_PROFILE == production ]] || return 0
+    exported_function_declarations=$(builtin declare -Fx) || return 65
+    builtin shopt -q extdebug && extdebug_enabled=1
+    builtin shopt -s extdebug || return 65
+    while IFS= read -r line; do
+        [[ -n $line ]] || continue
+        function_name=${line##* }
+        [[ $function_name =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || return 65
+        function_details=$(builtin declare -F "$function_name") || return 65
+        function_source=${function_details##* }
+        if [[ $function_source == "${BASH_SOURCE[0]}" ]]; then
+            # shellcheck disable=SC2163 # The function name comes from declare output.
+            builtin export -n -f "$function_name" || return 65
+            builtin declare -F "$function_name" >/dev/null || return 65
+        else
+            builtin unset -f "$function_name" || return 65
+            ! builtin declare -F "$function_name" >/dev/null || return 65
+        fi
+    done <<<"$exported_function_declarations"
+    ((extdebug_enabled == 1)) || builtin shopt -u extdebug || return 65
+
+    declaration=$(builtin declare -p DBTUNE_ARTIFACT_PROFILE 2>/dev/null) || return 65
+    [[ $declaration =~ ^declare\ -[^[:space:]]*r && $DBTUNE_ARTIFACT_PROFILE == production ]] || return 65
+    declaration=$(builtin declare -p DBTUNE_ARTIFACT_VERSION 2>/dev/null) || return 65
+    [[ $declaration =~ ^declare\ -[^[:space:]]*r && $DBTUNE_ARTIFACT_VERSION == 0.4.1 ]] || return 65
+    for name in PATH LC_ALL LANG; do
+        declaration=$(builtin declare -p "$name" 2>/dev/null || true)
+        [[ ! $declaration =~ ^declare\ -[^[:space:]]*r ]] || return 65
+    done
+
+    PATH=$safe_path || return 65
+    LC_ALL=C || return 65
+    LANG=C || return 65
+    builtin export PATH LC_ALL LANG
+    [[ $PATH == "$safe_path" && $LC_ALL == C && $LANG == C ]] || return 65
+
+    exported_names=$(builtin compgen -e) || return 65
+    while IFS= read -r name; do
+        [[ $name == DBTUNE_* ]] || continue
+        case $name in
+            DBTUNE_ARTIFACT_PROFILE|DBTUNE_ARTIFACT_VERSION|DBTUNE_UI_LANG|DBTUNE_STATE_DIR|\
+            DBTUNE_CONFIG_TARGET|DBTUNE_CONFIG_ALLOWED_DIR|DBTUNE_ROOT_CNF|DBTUNE_LOG_LEVEL|\
+            DBTUNE_MAX_BACKUP_AGE_SECONDS) continue ;;
+        esac
+        builtin unset "$name" 2>/dev/null || return 65
+        [[ -z ${!name+x} ]] || return 65
+    done <<<"$exported_names"
+
+    DBTUNE_PROGRAM=dbtune || return 65
+    DBTUNE_DEFAULT_DAYS=7 || return 65
+    DBTUNE_SQL_AUTH_METHOD= || return 65
+    DBTUNE_SQL_DEFAULTS_FILE= || return 65
+    builtin export -n DBTUNE_PROGRAM DBTUNE_DEFAULT_DAYS DBTUNE_SQL_AUTH_METHOD DBTUNE_SQL_DEFAULTS_FILE 2>/dev/null || return 65
+    [[ $DBTUNE_PROGRAM == dbtune && $DBTUNE_DEFAULT_DAYS == 7 && -z $DBTUNE_SQL_AUTH_METHOD &&
+        -z $DBTUNE_SQL_DEFAULTS_FILE ]] || return 65
+}
+
+dbtune_runtime_command_path() {
+    local name=${1:-} path directory current uid gid mode stat_path
+
+    [[ $name =~ ^[A-Za-z0-9._+-]+$ ]] || return 64
+    path=$(builtin type -P -- "$name") || return 69
+    [[ $path == /* && -f $path && ! -L $path && -x $path ]] || return 69
+    directory=${path%/*}
+    case $directory in
+        /usr/bin|/bin|/usr/sbin|/sbin|/usr/local/bin|/usr/local/sbin) ;;
+        *) return 69 ;;
+    esac
+    if ((EUID == 0)); then
+        stat_path=/usr/bin/stat
+        [[ -f $stat_path && ! -L $stat_path && -x $stat_path ]] || return 69
+        if "$stat_path" -c '%u %g %a' "$path" >/dev/null 2>&1; then
+            read -r uid gid mode < <("$stat_path" -c '%u %g %a' "$path") || return 69
+        else
+            read -r uid gid mode < <("$stat_path" -f '%u %g %Lp' "$path") || return 69
+        fi
+        [[ $uid == 0 && $mode =~ ^[0-7]{3,4}$ ]] || return 69
+        (((8#$mode & 0022) == 0)) || return 69
+        current=$directory
+        while :; do
+            [[ -d $current && ! -L $current ]] || return 69
+            if "$stat_path" -c '%u %g %a' "$current" >/dev/null 2>&1; then
+                read -r uid gid mode < <("$stat_path" -c '%u %g %a' "$current") || return 69
+            else
+                read -r uid gid mode < <("$stat_path" -f '%u %g %Lp' "$current") || return 69
+            fi
+            [[ $uid == 0 && $mode =~ ^[0-7]{3,4}$ ]] || return 69
+            (((8#$mode & 0022) == 0)) || return 69
+            [[ $current == / ]] && break
+            current=${current%/*}
+            [[ -n $current ]] || current=/
+        done
+    fi
+    builtin printf '%s\n' "$path"
+}
+
 dbtune_state_dir() {
     printf '%s\n' "$DBTUNE_STATE_DIR"
 }
@@ -242,6 +518,69 @@ dbtune_is_sensitive_key() {
         *) return 1 ;;
     esac
 }
+
+dbtune_proposal_key_is_safe() {
+    local key=${1:-}
+    [[ $key =~ ^[A-Za-z][A-Za-z0-9_-]*$ ]] && ! dbtune_is_sensitive_key "$key"
+}
+
+dbtune_proposal_value_is_safe() {
+    [[ ${1:-} =~ ^[[:alnum:]_./,:+-]+$ ]]
+}
+
+dbtune_cnf_entries_strict() (
+    local file=${1:-}
+    local records key value extra status=0
+
+    umask 077
+    [[ -r $file ]] || return 65
+    dbtune_validate_single_link_file "$file" >/dev/null 2>&1 || return 65
+    records=$(mktemp "${TMPDIR:-/tmp}/dbtune-cnf-records.XXXXXX") || return 1
+    trap 'rm -f "$records"' EXIT HUP INT TERM
+    LC_ALL=C awk -v output="$records" '
+        function trim(value) {
+            sub(/^[[:space:]]+/, "", value)
+            sub(/[[:space:]]+$/, "", value)
+            return value
+        }
+        function reject() { bad=1 }
+        {
+            line=$0
+            if (line ~ /[[:cntrl:]]/) { reject(); next }
+            stripped=trim(line)
+            if (stripped == "" || stripped ~ /^[#;]/) next
+            if (stripped ~ /^\[/) {
+                if (stripped != "[mysqld]" || section_seen) { reject(); next }
+                section_seen=1
+                active=1
+                next
+            }
+            equals=gsub(/=/, "&", stripped)
+            if (!active || stripped ~ /^!/ || equals != 1) { reject(); next }
+            separator=index(stripped, "=")
+            raw_key=trim(substr(stripped, 1, separator - 1))
+            value=trim(substr(stripped, separator + 1))
+            if (raw_key !~ /^[A-Za-z][A-Za-z0-9_-]*$/ || value == "") { reject(); next }
+            canonical=tolower(raw_key)
+            gsub(/-/, "_", canonical)
+            if (canonical in seen) { reject(); next }
+            seen[canonical]=1
+            keys[++count]=canonical
+            values[count]=value
+        }
+        END {
+            if (bad || !section_seen || count < 1) exit 65
+            for (position=1; position<=count; position++) print keys[position] "\t" values[position] > output
+            close(output)
+        }
+    ' "$file" || status=$?
+    ((status == 0)) || return 65
+    while IFS=$'\t' read -r key value extra || [[ -n $key || -n $value || -n $extra ]]; do
+        [[ -n $key && -n $value && -z $extra ]] || return 65
+        dbtune_proposal_key_is_safe "$key" && dbtune_proposal_value_is_safe "$value" || return 65
+    done <"$records"
+    command cat "$records"
+)
 
 dbtune_redact() {
     local value lower key quote char prefix suffix
@@ -615,6 +954,115 @@ dbtune_shell_quote() {
     printf "'%s'" "${value//\'/\'\\\'\'}"
 }
 
+dbtune_uint64_valid() {
+    local value=${1:-}
+    local LC_ALL=C
+
+    [[ $value =~ ^(0|[1-9][0-9]*)$ ]] || return 1
+    ((${#value} < 20)) && return 0
+    ((${#value} == 20)) || return 1
+    # String ordering is intentional after equal-length canonical validation.
+    # shellcheck disable=SC2071
+    [[ $value < 18446744073709551615 || $value == 18446744073709551615 ]]
+}
+
+dbtune_uint64_compare() {
+    local left=${1:-} right=${2:-}
+    local LC_ALL=C
+
+    dbtune_uint64_valid "$left" && dbtune_uint64_valid "$right" || return 65
+    if ((${#left} < ${#right})); then
+        printf '%s\n' -1
+    elif ((${#left} > ${#right})); then
+        printf '%s\n' 1
+    elif [[ $left == "$right" ]]; then
+        printf '%s\n' 0
+    elif [[ $left < $right ]]; then
+        printf '%s\n' -1
+    else
+        printf '%s\n' 1
+    fi
+}
+
+dbtune_uint64_subtract() {
+    local high=${1:-} low=${2:-}
+    local comparison high_index low_index high_digit low_digit digit borrow=0 result=''
+
+    comparison=$(dbtune_uint64_compare "$high" "$low") || return
+    ((comparison >= 0)) || return 65
+    high_index=$((${#high} - 1))
+    low_index=$((${#low} - 1))
+    while ((high_index >= 0)); do
+        high_digit=${high:high_index:1}
+        if ((low_index >= 0)); then
+            low_digit=${low:low_index:1}
+        else
+            low_digit=0
+        fi
+        digit=$((high_digit - borrow - low_digit))
+        if ((digit < 0)); then
+            digit=$((digit + 10))
+            borrow=1
+        else
+            borrow=0
+        fi
+        result="$digit$result"
+        high_index=$((high_index - 1))
+        low_index=$((low_index - 1))
+    done
+    while ((${#result} > 1)) && [[ ${result:0:1} == 0 ]]; do
+        result=${result:1}
+    done
+    printf '%s\n' "$result"
+}
+
+dbtune_uint64_add() {
+    local left=${1:-} right=${2:-}
+    local left_index right_index left_digit right_digit digit carry=0 result=''
+
+    dbtune_uint64_valid "$left" && dbtune_uint64_valid "$right" || return 65
+    left_index=$((${#left} - 1))
+    right_index=$((${#right} - 1))
+    while ((left_index >= 0 || right_index >= 0 || carry)); do
+        if ((left_index >= 0)); then left_digit=${left:left_index:1}; else left_digit=0; fi
+        if ((right_index >= 0)); then right_digit=${right:right_index:1}; else right_digit=0; fi
+        digit=$((left_digit + right_digit + carry))
+        carry=$((digit / 10))
+        result="$((digit % 10))$result"
+        left_index=$((left_index - 1))
+        right_index=$((right_index - 1))
+    done
+    dbtune_uint64_valid "$result" || return 65
+    printf '%s\n' "$result"
+}
+
+dbtune_status_snapshot_exact() {
+    local raw=${1-} line key value normalized expected_key
+    local -a expected_keys=("${@:2}")
+    local -A allowed=() seen=() values=()
+
+    for expected_key in "${expected_keys[@]}"; do
+        allowed[$expected_key]=1
+    done
+    while IFS= read -r line || [[ -n $line ]]; do
+        [[ $line == *$'\t'* ]] || return 65
+        key=${line%%$'\t'*}
+        value=${line#*$'\t'}
+        [[ $value != *$'\t'* ]] || return 65
+        normalized=${key,,}
+        [[ -n ${allowed[$normalized]+x} && -z ${seen[$normalized]+x} ]] || return 65
+        dbtune_uint64_valid "$value" || return 65
+        seen[$normalized]=1
+        values[$normalized]=$value
+    done <<<"$raw"
+    for expected_key in "${expected_keys[@]}"; do
+        [[ -n ${seen[$expected_key]+x} ]] || return 65
+    done
+    for expected_key in "${expected_keys[@]}"; do
+        printf '%s\t%s\n' "$expected_key" "${values[$expected_key]}"
+    done
+}
+
 dbtune_samples_inspect() {
     local file=${1:-}
     local mode=${2:-diagnostics}
@@ -623,7 +1071,17 @@ dbtune_samples_inspect() {
     [[ $mode == diagnostics || $mode == count || $mode == rows ]] || return 64
     awk -F '\t' -v mode="$mode" '
         function is_number(value) { return value ~ /^[0-9]+([.][0-9]+)?$/ }
-        function is_uint(value) { return value ~ /^[0-9]+$/ }
+        function is_uint(value, max, i, digit, limit) {
+            if (value !~ /^(0|[1-9][0-9]*)$/ || length(value) > 20) return 0
+            if (length(value) < 20) return 1
+            max="18446744073709551615"
+            for (i=1; i<=20; i++) {
+                digit=substr(value, i, 1)+0; limit=substr(max, i, 1)+0
+                if (digit < limit) return 1
+                if (digit > limit) return 0
+            }
+            return 1
+        }
         function is_timestamp(value, year, month, day, hour, minute, second, leap, month_days) {
             if (value !~ /^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$/) return 0
             year=substr(value, 1, 4)+0
@@ -645,22 +1103,27 @@ dbtune_samples_inspect() {
             if ($3 > 100 || $7 > 100 || $10 > 100 || $17 > 1) return "invalid_value"
             if (expected_fields == 17) return ""
             status=$20
-            if (status != "ok" && status != "degraded_interval") return "invalid_value"
+            if (status != "ok" && status != "degraded_interval" &&
+                status != "degraded_counter_reset" && status != "degraded_counter_inconsistent" &&
+                status != "degraded_restart_identity") return "invalid_value"
             legacy_extended=($18 == "" && $19 == "")
             if (($18 == "") != ($19 == "")) return "non_numeric"
             if (legacy_extended) return status == "ok" ? "" : "non_numeric"
             if (!is_uint($18) || !is_number($19)) return "non_numeric"
             if ($19 <= 0 && status == "ok") return "non_monotonic"
+            if (new_schema && $18 == "0" && $10 + 0 != 0) return "invalid_value"
             return ""
         }
         BEGIN {
             OFS="\t"
-            canonical="timestamp\tuptime\tbp_hit_pct\tbp_misses_s\tdata_read_s\trnd_next_s\ttmp_disk_pct\tthreads_running\tthreads_connected\tqcache_hit_pct\tlog_waits_delta\twait_free_delta\tcpu_pct\tmem_available_kb\tswap_used_kb\tload1\trestart_flag\tqcache_queries_delta\tinterval_seconds\tsample_status"
+            canonical="timestamp\tuptime\tbp_hit_pct\tbp_misses_s\tdata_read_s\trnd_next_s\ttmp_disk_pct\tthreads_running\tthreads_connected\tqcache_hit_pct\tlog_waits_delta\twait_free_delta\tcpu_pct\tmem_available_kb\tswap_used_kb\tload1\trestart_flag\tcom_select_delta\tinterval_seconds\tsample_status"
+            old20="timestamp\tuptime\tbp_hit_pct\tbp_misses_s\tdata_read_s\trnd_next_s\ttmp_disk_pct\tthreads_running\tthreads_connected\tqcache_hit_pct\tlog_waits_delta\twait_free_delta\tcpu_pct\tmem_available_kb\tswap_used_kb\tload1\trestart_flag\tqcache_queries_delta\tinterval_seconds\tsample_status"
             legacy="timestamp\tuptime\tbp_hit_pct\tbp_misses_s\tdata_read_s\trnd_next_s\ttmp_disk_pct\tthreads_running\tthreads_connected\tqcache_hit_pct\tlog_waits_delta\twait_free_delta\tcpu_pct\tmem_available_kb\tswap_used_kb\tload1\trestart_flag"
         }
         NR == 1 {
             sub(/\r$/, "")
-            if ($0 == canonical) expected_fields=20
+            if ($0 == canonical) { expected_fields=20; new_schema=1 }
+            else if ($0 == old20) expected_fields=20
             else if ($0 == legacy) expected_fields=17
             else { bad_header=1; exit 65 }
             if (mode == "rows") print
@@ -736,7 +1199,7 @@ dbtune_tsv_percentile() {
                 name=norm($i)
                 if (name == "sample_status") status_column=i
                 if (name == "restart_flag") restart_column=i
-                if (name == "qcache_queries_delta") qcache_queries_column=i
+                if (name == "com_select_delta" || name == "qcache_queries_delta") qcache_queries_column=i
                 for (j=1; j<=wanted_count; j++) if (name == wanted[j]) { column=i; found=1 }
             }
             if (header) { if (!found) column=0; next }
@@ -929,6 +1392,32 @@ dbtune_manifest_value() {
     [[ -r $manifest && -n $key ]] || return 1
     awk -F '\t' -v wanted="$key" '$1 == wanted {sub(/^[^\t]*\t/, ""); print; found=1; exit} END {if (!found) exit 1}' "$manifest"
 }
+
+dbtune_manifest_validate_exact() (
+    local manifest=${1:-}
+    local schema=${2:-}
+    local schema_file
+
+    [[ -r $manifest && -n $schema ]] || return 65
+    dbtune_validate_single_link_file "$manifest" >/dev/null 2>&1 || return 65
+    umask 077
+    schema_file=$(mktemp "${TMPDIR:-/tmp}/dbtune-manifest-schema.XXXXXX") || return 1
+    trap 'rm -f "$schema_file"' EXIT HUP INT TERM
+    printf '%s\n' "$schema" >"$schema_file" || return 1
+    LC_ALL=C awk -F '\t' '
+        FILENAME == ARGV[1] {
+            if (NF != 1 || $1 == "" || $1 ~ /[[:cntrl:]]/ || $1 in required) schema_bad=1
+            required[$1]=1
+            next
+        }
+        NF != 2 || $1 ~ /[[:cntrl:]]/ || $2 ~ /[[:cntrl:]]/ || !($1 in required) || ($1 in seen) { bad=1; next }
+        { seen[$1]=1 }
+        END {
+            if (schema_bad || bad) exit 65
+            for (name in required) if (!(name in seen)) exit 65
+        }
+    ' "$schema_file" "$manifest" || return 65
+)
 
 dbtune_audit_manifest_file() {
     dbtune_path audit-manifest.tsv
@@ -1328,8 +1817,8 @@ dbtune_open_state_lock() {
         rm -f "$temporary"
         return 1
     fi
-    if [[ -e /proc/$$/fd/$opened_fd ]]; then
-        fd_inode=$(dbtune_file_inode "/proc/$$/fd/$opened_fd") || fd_inode=
+    if [[ -e /proc/$BASHPID/fd/$opened_fd ]]; then
+        fd_inode=$(dbtune_file_inode "/proc/$BASHPID/fd/$opened_fd") || fd_inode=
     else
         fd_inode=$(dbtune_file_inode "/dev/fd/$opened_fd") || fd_inode=
     fi
@@ -1350,6 +1839,12 @@ dbtune_with_lifecycle_lock() {
     shift 3 || true
 
     dbtune_init_state_dir || return
+    if [[ $DBTUNE_ARTIFACT_PROFILE == production ]]; then
+        flock_command=$(dbtune_runtime_command_path flock) || {
+            [[ $mode == skip ]] && return 75
+            return 69
+        }
+    fi
     if [[ $operation == _tick ]] && declare -F dbtune_collect_restore_language >/dev/null 2>&1; then
         dbtune_collect_restore_language || return
     fi
@@ -1392,6 +1887,10 @@ dbtune_event() {
     local line lock_file lock_identity lock_fd flock_command=${DBTUNE_EVENT_FLOCK:-flock}
     local locked=0 status=0
     local -a fields
+
+    if [[ $DBTUNE_ARTIFACT_PROFILE == production ]]; then
+        flock_command=$(dbtune_runtime_command_path flock) || return 69
+    fi
 
     [[ -n $event_type ]] || {
         dbtune_log error "$(dbtune_msg core_event_type_required)"
