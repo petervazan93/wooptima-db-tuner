@@ -60,6 +60,11 @@ subshell:
 pid=$!
 ```
 
+The apply concurrency test allows up to 10 seconds for its verified-snapshot
+path to reach the pause marker on a loaded GitHub-hosted runner. Polling still
+breaks immediately on success, and the mandatory marker assertion remains.
+The faster collector concurrency test retains its existing polling bound.
+
 The test continues to wait for the subshell PID and assert its existing
 behavior. Closing inherited Bats descriptors changes only formatter-pipe
 ownership; it does not detach the process, hide its exit status, or weaken

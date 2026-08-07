@@ -13,7 +13,7 @@
 - Modify test code plus the current-process procfs lookup in `dbtune_open_state_lock`; do not change other production behavior, `Makefile`, or workflow structure.
 - Preserve descriptors 0, 1, and 2, exclude Bash-reserved descriptor 255, and avoid probing closed descriptors individually under Bats' DEBUG trap.
 - Apply the helper to all four explicit background launches in the unit suite.
-- Preserve existing `wait`, `kill -0`, lock, output-file, and state assertions.
+- Preserve existing `wait`, `kill -0`, marker, lock, output-file, and state assertions. Only the apply marker polling bound may increase to 10 seconds for loaded CI runners; it must still break immediately on success.
 - Keep `make test` as one complete `bats test/unit` invocation.
 - The two hanging PR #49 quality attempts are RED evidence; GREEN requires a fresh quality job to exit normally without cancellation or retry.
 - Do not weaken, skip, split, or time-limit the complete unit gate.
@@ -154,8 +154,10 @@ apply_pid=$!
 propose_pid=$!
 ```
 
-Do not alter the existing polling, `kill -0`, release-file, `wait`, state, or
-snapshot assertions around these launches.
+Do not alter collector polling or the existing `kill -0`, release-file, `wait`,
+state, and snapshot assertions around these launches. Extend only the apply
+pause-marker loop from approximately 2 seconds to 10 seconds, retaining its
+immediate success break and mandatory marker assertion.
 
 In `dbtune_open_state_lock`, make Linux FD identity validation inspect the
 current Bash process:

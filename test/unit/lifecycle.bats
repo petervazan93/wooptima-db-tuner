@@ -2030,7 +2030,7 @@ STUB
         dbtune_dispatch apply
     ) >"$BATS_TEST_TMPDIR/apply.out" 2>&1 &
     apply_pid=$!
-    for _ in {1..200}; do
+    for _ in {1..1000}; do
         [[ -e $BATS_TEST_TMPDIR/apply-paused ]] && break
         sleep 0.01
     done
