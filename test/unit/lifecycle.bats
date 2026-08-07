@@ -1088,6 +1088,23 @@ STUB
     assert_apply_preflight_unchanged
 }
 
+@test "forced apply binds current audit identity without a valid proposal manifest" {
+    local history expected_run_id expected_audit_hash
+
+    expected_run_id=$(dbtune_manifest_value "$DBTUNE_STATE_DIR/audit-manifest.tsv" run_id)
+    expected_audit_hash=$(dbtune_manifest_value "$DBTUNE_STATE_DIR/audit-manifest.tsv" audit_hash)
+    rm -f "$DBTUNE_STATE_DIR/proposal-manifest.tsv"
+    dbtune_lifecycle_confirm_force() { :; }
+
+    run cmd_apply --force
+
+    [ "$status" -eq 0 ]
+    history=$(cat "$DBTUNE_STATE_DIR/apply/current")
+    [ "$(dbtune_lifecycle_manifest_value "$history" run_id)" = "$expected_run_id" ]
+    [ "$(dbtune_lifecycle_manifest_value "$history" audit_hash)" = "$expected_audit_hash" ]
+    [ "$(dbtune_lifecycle_manifest_value "$history" force)" = 1 ]
+}
+
 @test "rollback ignores landmine scanner failure corrupt audit and unsafe current defaults" {
     local history scans_before
 

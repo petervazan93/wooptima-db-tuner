@@ -738,12 +738,11 @@ dbtune_lifecycle_prepare_history() {
     local live_scan_method=${17:-}
     local loaded_fingerprint=${18:-}
     local force=${19:-0}
-    local had_original=0 original_hash=absent proposal_hash expected_hash run_id=unmeasured audit_hash=unmeasured
+    local had_original=0 original_hash=absent proposal_hash run_id audit_hash
     local backup_hash=interactive
     local cycle_id original_source=absent original_cycle_id=- original_cycle_history=- original_backup=absent
     local source_target source_hash source_snapshot_hash
-    local proposal_manifest="$DBTUNE_STATE_DIR/proposal-manifest.tsv"
-    local proposal_schema
+    local audit audit_manifest apps databases audit_file_hash apps_hash databases_hash audit_run_count audit_run_id
 
     cycle_id=${history##*/}
     [[ ${history%/*} == "$DBTUNE_STATE_DIR/apply" && $cycle_id =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || return 65
@@ -813,14 +812,25 @@ dbtune_lifecycle_prepare_history() {
         dbtune_log error "$(dbtune_msg lifecycle_proposal_changed)"
         return 65
     }
-    proposal_schema=$(dbtune_lifecycle_proposal_manifest_schema) || return
-    if dbtune_manifest_validate_exact "$proposal_manifest" "$proposal_schema"; then
-        expected_hash=$(dbtune_manifest_value "$proposal_manifest" proposal_hash 2>/dev/null || true)
+    audit=$(dbtune_path audit.tsv) || return
+    apps=$(dbtune_path apps.tsv) || return
+    databases=$(dbtune_path databases.tsv) || return
+    audit_manifest=$(dbtune_audit_manifest_file) || return
+    IFS=$'\t' read -r audit_run_count audit_run_id < <(command awk -F '\t' '
+        $1=="audit.run_id" {count++; if (count==1) value=$2}
+        END {print count+0 "\t" value}
+    ' "$audit") || return 65
+    if [[ $audit_run_count == 1 && $audit_run_id =~ ^[A-Za-z0-9._-]+$ ]]; then
+        run_id=$audit_run_id
+    else
+        run_id=$(dbtune_manifest_value "$audit_manifest" run_id 2>/dev/null || true)
     fi
-    if [[ $expected_hash == "$proposal_hash" ]]; then
-        run_id=$(dbtune_manifest_value "$proposal_manifest" run_id 2>/dev/null || printf unknown)
-        audit_hash=$(dbtune_manifest_value "$proposal_manifest" audit_hash 2>/dev/null || printf unknown)
-    fi
+    [[ $run_id =~ ^[A-Za-z0-9._-]+$ ]] || return 65
+    audit_file_hash=$(dbtune_sha256_file "$audit") || return
+    apps_hash=$(dbtune_sha256_file "$apps") || return
+    databases_hash=$(dbtune_sha256_file "$databases") || return
+    audit_hash=$(dbtune_provenance_audit_hash "$audit_file_hash" "$apps_hash" "$databases_hash") || return
+    [[ $audit_hash =~ ^[0-9a-f]{64}$ ]] || return 65
     {
         printf 'schema\t1\n'
         printf 'cycle_id\t%s\n' "$cycle_id"
@@ -1352,9 +1362,9 @@ dbtune_lifecycle_validate_history_manifest() {
     [[ $(dbtune_sha256_file "$history/loaded-defaults.tsv") == "$scan_hash" &&
         $(dbtune_loaded_defaults_fingerprint "$history/loaded-defaults.tsv") == "$fingerprint" ]] || return 65
     value=$(dbtune_lifecycle_manifest_value "$history" run_id) || return 65
-    [[ -n $value ]] || return 65
+    [[ $value =~ ^[A-Za-z0-9._-]+$ ]] || return 65
     value=$(dbtune_lifecycle_manifest_value "$history" audit_hash) || return 65
-    [[ -n $value ]] || return 65
+    [[ $value =~ ^[0-9a-f]{64}$ ]] || return 65
 }
 
 dbtune_lifecycle_cycle_id() {
