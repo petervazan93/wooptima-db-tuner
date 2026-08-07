@@ -9,7 +9,7 @@ GitHub Releases is the default transport. The internal `DBTUNE_DOWNLOAD_BASE` ma
 The primary procedure does not pipe code into a root shell. Pin the release, verify the installer attestation, inspect its contents, and only then run it:
 
 ```bash
-release=v0.4.1
+release=v0.4.2
 curl --proto '=https' --tlsv1.2 -fsSLo install.sh \
   "https://github.com/petervazan93/wooptima-db-tuner/releases/download/$release/install.sh"
 curl --proto '=https' --tlsv1.2 -fsSLo dbtune-attestation.jsonl \
@@ -24,17 +24,17 @@ less install.sh
 sh install.sh --version "$release"
 ```
 
-The release can be pinned with `--version vX.Y.Z` or `DBTUNE_RELEASE=vX.Y.Z`. Neither `DBTUNE_VERSION` nor another runtime variable overrides the artifact's internal version or profile. During its version check, the installer removes version/program override variables and never automatically runs audit, collection, apply, or restart. Current source is the `v0.4.1` release candidate, and its immutable artifact version is `0.4.1`.
+The release can be pinned with `--version vX.Y.Z` or `DBTUNE_RELEASE=vX.Y.Z`. Neither `DBTUNE_VERSION` nor another runtime variable overrides the artifact's internal version or profile. During its version check, the installer removes version/program override variables and never automatically runs audit, collection, apply, or restart. Current source is the `v0.4.2` release candidate, and its immutable artifact version is `0.4.2`.
 
-The commands above target the `v0.4.1` release candidate and work after its tag and release assets are published. That artifact includes the `DBTUNE_UI_LANG` selector and the `fleet-v3` report schema.
+The commands above target the `v0.4.2` release candidate and work after its tag and release assets are published. That artifact includes the `DBTUNE_UI_LANG` selector and the `fleet-v3` report schema.
 
 The release workflow creates one SLSA provenance statement with three subjects: `dbtune`, `dbtune.sha256`, and `install.sh`. `dbtune-attestation.jsonl` is a published offline bundle, not a subject. `dbtune.sha256` contains the digest of `dbtune`. The manual preflight verifies the `install.sh` subject; the installer checks the checksum and verifies the `dbtune` subject against the upstream repository, owner, signer workflow, exact tag, and GitHub-hosted runner policy. It then requires exactly one immutable `production` profile marker and rejects `source-test` and `integration-test`; the release gate enforces the same production-only boundary and the absence of `dist/dbtune-integration`.
 
 For a privileged destination, the installer first creates a root-owned `0644` non-executable staging inode in the trusted destination directory. It verifies that inode's checksum, attestation, Bash syntax, and embedded version before changing it to `0755`, directly executes the staged path for its executable version smoke check, and revalidates the inode and destination path. Only then does `mv` atomically publish that same inode; no bytes are copied after their final trust verification.
 
-### v0.4.1 interface contract
+### v0.4.2 interface contract
 
-The v0.4.1 installer and executable default to English. Set `DBTUNE_UI_LANG=sk` explicitly for the Slovak executable interface. Only `en` and `sk` are accepted; an unsupported non-empty value is rejected with exit status 64 before command dispatch or installer trust checks. The selected language never changes repository, provenance, checksum, publication, or runtime safety validation.
+The v0.4.2 installer and executable default to English. Set `DBTUNE_UI_LANG=sk` explicitly for the Slovak executable interface. Only `en` and `sk` are accepted; an unsupported non-empty value is rejected with exit status 64 before command dispatch or installer trust checks. The selected language never changes repository, provenance, checksum, publication, or runtime safety validation.
 
 ## Production runtime boundary
 
