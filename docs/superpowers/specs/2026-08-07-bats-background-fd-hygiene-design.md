@@ -31,10 +31,12 @@ Create `test/support/bats-fd-hygiene.bash` with one function:
 dbtune_test_close_non_std_fds
 ```
 
-The function closes numeric descriptors 3 through 254 in the calling process.
-Descriptors 0, 1, and 2 remain available for normal command input and captured
-test output. Descriptor 255 is excluded because Bash may reserve it for script
-input.
+The function enumerates the calling process's open descriptors through
+`/proc/$BASHPID/fd` on Linux or `lsof` on macOS, then closes the open numeric
+descriptors from 3 through 254. Enumerating first avoids running Bats' DEBUG
+trap hundreds of times for descriptors that were never open. Descriptors 0, 1,
+and 2 remain available for normal command input and captured test output.
+Descriptor 255 is excluded because Bash may reserve it for script input.
 
 Each affected test sources the helper and wraps its background command in a
 subshell:
@@ -54,10 +56,10 @@ concurrency assertions.
 
 ## Error Handling
 
-Closing an already closed descriptor is harmless. The helper runs only inside
-new background subshells, so it cannot close descriptors used by the parent
-test process. Existing `wait`, `kill -0`, lock, output-file, and state
-assertions remain authoritative.
+Descriptor discovery fails explicitly when neither Linux procfs nor `lsof` is
+available. The helper runs only inside new background subshells, so it cannot
+close descriptors used by the parent test process. Existing `wait`, `kill -0`,
+lock, output-file, and state assertions remain authoritative.
 
 ## Testing
 

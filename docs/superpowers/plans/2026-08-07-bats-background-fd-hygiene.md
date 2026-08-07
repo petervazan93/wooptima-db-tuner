@@ -4,14 +4,14 @@
 
 **Goal:** Make the complete Bats suite terminate reliably on GitHub Actions after all tests pass by preventing background test jobs from inheriting formatter-pipe descriptors.
 
-**Architecture:** A test-only support helper closes non-standard descriptors inside each background subshell before the command under test starts. The four existing background launch sites retain their PID, output, lock, and exit-status assertions; production code, `make test`, and CI test selection remain unchanged.
+**Architecture:** A test-only support helper enumerates and closes open non-standard descriptors inside each background subshell before the command under test starts. The four existing background launch sites retain their PID, output, lock, and exit-status assertions; production code, `make test`, and CI test selection remain unchanged.
 
 **Tech Stack:** Bash 4+, Bats 1.10+, GNU/Linux GitHub Actions, macOS local test environment.
 
 ## Global Constraints
 
 - Modify test code only; do not change production libraries, `Makefile`, or workflow structure.
-- Preserve descriptors 0, 1, and 2 and exclude Bash-reserved descriptor 255.
+- Preserve descriptors 0, 1, and 2, exclude Bash-reserved descriptor 255, and avoid probing closed descriptors individually under Bats' DEBUG trap.
 - Apply the helper to all four explicit background launches in the unit suite.
 - Preserve existing `wait`, `kill -0`, lock, output-file, and state assertions.
 - Keep `make test` as one complete `bats test/unit` invocation.
@@ -80,20 +80,30 @@ Expected: FAIL because `test/support/bats-fd-hygiene.bash` does not exist.
 
 - [ ] **Step 3: Implement the minimal test-support helper**
 
-Create `test/support/bats-fd-hygiene.bash`:
+Create `test/support/bats-fd-hygiene.bash`. Follow Bats' documented
+`close_non_std_fds` approach: enumerate the calling shell's open descriptors
+through `/proc/$BASHPID/fd` on Linux or `lsof` on macOS, retain only numeric
+descriptors 3 through 254, and close that finite list. The implementation flow
+is:
 
 ```bash
-dbtune_test_close_non_std_fds() {
-    local fd
-
-    # Bash may reserve descriptor 255 for script input.
-    for ((fd = 3; fd <= 254; fd++)); do
-        eval "exec ${fd}>&-"
-    done
-}
+pid=$BASHPID
+if [[ -d /proc/$pid/fd ]]; then
+    # Record the calling shell's Linux descriptors.
+elif command -v lsof >/dev/null 2>&1; then
+    # Record the calling shell's macOS descriptors.
+else
+    return 69
+fi
+for fd in "${open_fds[@]}"; do
+    eval "exec ${fd}>&-"
+done
 ```
 
-The helper contains function definitions only and has mode `0644`.
+The helper contains function definitions only and has mode `0644`. It must not
+run one close command for every possible descriptor because each command
+invokes Bats' DEBUG trap and can exhaust the concurrency tests' startup window
+on GitHub-hosted runners.
 
 - [ ] **Step 4: Run the helper test and verify GREEN**
 
