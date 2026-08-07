@@ -17,6 +17,7 @@ setup() {
     source "$BATS_TEST_DIRNAME/../../lib/05-i18n.sh"
     source "$BATS_TEST_DIRNAME/../../lib/10-util.sh"
     source "$BATS_TEST_DIRNAME/../../lib/30-collect.sh"
+    source "$BATS_TEST_DIRNAME/../support/bats-fd-hygiene.bash"
     dbtune_sql() {
         printf '%s\n' "$1" >>"$BATS_TEST_TMPDIR/sql.log"
         if [[ $1 == SELECT\ @@GLOBAL.slow_query_log* ]]; then
@@ -616,7 +617,10 @@ source_tick_dispatch() {
         done
     }
 
-    cmd_tick >"$BATS_TEST_TMPDIR/tick.out" &
+    (
+        dbtune_test_close_non_std_fds
+        cmd_tick
+    ) >"$BATS_TEST_TMPDIR/tick.out" &
     tick_pid=$!
     for _ in {1..200}; do
         [[ -e $BATS_TEST_TMPDIR/tick-entered ]] && break
@@ -624,7 +628,10 @@ source_tick_dispatch() {
     done
     [ -e "$BATS_TEST_TMPDIR/tick-entered" ]
 
-    cmd_collect stop >"$BATS_TEST_TMPDIR/stop.out" &
+    (
+        dbtune_test_close_non_std_fds
+        cmd_collect stop
+    ) >"$BATS_TEST_TMPDIR/stop.out" &
     stop_pid=$!
     for _ in {1..200}; do
         [[ -e $BATS_TEST_TMPDIR/systemctl.log ]] && grep -q 'disable --now dbtune-collect.timer' "$BATS_TEST_TMPDIR/systemctl.log" && break

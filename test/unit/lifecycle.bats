@@ -55,6 +55,7 @@ setup() {
     source "$BATS_TEST_DIRNAME/../../lib/20-audit.sh"
     source "$BATS_TEST_DIRNAME/../../lib/60-lifecycle.sh"
     source "$BATS_TEST_DIRNAME/../../lib/50-report.sh"
+    source "$BATS_TEST_DIRNAME/../support/bats-fd-hygiene.bash"
     dbtune_i18n_set en
     source "$BATS_TEST_DIRNAME/../../lib/90-main.sh"
     export DBTUNE_CONFIG_UID
@@ -2024,7 +2025,10 @@ STUB
         done
     }
 
-    dbtune_dispatch apply >"$BATS_TEST_TMPDIR/apply.out" 2>&1 &
+    (
+        dbtune_test_close_non_std_fds
+        dbtune_dispatch apply
+    ) >"$BATS_TEST_TMPDIR/apply.out" 2>&1 &
     apply_pid=$!
     for _ in {1..200}; do
         [[ -e $BATS_TEST_TMPDIR/apply-paused ]] && break
@@ -2032,7 +2036,10 @@ STUB
     done
     [ -e "$BATS_TEST_TMPDIR/apply-paused" ]
 
-    dbtune_dispatch propose >"$BATS_TEST_TMPDIR/propose.out" 2>&1 &
+    (
+        dbtune_test_close_non_std_fds
+        dbtune_dispatch propose
+    ) >"$BATS_TEST_TMPDIR/propose.out" 2>&1 &
     propose_pid=$!
     sleep 0.1
     kill -0 "$propose_pid"

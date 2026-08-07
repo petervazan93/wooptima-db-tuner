@@ -112,6 +112,26 @@ fast_test_filter() {
     cmp "$expected" "$STUB_FAST_LOG"
 }
 
+@test "background FD helper closes inherited descriptors and preserves standard output" {
+    local inherited_fd helper_status=0
+    local output_file="$BATS_TEST_TMPDIR/fd-helper.out"
+
+    source "$PROJECT_ROOT/test/support/bats-fd-hygiene.bash"
+    exec {inherited_fd}>"$BATS_TEST_TMPDIR/inherited-fd"
+    (
+        dbtune_test_close_non_std_fds
+        if printf 'leak\n' 2>/dev/null >&"$inherited_fd"; then
+            exit 1
+        fi
+        printf 'standard-output\n'
+    ) >"$output_file" || helper_status=$?
+    exec {inherited_fd}>&-
+
+    [ "$helper_status" -eq 0 ]
+    [ "$(cat "$output_file")" = standard-output ]
+    [ ! -s "$BATS_TEST_TMPDIR/inherited-fd" ]
+}
+
 @test "state initialization rejects a symlinked state directory" {
     export DBTUNE_LOG_LEVEL=error
     mkdir "$BATS_TEST_TMPDIR/real-state"
