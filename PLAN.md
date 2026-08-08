@@ -49,7 +49,7 @@ States: `idle -> audited -> collecting -> collected -> analyzed -> proposed -> a
 - English backup phrase: `I CONFIRM A RESTORABLE BACKUP`. Slovak backup phrase: `POTVRDZUJEM OBNOVITELNU ZALOHU`.
 - `analysis.tsv` uses the stable eight-column `reason_id` schema. `fleet-v3` JSON contains stable reason/warning IDs, selected language, and localized display text while retaining stable machine keys and enums.
 - v0.4.0 never translates or rehashes an old `reason_sk` analysis. Report, propose, and apply fail closed and require a new v0.4.0 audit and measurement cycle; apply history and rollback recovery remain available.
-- Current source is the `v0.4.2` release candidate, and the immutable source artifact version is `0.4.2`; publishing the tag and release assets remains a separate release action.
+- Current published release is `v0.4.2`, and the immutable source artifact version is `0.4.2`; its tag and release assets are published.
 
 ## AUDIT phase (read-only)
 
