@@ -369,6 +369,13 @@ fast_test_filter() {
     [ "$status" -eq 0 ]
 }
 
+@test "release workflow verifies production checksum from artifact directory" {
+    local workflow="$PROJECT_ROOT/.github/workflows/release.yml"
+
+    [ "$(grep -Fc '(cd dist && sha256sum -c dbtune.sha256)' "$workflow")" -eq 2 ]
+    ! grep -Fq 'sha256sum -c dist/dbtune.sha256' "$workflow"
+}
+
 @test "build profile validation preserves existing production artifacts atomically" {
     local fixture production_hash checksum_hash invocation
 
