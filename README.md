@@ -11,7 +11,7 @@
   </p>
   <p>
     <a href="https://github.com/petervazan93/wooptima-db-tuner/actions/workflows/ci.yml"><img alt="CI workflow status" src="https://github.com/petervazan93/wooptima-db-tuner/actions/workflows/ci.yml/badge.svg?branch=main"></a>
-    <a href="https://github.com/petervazan93/wooptima-db-tuner/releases/tag/v0.4.1"><img alt="Release: v0.4.1" src="https://img.shields.io/badge/release-v0.4.1-0969da"></a>
+    <a href="https://github.com/petervazan93/wooptima-db-tuner/releases/tag/v0.4.2"><img alt="Release: v0.4.2" src="https://img.shields.io/badge/release-v0.4.2-0969da"></a>
     <img alt="Runtime: Bash 4 or newer" src="https://img.shields.io/badge/runtime-Bash%204%2B-4EAA25">
     <img alt="Supported MariaDB families: 10.6, 10.11, and 11.x" src="https://img.shields.io/badge/MariaDB-10.6%20%7C%2010.11%20%7C%2011.x-003545">
   </p>
@@ -31,7 +31,7 @@ Wooptima DB Tuner is a single-artifact Bash tool that audits a RunCloud host, me
 - **Keep mutation operator-controlled.** Audit and proposal generation do not apply configuration. Apply, restart, verification, and rollback are separate explicit steps.
 
 > [!IMPORTANT]
-> The latest published release is `v0.4.1`, with immutable artifact version `0.4.1`. The executable defaults to English, selects Slovak explicitly with `DBTUNE_UI_LANG=sk`, and uses the `fleet-v3` report contract.
+> The latest published release is `v0.4.2`, with immutable artifact version `0.4.2`. The executable defaults to English, selects Slovak explicitly with `DBTUNE_UI_LANG=sk`, and uses the `fleet-v3` report contract.
 
 ## WooCommerce tuning scope
 
@@ -186,13 +186,13 @@ The default build and release workflow produce only the production profile. Inte
 Prerequisites: Linux, Bash 4+, `curl`, `gh`, and permission to write the installation destination.
 
 ```bash
-curl -fsSL https://github.com/petervazan93/wooptima-db-tuner/releases/download/v0.4.1/install.sh | sh -s -- --version v0.4.1
+curl -fsSL https://github.com/petervazan93/wooptima-db-tuner/releases/download/v0.4.2/install.sh | sh -s -- --version v0.4.2
 ```
 
 > [!WARNING]
 > This pipeline trusts the remote `install.sh` before it verifies the downloaded `dbtune` artifact. For the verify-before-run procedure that authenticates and lets you inspect `install.sh` first, follow [Security: Installation](SECURITY.md#installation).
 
-This command installs the published `v0.4.1` release. For a privileged destination, the installer places the artifact in a root-owned mode `0644` non-executable staging inode, then verifies its SHA-256 checksum, GitHub attestation, fixed upstream repository and owner, signer workflow, exact release source ref, Bash syntax, embedded production profile, and embedded version. It rejects source-test and integration-test profiles. It changes that same inode to mode `0755`, directly executes the staged path for its executable version smoke check, and atomically publishes the same inode only after all checks pass. It does not run an audit or change MariaDB.
+This command installs the published `v0.4.2` release. For a privileged destination, the installer places the artifact in a root-owned mode `0644` non-executable staging inode, then verifies its SHA-256 checksum, GitHub attestation, fixed upstream repository and owner, signer workflow, exact release source ref, Bash syntax, embedded production profile, and embedded version. It rejects source-test and integration-test profiles. It changes that same inode to mode `0755`, directly executes the staged path for its executable version smoke check, and atomically publishes the same inode only after all checks pass. It does not run an audit or change MariaDB.
 
 ## CLI
 
@@ -211,7 +211,7 @@ dbtune status | version
 dbtune _tick
 ```
 
-The v0.4.1 executable and installer default to English. Slovak is selected explicitly with `DBTUNE_UI_LANG=sk`; only `en` and `sk` are accepted. Commands, options, paths, keys, enums, booleans, schema versions, and exit statuses are never localized.
+The v0.4.2 executable and installer default to English. Slovak is selected explicitly with `DBTUNE_UI_LANG=sk`; only `en` and `sk` are accepted. Commands, options, paths, keys, enums, booleans, schema versions, and exit statuses are never localized.
 
 ## Documentation
 

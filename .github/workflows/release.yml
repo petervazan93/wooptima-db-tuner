@@ -45,7 +45,7 @@ jobs:
           test "$(grep -c '^readonly DBTUNE_ARTIFACT_PROFILE=production$' dist/dbtune)" -eq 1
           ! grep -q 'DBTUNE_ARTIFACT_PROFILE=source-test\|DBTUNE_ARTIFACT_PROFILE=integration-test' dist/dbtune
           test -x dist/dbtune
-          sha256sum -c dist/dbtune.sha256
+          (cd dist && sha256sum -c dbtune.sha256)
           test ! -e dist/dbtune-integration
           marker=$(mktemp)
           rm -f "$marker"
@@ -61,7 +61,7 @@ jobs:
           test "$(grep -c '^readonly DBTUNE_ARTIFACT_PROFILE=production$' dist/dbtune)" -eq 1
           ! grep -q 'DBTUNE_ARTIFACT_PROFILE=source-test\|DBTUNE_ARTIFACT_PROFILE=integration-test' dist/dbtune
           test -x dist/dbtune
-          sha256sum -c dist/dbtune.sha256
+          (cd dist && sha256sum -c dbtune.sha256)
           test ! -e dist/dbtune-integration
       - name: Attest release artifacts
         id: attest

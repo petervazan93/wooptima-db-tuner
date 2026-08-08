@@ -16,8 +16,8 @@ if [[ $DBTUNE_ARTIFACT_PROFILE == production ]] && (return 0 2>/dev/null); then
 fi
 
 # shellcheck disable=SC2034 # Consumed by later modules in the assembled artifact.
-readonly DBTUNE_ARTIFACT_VERSION=0.4.1
-if [[ $DBTUNE_ARTIFACT_VERSION != 0.4.1 ]]; then
+readonly DBTUNE_ARTIFACT_VERSION=0.4.2
+if [[ $DBTUNE_ARTIFACT_VERSION != 0.4.2 ]]; then
     if [[ ${BASH_SOURCE[0]} != "$0" ]]; then return 65; else exit 65; fi
 fi
 DBTUNE_STATE_DIR="${DBTUNE_STATE_DIR:-/var/lib/dbtune}"

@@ -202,7 +202,7 @@ dbtune_runtime_prepare_environment() {
     declaration=$(builtin declare -p DBTUNE_ARTIFACT_PROFILE 2>/dev/null) || return 65
     [[ $declaration =~ ^declare\ -[^[:space:]]*r && $DBTUNE_ARTIFACT_PROFILE == production ]] || return 65
     declaration=$(builtin declare -p DBTUNE_ARTIFACT_VERSION 2>/dev/null) || return 65
-    [[ $declaration =~ ^declare\ -[^[:space:]]*r && $DBTUNE_ARTIFACT_VERSION == 0.4.1 ]] || return 65
+    [[ $declaration =~ ^declare\ -[^[:space:]]*r && $DBTUNE_ARTIFACT_VERSION == 0.4.2 ]] || return 65
     for name in PATH LC_ALL LANG; do
         declaration=$(builtin declare -p "$name" 2>/dev/null || true)
         [[ ! $declaration =~ ^declare\ -[^[:space:]]*r ]] || return 65
